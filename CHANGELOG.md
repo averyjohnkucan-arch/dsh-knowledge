@@ -1,5 +1,9 @@
-# 0.5.4 — compact passages and explicit vectorization
+# 0.5.4 — accelerated Qwen embeddings and compact passages
 
+- Optional pinned FP16 Qwen profile shares validated vectors across ONNX Runtime CPU/CUDA and OpenVINO Intel NPU/iGPU. Private runtimes, model hashes, device qualification and CPU fallback ship inside the plugin.
+- Bounded per-device work queues prevent slow-device backlogs. CUDA coalesces similar-length texts, uses two workers when VRAM permits, and yields before foreground inference or within ten seconds of detected competing work. Retrieval never uses GPUs.
+- Semantic chunking packs nearby paragraph candidates within headings, streams weighted merging, and reuses candidate vectors instead of embedding final chunks a second time. Unchanged source sync does no new embedding work.
+- Selected downloaded local embedding models warm on startup; individual backfill failures retain their prior generation and do not stop healthy documents.
 - Smart chunking packs adjacent short paragraphs within a heading, preserving paragraph and code boundaries instead of embedding every list item separately.
 - Dedicated Re-vectorize all action recomputes vectors without parsing, OCR, or re-chunking; durable pass IDs checkpoint completed documents and progress is labeled Vectorization.
 - Embedding coverage displays exact chunk counts instead of treating one vector as a completed base.
@@ -15,6 +19,9 @@
 # Changelog
 
 ## Unreleased
+
+- Retry file processing, imports and individual rebuilds up to three total attempts before reporting failure; retain final diagnostics and manual rebuild, stop immediately on cancellation, and avoid duplicate uncertain remote submissions.
+- Rebuild incomplete files on sync even when their stored bytes are unchanged.
 
 ## 0.5.2 — 2026-10-10 — Unicode safety, settings recovery and dependency security
 

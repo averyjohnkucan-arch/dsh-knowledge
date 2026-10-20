@@ -1,4 +1,4 @@
-import { embeddingAcceleration, OPENVINO_EMBEDDING_MODEL } from './embedding-acceleration.js'
+import { embeddingAcceleration, embeddingFp16Acceleration, FP16_EMBEDDING_MODEL, OPENVINO_EMBEDDING_MODEL } from './embedding-acceleration.js'
 /** Local embedding/reranker registry, downloads, health, and readiness records. */
 
 import { createHash } from 'node:crypto'
@@ -89,6 +89,7 @@ let registryWriteChain: Promise<void> = Promise.resolve()
 
 export const LOCAL_MODELS: readonly LocalModelDescriptor[] = [
   { id: 'onnx-community/Qwen3-Embedding-0.6B-ONNX', name: 'Qwen3 Embedding 0.6B', kind: 'embedding', subtitle: '1024 dimensions · multilingual · last-token pooling', dimensions: 1024, maxTokens: 32768 },
+  { id: FP16_EMBEDDING_MODEL, name: 'Qwen3 Embedding 0.6B · Unified FP16 acceleration', kind: 'embedding', subtitle: '1024 dimensions · CPU/NPU/Intel iGPU · optional NVIDIA CUDA batching', dimensions: 1024, maxTokens: 32768 },
   { id: OPENVINO_EMBEDDING_MODEL, name: 'Qwen3 Embedding 0.6B · OpenVINO CPU/NPU', kind: 'embedding', subtitle: '1024 dimensions · separate vector space · CPU/NPU and qualified idle GPUs', dimensions:1024,maxTokens:32768 },
   { id: 'Xenova/bge-small-zh-v1.5', name: 'BGE Small zh v1.5', kind: 'embedding', subtitle: '512 dimensions · Chinese retrieval · CLS pooling', dimensions: 512, maxTokens: 512 },
   { id: 'Xenova/bge-small-en-v1.5', name: 'BGE Small en v1.5', kind: 'embedding', subtitle: '384 dimensions · English retrieval · CLS pooling', dimensions: 384, maxTokens: 512 },
@@ -236,7 +237,7 @@ async function writeReadiness(descriptor: LocalModelDescriptor, latencyMs: numbe
 }
 
 async function summarize(descriptor: LocalModelDescriptor): Promise<LocalModelSummary> {
-  if (descriptor.id === OPENVINO_EMBEDDING_MODEL) { const s=await embeddingAcceleration.status();return {...descriptor,status:s.status==='installing'?'downloading':s.status==='not_installed'?'not_downloaded':s.status,health:s.status==='ready'?'healthy':s.status==='error'?'unhealthy':'unchecked',progress:s.status==='ready'?100:0,message:s.message} }
+  if (descriptor.id === OPENVINO_EMBEDDING_MODEL || descriptor.id === FP16_EMBEDDING_MODEL) { const accelerator = descriptor.id === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration; const s=await accelerator.status();return {...descriptor,status:s.status==='installing'?'downloading':s.status==='not_installed'?'not_downloaded':s.status,health:s.status==='ready'?'healthy':s.status==='error'?'unhealthy':'unchecked',progress:s.status==='ready'?100:0,message:s.message} }
   if (descriptor.kind === 'embedding') {
     const live = getLocalModelStatus(descriptor.id)
     if (live.status === 'downloading' || live.status === 'error') {
@@ -292,7 +293,7 @@ export async function selfTestLocalModel(id: string): Promise<LocalModelSummary>
 
 export async function downloadLocalModel(id: string): Promise<LocalModelSummary> {
   const descriptor = await findModel(id)
-  if (id === OPENVINO_EMBEDDING_MODEL) {await embeddingAcceleration.prepare();return summarize(descriptor)}
+  if (id === OPENVINO_EMBEDDING_MODEL || id === FP16_EMBEDDING_MODEL) { const accelerator = id === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration;await accelerator.prepare();return summarize(descriptor)}
   if (descriptor.kind === 'embedding') {
     void loadLocalModel(id, 'feature-extraction').catch((error: unknown) => markLocalModelError(descriptor.id, error instanceof Error ? error.message : String(error)))
     return summarize(descriptor)

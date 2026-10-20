@@ -73,6 +73,19 @@ describe('splitSemanticSegments', () => {
   })
 })
 
+describe('semantic candidate packing', () => {
+  it('groups short neighboring paragraphs without crossing headings or fences', () => {
+    const text = '# First\nShort first paragraph.\n\nRelated second paragraph.\n\n```js\nrun()\n```\n\n# Second\nA different section.'
+    const candidates = splitSemanticSegments(text, { candidateTokens: 128 })
+    expect(candidates).toHaveLength(3)
+    expect(candidates[0].text).toContain('Short first paragraph.\n\nRelated second paragraph.')
+    expect(candidates[0].heading).toBe('First')
+    expect(candidates[1].text).toContain('```js')
+    expect(candidates[2].heading).toBe('Second')
+    expect(splitSemanticSegments(text, { candidateTokens: 0 })).toHaveLength(4)
+  })
+})
+
 describe('mergeSemanticSegments', () => {
   it('merges similar adjacent segments up to the size bound', () => {
     const segments = [
@@ -87,7 +100,7 @@ describe('mergeSemanticSegments', () => {
     const vectors = segments.map(() => [1, 0, 0])
     const merged = mergeSemanticSegments(segments, vectors, 60)
     expect(merged.length).toBe(3)
-    expect(merged[0].text.length).toBe(201)
+    expect(merged[0].text.length).toBe(202)
     // Merged vector is the length-weighted mean, still normalized.
     expect(merged[0].embedding?.[0]).toBeCloseTo(1, 5)
   })
@@ -106,7 +119,7 @@ describe('mergeSemanticSegments', () => {
     const merged = mergeSemanticSegments(segments, vectors, 1000, 0.5)
     expect(merged.length).toBe(2)
     expect(merged[0].text).toBe('alpha')
-    expect(merged[1].text).toBe('beta\ngamma')
+    expect(merged[1].text).toBe('beta\n\ngamma')
   })
 
   it('keeps the first segment\'s heading on a merged chunk', () => {
@@ -116,8 +129,30 @@ describe('mergeSemanticSegments', () => {
     ]
     const merged = mergeSemanticSegments(segments, [[1, 0], [1, 0]], 1000)
     expect(merged.length).toBe(1)
-    expect(merged[0].text).toBe('one\ntwo')
+    expect(merged[0].text).toBe('one\n\ntwo')
     expect(merged[0].heading).toBe('Top')
+  })
+
+  it('never merges across headings or fenced code, even when vectors are identical', () => {
+    const segments = [{ text: 'one', heading: 'First' }, { text: 'two', heading: 'Second' },
+      { text: '```js\nrun()\n```', heading: 'Second' }, { text: 'three', heading: 'Second' }]
+    expect(mergeSemanticSegments(segments, segments.map(() => [1, 0]), 1000)).toHaveLength(4)
+  })
+
+  it('pools three or more segments using the exact length-weighted sum', () => {
+    const segments = [{ text: 'aa' }, { text: 'bbbb' }, { text: 'cccccc' }]
+    const vectors = [[1, 0], [0, 1], [1, 0]]
+    const merged = mergeSemanticSegments(segments, vectors, 1000, 0)
+    const norm = Math.hypot(8, 4)
+    expect(merged).toHaveLength(1)
+    expect(merged[0].embedding![0]).toBeCloseTo(8 / norm, 10)
+    expect(merged[0].embedding![1]).toBeCloseTo(4 / norm, 10)
+  })
+
+  it('does not publish an incomplete pooled vector when one segment has no vector', () => {
+    const merged = mergeSemanticSegments([{ text: 'one' }, { text: 'two' }], [[1, 0], undefined], 1000)
+    expect(merged).toHaveLength(1)
+    expect(merged[0].embedding).toBeUndefined()
   })
 
   it('handles missing vectors by merging on size only', () => {

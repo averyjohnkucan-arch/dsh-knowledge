@@ -70,6 +70,7 @@ export interface BaseConfig {
   readonly structuredChunking?: boolean
   readonly semanticChunk?: boolean
   readonly semanticChunkThreshold?: number
+  readonly semanticChunkCandidateTokens?: number
   readonly chunkTokenLimit?: number
   readonly conflictStrategy?: 'keep' | 'replace' | 'rename'
   readonly urlRefreshHours?: number
@@ -315,6 +316,7 @@ export interface KnowledgeConfig {
   readonly semanticChunk: boolean
   /** Cosine threshold below which adjacent segments start a new chunk (0–1). */
   readonly semanticChunkThreshold: number
+  readonly semanticChunkCandidateTokens?: number
   /** Token budget per chunk (0 = off); oversized chunks split at preferred boundaries. */
   readonly chunkTokenLimit: number
   /** Same-name conflict strategy for file imports: keep / replace / rename (Cherry's default). */

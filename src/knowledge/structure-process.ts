@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline'
 export class StructureProcess {
   private child?: ChildProcessWithoutNullStreams
   private pending?: { id: number; resolve(result: Record<string, unknown>): void; reject(error: Error): void }
+  private get label(): string { return this.prefix === 'DSH_EMBED_RESULT ' ? 'Embedding' : 'PP-StructureV3' }
   private sequence = 0
   private log = ''
   constructor(private command: string, private args: string[], private env: NodeJS.ProcessEnv, private prefix = 'DSH_STRUCTURE_RESULT ') {}
@@ -29,11 +30,11 @@ export class StructureProcess {
         if (!pending || result.id !== pending.id) return
         this.pending = undefined
         if (result.ok === true) pending.resolve(result)
-        else pending.reject(new Error(`PP-StructureV3 inference failed: ${String(result.error ?? 'unknown error').slice(0, 1000)}`))
-      } catch { this.stop(new Error('Invalid PP-StructureV3 worker response')) }
+        else pending.reject(new Error(`${this.label} inference failed: ${String(result.error ?? 'unknown error').slice(0, 1000)}`))
+      } catch { this.stop(new Error(`Invalid ${this.label} worker response`)) }
     })
     child.once('error', error => { if (this.child === child) this.stop(error) })
-    child.once('close', () => { lines.close(); if (this.child === child) this.stop(new Error(`PP-StructureV3 worker exited: ${this.log}`)) })
+    child.once('close', () => { lines.close(); if (this.child === child) this.stop(new Error(`${this.label} worker exited: ${this.log}`)) })
     return child
   }
   async run(input: string, output: string, charts: boolean, timeout: number, signal?: AbortSignal): Promise<void> {
@@ -41,11 +42,11 @@ export class StructureProcess {
   }
   request(payload: Record<string, unknown>, timeout: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
     signal?.throwIfAborted()
-    if (this.pending) return Promise.reject(new Error('PP-StructureV3 worker is busy'))
+    if (this.pending) return Promise.reject(new Error(`${this.label} worker is busy`))
     return new Promise((resolve, reject) => {
       const id = ++this.sequence
-      const timer = setTimeout(() => this.stop(new Error('PP-StructureV3 timed out')), timeout)
-      const abort = () => this.stop(new Error('PP-StructureV3 request canceled'))
+      const timer = setTimeout(() => this.stop(new Error(`${this.label} timed out`)), timeout)
+      const abort = () => this.stop(new Error(`${this.label} request canceled`))
       const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
       this.pending = { id, resolve: result => { cleanup(); resolve(result) }, reject: error => { cleanup(); reject(error) } }
       signal?.addEventListener('abort', abort, { once: true })

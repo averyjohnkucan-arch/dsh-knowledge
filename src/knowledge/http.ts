@@ -227,8 +227,8 @@ async function route(
   }
 
   if (segments[0] === 'embedding-acceleration') {
-    if (method === 'GET') return service.embeddingAccelerationStatus()
-    if (method === 'POST') return service.prepareEmbeddingAcceleration()
+    if (method === 'GET') return service.embeddingAccelerationStatus(query.get('model') ?? undefined)
+    if (method === 'POST') return service.prepareEmbeddingAcceleration(query.get('model') ?? undefined)
     return undefined
   }
 

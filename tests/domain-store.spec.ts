@@ -1217,8 +1217,9 @@ describe('local-path import source tracking', () => {
         const previousRaw = doc.rawFilePath!
         await service.setBaseSourcePath(base.id, doc.id, replacement)
 
-        const putChunks = vi.spyOn(store, 'commitDocumentGeneration').mockRejectedValueOnce(new Error('simulated chunk commit failure'))
+        const putChunks = vi.spyOn(store, 'commitDocumentGeneration').mockRejectedValue(new Error('simulated chunk commit failure'))
         await expect(service.reindexDocument(doc.id)).rejects.toThrow('simulated chunk commit failure')
+        expect(putChunks).toHaveBeenCalledTimes(3)
         putChunks.mockRestore()
 
         const failed = store.getDocument(doc.id)!

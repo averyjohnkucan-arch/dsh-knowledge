@@ -28,6 +28,26 @@ existing documents require explicit reprocessing after a parser change.
 See the [English local pipeline guide](docs/local-pipeline.md) for settings,
 progress counters, ETA behavior, and current validation limits.
 
+## Accelerated Qwen embeddings
+
+Install this fork by pasting `https://github.com/averyjohnkucan-arch/dsh-knowledge`
+into DSH's plugin installer. The default GitHub branch includes compiled plugin
+assets; no harness source changes or other engine plugins are required.
+
+Settings → Local Models includes a **Qwen3 Embedding 0.6B FP16 accelerated**
+profile. Download and validate it, then select it in the base's embedding model
+list. The plugin owns its private Python runtimes and verified model downloads.
+CPU is the fallback; supported Intel NPU/iGPU and an available NVIDIA GPU can
+help with indexing. Query embedding stays on CPU/NPU. NVIDIA workers wait while
+another inference engine reserves the GPU and yield through the existing DSH
+LLM hook before foreground inference. Unsupported hardware falls back to CPU.
+
+Semantic chunking can pack and merge neighboring paragraphs within headings,
+reusing their vectors. **Rechunk saved parsing result** applies new chunk settings
+without OCR. **Re-vectorize all** replaces vectors while preserving chunk text
+and IDs; both have progress. Export changes never mix incompatible vectors.
+See [measurements and limitations](docs/embedding-performance.md).
+
 ## Why dsh-knowledge
 
 dsh-knowledge brings document ingestion, parsing, chunking, retrieval, evidence composition, and anchored follow-up reading into DSH. It works without vector configuration and can also run with fully local models, without a separate knowledge-base service.
@@ -85,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.2.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.4.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -629,3 +649,9 @@ processor-level concurrency limits, and combines base timestamp writes across a
 scan. Two source roots can reconcile concurrently, without overlapping scans of
 the same root. Metadata still uses the DSH storage API; this is not a migration
 of document metadata to SQLite, and a full 50,000-file speedup has not been measured.
+
+### Document failure retries
+
+File parsing, imports and individual document rebuilds use three total attempts, with one- and two-second waits before retries. Parsing stays pending while it retries; only an exhausted run is marked failed, retaining the final error and uploaded source for manual rebuild. Existing embedding requests also use three attempts. Nested parser/import retries share exhaustion state, so a parser is not called nine times. Successfully processed siblings are not replayed when one file fails. A fresh manual rebuild starts a new run.
+
+Cancellation stops immediately. Uncertain remote submissions are not resubmitted automatically; their saved jobs remain available for reconciliation. Crash-recovery attempts remain bounded across restarts. Sync also rebuilds incomplete or errored files even when their stored bytes have not changed.

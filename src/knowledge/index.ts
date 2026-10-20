@@ -1,5 +1,6 @@
+import { canMigrateQwenVectors } from './qwen-embedding-variants.js'
 import { orderedEmbeddingLanes } from './embedding-tuning.js'
-import { embeddingAcceleration } from './embedding-acceleration.js'
+import { embeddingAcceleration, embeddingFp16Acceleration, FP16_EMBEDDING_MODEL } from './embedding-acceleration.js'
 /**
  * The host knowledge service (`ctx.knowledge`): durable bases/documents/chunks
  * over `ctx.storageDomain`, heading-aware chunking with context injection,
@@ -17,7 +18,7 @@ import { createHash } from 'node:crypto'
 import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { isIP } from 'node:net'
-import { chunkText, mergeSemanticSegments, refineChunksByTokenLimit, splitSemanticSegments } from './chunk.js'
+import { chunkText, createSemanticMerger, refineChunksByTokenLimit, splitSemanticSegments } from './chunk.js'
 import type { ChunkPiece } from './chunk.js'
 import { chunkParsedDocument } from './structured-chunk.js'
 import { ArtifactRepository } from './artifacts.js'
@@ -29,6 +30,7 @@ import { composeDocumentEvidence } from './evidence.js'
 import { ExternalFolders, externalFile, readableRoot, pickFolder } from './external-folders.js'
 import { ProcessingQueue } from './processing-queue.js'
 import { processingBudget } from './processor-transport.js'
+import { retryDocument, markAttemptsExhausted, attemptsExhausted } from './document-retry.js'
 import { composeContextWindow, estimateContextTokens, serializeContextWindow } from './context.js'
 import { snapSliceEnd, snapSliceStart } from './text-safety.js'
 import { Config, resolveConfig, resolveConfigFor } from './config.js'
@@ -37,6 +39,7 @@ import {
   DEFAULT_LOCAL_MODEL,
   disposeLocalModelWorker,
   embedTexts,
+  loadLocalModel,
   expandHomePath,
   getLocalModelStatus,
   hasActiveLocalModelDownload,
@@ -230,10 +233,6 @@ const FAILURE_LINGER_TTL_MS = 10 * 60_000
 /** Extra deadline granted to a COLD local rerank child so its model load is not
  *  charged to the inference budget of the query that triggered it (issue #18). */
 const LOCAL_RERANK_LOAD_ALLOWANCE_MS = 120_000
-/** Embedding batch retry policy (Cherry's job retry contract). */
-const EMBED_MAX_ATTEMPTS = 3
-const EMBED_RETRY_BASE_DELAY_MS = 1000
-const EMBED_RETRY_MAX_DELAY_MS = 30_000
 
 interface BackgroundJob {
   readonly baseId: string
@@ -356,7 +355,7 @@ export class KnowledgeService extends Service {
     this.ctx.effect(() => () => { void disposeLocalModelWorker() }, 'knowledge: dispose local model worker')
     this.ctx.effect(() => () => { void disposeLocalRerankProcess() }, 'knowledge: dispose local rerank process')
     this.ctx.effect(() => () => { void disposeOcrWorker() }, 'knowledge: dispose OCR worker')
-    this.ctx.effect(() => () => embeddingAcceleration.dispose(), 'knowledge: dispose embedding accelerators')
+    this.ctx.effect(() => () => { embeddingAcceleration.dispose(); embeddingFp16Acceleration.dispose() }, 'knowledge: dispose embedding accelerators')
     this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
     this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
     if (store === undefined) { this.resolveStore(); return }
@@ -388,7 +387,15 @@ export class KnowledgeService extends Service {
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     setLocalEmbeddingTuning(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
+    embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    // Warm only configured, already-downloaded embedding models. Keep startup
+    // responsive and never download or load the whole catalog implicitly.
+    const selectedEmbeddings=new Set([resolved,...store.listBases().map(base=>resolveConfigFor(this.baseConfig,store.getConfigOverrides(),base.config))]
+      .filter(config=>config.embeddingProvider==='local').map(config=>config.embeddingModel||DEFAULT_LOCAL_MODEL))
+    for(const model of selectedEmbeddings) void isLocalModelDownloaded(model).then(ready=>{
+      if(ready&&!this.shuttingDown)return loadLocalModel(model)
+    }).catch(error=>this.ctx.logger.warn(`knowledge: embedding warmup failed: ${error instanceof Error?error.message:String(error)}`))
     // One-time compatibility path for caches created before readiness markers:
     // validate only rerankers that are actually configured, in the background.
     const configuredLocalRerankers = new Set<string>()
@@ -436,7 +443,7 @@ export class KnowledgeService extends Service {
     void resume.then(async () => {
       for (const base of store.listBases()) {
         const config = this.getConfigFor(base.id), key = embeddingKey(config)
-        const legacyFormat = (key?.endsWith(':canonical-single-v1') === true || key?.endsWith(':full-context-v1') === true)
+        const legacyFormat = (key?.endsWith(':canonical-single-v1') === true || key?.endsWith(':full-context-v1') === true || key?.endsWith(':canonical-fp16-v1') === true)
           && store.chunkStats([base.id]).embeddingModelCounts.some(entry => entry.model !== key)
         if (legacyFormat && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
         if ((base.embeddingBackfillPending || legacyFormat) && config.resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
@@ -656,6 +663,7 @@ export class KnowledgeService extends Service {
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     setLocalEmbeddingTuning(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
+    embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     return resolved
   }
@@ -860,7 +868,7 @@ export class KnowledgeService extends Service {
         || newConfig.embeddingModel !== oldConfig.embeddingModel
       if (modelChanged && store.listDocuments(id, { includeRawText: false }).length > 0) {
         const hadModel = oldConfig.embeddingProvider !== 'none' && oldConfig.embeddingModel.trim() !== ''
-        if (hadModel) {
+        if (hadModel && !canMigrateQwenVectors(oldConfig, newConfig)) {
           throw new Error('Changing the embedding model invalidates existing vectors. Use Rebuild knowledge base to generate vectors with the new model')
         }
         // BM25-only → enable-in-place: commit the model, then backfill vectors
@@ -911,7 +919,14 @@ export class KnowledgeService extends Service {
     try {
       const store = this.requireStore(), base = store.getBase(baseId)
       if (base) await store.putBase({ ...base, embeddingBackfillPending: true, ...(forceRevision ? { embeddingBackfillRevision: forceRevision } : {}) })
-      await this.runEmbeddingBackfill(baseId)
+      // A precision/export change can arrive during an existing backfill.
+      // Restart its inventory under the new key; old vectors remain excluded.
+      while (!this.shuttingDown && store.getBase(baseId)) {
+        const key = embeddingKey(this.getConfigFor(baseId))
+        try { await this.runEmbeddingBackfill(baseId) }
+        catch (error) { if (key === embeddingKey(this.getConfigFor(baseId))) throw error }
+        if (key === embeddingKey(this.getConfigFor(baseId))) break
+      }
     } finally { this.embeddingBackfills.delete(baseId) }
   }
 
@@ -923,6 +938,7 @@ export class KnowledgeService extends Service {
       await new Promise<void>(resolve => setTimeout(resolve, 100))
     }
     if (this.shuttingDown || !store.getBase(baseId)) return
+    const passKey = embeddingKey(this.getConfigFor(baseId))
     const meterId = `embedding:${baseId}`
     const forceRevision = store.getBase(baseId)?.embeddingBackfillRevision
     const missing = forceRevision ? undefined : store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
@@ -935,6 +951,7 @@ export class KnowledgeService extends Service {
     try {
       await orderedEmbeddingLanes(documents, this.getConfigFor(baseId).embeddingProvider === 'local' ? 2 : 1, async doc => {
         if (this.shuttingDown || !store.getBase(baseId)) throw new Error('Embedding backfill stopped')
+        if (passKey !== embeddingKey(this.getConfigFor(baseId))) throw new Error('Embedding model changed; restarting vector inventory')
         await new Promise<void>(resolve => setImmediate(resolve))
         this.processingMeter.begin(meterId)
         try {
@@ -942,14 +959,20 @@ export class KnowledgeService extends Service {
           this.processingMeter.settle(meterId, 'processed')
         } catch (error) {
           this.processingMeter.settle(meterId, 'failed')
-          this.ctx.logger.warn(`knowledge: embedding backfill paused after a document failure: ${error instanceof Error ? error.message : String(error)}`)
-          throw error
+          if (this.shuttingDown || passKey !== embeddingKey(this.getConfigFor(baseId))) throw error
+          const message = error instanceof Error ? error.message : String(error)
+          const current = store.getDocument(doc.id)
+          if (current) await store.putDocument({ ...current, embeddingError: message, errorCode: 'embedding_provider', updatedAt: Date.now() })
+          // One exhausted document must not stop millions of independent
+          // candidates. Keep its old generation intact and the durable base
+          // marker pending, so a retry can fill only the missing vectors.
+          this.ctx.logger.warn(`knowledge: embedding failed for document ${doc.id} (${doc.title}); continuing the queue: ${message}`)
         }
       })
       completed = true
     } finally {
       this.processingMeter.finish(meterId)
-      if (completed && !this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
+      if (completed && passKey === embeddingKey(this.getConfigFor(baseId)) && !this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
         await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false, embeddingBackfillRevision: undefined })
       }
       const remaining = (this.directoryWriteBatches.get(baseId) ?? 1) - 1
@@ -985,7 +1008,7 @@ export class KnowledgeService extends Service {
         if (vector) chunks[i] = { ...chunks[i], embedding: vector, embeddingModel: key }
         else missing.push(i)
       }
-      const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(8, config.embeddingBatchSize) : config.embeddingBatchSize)
+      const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8, config.embeddingBatchSize) : config.embeddingBatchSize)
       for (let i = 0; i < missing.length; i += batchSize) {
         controller.signal.throwIfAborted()
         this.assertIndexTargetAlive(id, document.baseId)
@@ -1216,43 +1239,45 @@ export class KnowledgeService extends Service {
     const fallbackPayload = rawFilePath !== undefined ? undefined : request.contentBase64
     this.enqueueIngest(request.baseId, async () => {
       try {
-        // Prefer re-reading the persisted raw copy (the queue never holds file
-        // contents in memory); fall back to the request payload only when the
-        // deployment has no raw backend (e.g. in-memory test stores).
-        let bytes: Uint8Array | null = rawFilePath !== undefined ? (await store.raw?.read(rawFilePath)) ?? null : null
-        if (bytes === null && fallbackPayload !== undefined) bytes = decodeBase64(fallbackPayload)
-        if (bytes === null) throw new Error('raw copy is missing — cannot parse the file')
-        // Cherry's fileProcessorId posture: when the MinerU remote processor
-        // is configured, PDFs go through the API first (scanned/complex
-        // layouts get true layout-aware Markdown); any failure falls back to
-        // the local pipeline. A double failure reports BOTH reasons, so the
-        // row shows why the remote processor rejected the file (log-only
-        // before) instead of just the local parser's complaint.
-        const extracted = await this.extractDocumentText({
-          baseId: request.baseId,
-          documentId: docId,
-          fileName,
-          ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
-          bytes,
-          signal: taskController.signal,
-        })
-        const text = extracted.text
-        if (text.trim().length === 0) {
-          throw new Error('parsed document is empty')
-        }
-        await this.ingestDocument({
-          baseId: request.baseId,
-          title,
-          sourceType: 'file',
-          fileName,
-          ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
-          ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
-          placeholderId: docId,
-          rawFilePath,
-          text,
-          processed: extracted,
-        }, taskController.signal)
-        if (store.getDocument(docId)?.embeddingError) return false
+        return await retryDocument(async () => {
+          // Prefer re-reading the persisted raw copy (the queue never holds file
+          // contents in memory); fall back to the request payload only when the
+          // deployment has no raw backend (e.g. in-memory test stores).
+          let bytes: Uint8Array | null = rawFilePath !== undefined ? (await store.raw?.read(rawFilePath)) ?? null : null
+          if (bytes === null && fallbackPayload !== undefined) bytes = decodeBase64(fallbackPayload)
+          if (bytes === null) throw new Error('raw copy is missing — cannot parse the file')
+          // Cherry's fileProcessorId posture: when the MinerU remote processor
+          // is configured, PDFs go through the API first (scanned/complex
+          // layouts get true layout-aware Markdown); any failure falls back to
+          // the local pipeline. A double failure reports BOTH reasons, so the
+          // row shows why the remote processor rejected the file (log-only
+          // before) instead of just the local parser's complaint.
+          const extracted = await this.extractDocumentText({
+            baseId: request.baseId,
+            documentId: docId,
+            fileName,
+            ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
+            bytes,
+            signal: taskController.signal,
+          })
+          const text = extracted.text
+          if (text.trim().length === 0) {
+            throw new Error('parsed document is empty')
+          }
+          await this.ingestDocument({
+            baseId: request.baseId,
+            title,
+            sourceType: 'file',
+            fileName,
+            ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
+            ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
+            placeholderId: docId,
+            rawFilePath,
+            text,
+            processed: extracted,
+          }, taskController.signal)
+          if (store.getDocument(docId)?.embeddingError) return false
+        }, { signal: taskController.signal })
       } catch (error) {
         this.indexing.delete(docId)
         taskController.abort()
@@ -1857,6 +1882,12 @@ export class KnowledgeService extends Service {
   }
 
   async reindexDocument(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
+    // Retry leaves only: never replay an entire directory's successful children.
+    if (this.requireStore().getDocument(id)?.sourceType === 'directory') return this.reindexDocumentAttempt(id, options)
+    return retryDocument(() => this.reindexDocumentAttempt(id, options))
+  }
+
+  private async reindexDocumentAttempt(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
     const store = this.requireStore()
     const document = store.getDocument(id)
     if (document === undefined) throw new Error(`document not found: ${id}`)
@@ -1949,7 +1980,7 @@ export class KnowledgeService extends Service {
       await store.stageDocumentGeneration(candidate, [])
       const { chunks, embeddingError, embeddingErrorCode } = await this.buildChunks(document.baseId, document.id, document.title, rebuilt.text, config, pieces, batch => store.stageDocumentGeneration(candidate, batch), controller.signal, candidate.processing?.revision)
       controller.signal.throwIfAborted()
-      if (embeddingError !== undefined && document.chunkCount > 0) throw Object.assign(new Error('embedding failed; the previous document generation was preserved'), { code: embeddingErrorCode })
+      if (embeddingError !== undefined && document.chunkCount > 0) throw markAttemptsExhausted(Object.assign(new Error('embedding failed; the previous document generation was preserved'), { code: embeddingErrorCode }))
       const { embeddingError: _staleError, errorCode: _staleCode, incomplete: _staleIncomplete, contentHash: _staleHash, ...rest } = candidate
       const next: KnowledgeDocument = {
         ...rest,
@@ -2057,6 +2088,7 @@ export class KnowledgeService extends Service {
   }> {
     const store = this.requireStore()
     const sourceFailures: string[] = []
+    const sourceErrors: unknown[] = []
     let failedLiveSourceBytes: Uint8Array | undefined
     let failedLiveSourceWasPdf = false
     // A single-file path import tracks its live source on disk. Reindex re-reads
@@ -2105,6 +2137,8 @@ export class KnowledgeService extends Service {
       } catch (error) {
         signal?.throwIfAborted()
         if (strictSource) throw error
+        if (['submission_unknown', 'job_lost'].includes(processorErrorCode(error))) throw error
+        sourceErrors.push(error)
         const reason = error instanceof Error ? error.message : String(error)
         sourceFailures.push(`source path: ${reason}`)
         this.ctx.logger.warn(`knowledge: re-reading source path failed, falling back to stored copy: ${reason}`)
@@ -2134,6 +2168,8 @@ export class KnowledgeService extends Service {
             throw new Error('parsed document is empty')
           } catch (error) {
             signal?.throwIfAborted()
+            if (['submission_unknown', 'job_lost'].includes(processorErrorCode(error))) throw error
+            sourceErrors.push(error)
             const reason = error instanceof Error ? error.message : String(error)
             sourceFailures.push(`stored raw source: ${reason}`)
             this.ctx.logger.warn(`knowledge: re-parsing raw source failed, falling back to stored text: ${reason}`)
@@ -2150,7 +2186,8 @@ export class KnowledgeService extends Service {
       const detail = sourceFailures.length > 0
         ? sourceFailures.join('; ')
         : 'its source could not be parsed — check the document processor settings, or re-import the file'
-      throw new Error(`document "${document.title}" has no source text to reindex (${detail})`)
+      const error = new Error(`document "${document.title}" has no source text to reindex (${detail})`)
+      throw sourceErrors.some(attemptsExhausted) ? markAttemptsExhausted(error) : error
     }
     if (document.processing !== undefined) {
       try {
@@ -2436,32 +2473,36 @@ export class KnowledgeService extends Service {
           this.processingMeter.begin(meterId)
           let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
           try {
-            const before = await stat(fullPath)
-            const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
-            let document = resolved.document
-            let action: DirectorySyncItem['action']
-            if (document === undefined) {
-              document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
-              action = 'created'
-              children.push(document)
-              childrenByParent.set(directory.id, children)
-            } else {
-              action = await this.syncDirectoryFile(document, fullPath, entry.name)
-              const refreshed = this.requireStore().getDocument(document.id)
-              if (refreshed !== undefined) {
-                const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
-                if (documentIndex >= 0) children[documentIndex] = refreshed
-                document = refreshed
+            await retryDocument(async () => {
+              const before = await stat(fullPath)
+              const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
+              let document = resolved.document
+              let action: DirectorySyncItem['action']
+              if (document === undefined) {
+                document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
+                action = 'created'
+                children.push(document)
+                childrenByParent.set(directory.id, children)
+              } else {
+                action = await this.syncDirectoryFile(document, fullPath, entry.name)
+                const refreshed = this.requireStore().getDocument(document.id)
+                if (refreshed !== undefined) {
+                  const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
+                  if (documentIndex >= 0) children[documentIndex] = refreshed
+                  document = refreshed
+                }
               }
-            }
-            if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
-              const fileStat = await stat(fullPath)
-              const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
-              const fresh = store.getDocument(document.id)
-              if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
-            }
-            outcome = document.incomplete || document.embeddingError ? 'failed' : action === 'unchanged' ? 'skipped' : 'processed'
-            items.push({ relativePath, kind: 'file', documentId: document.id, action })
+              if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
+                const fileStat = await stat(fullPath)
+                const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+                const fresh = store.getDocument(document.id)
+                if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
+              }
+              outcome = document.incomplete || document.embeddingError ? 'failed' : action === 'unchanged' ? 'skipped' : 'processed'
+              if (document.embeddingError) throw markAttemptsExhausted(new Error(document.embeddingError))
+              if (document.incomplete) throw new Error('Document processing did not finish')
+              items.push({ relativePath, kind: 'file', documentId: document.id, action })
+            })
           } catch (error) {
             items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: this.directoryItemError(error) })
           } finally { this.processingMeter.settle(meterId, outcome) }
@@ -2480,6 +2521,10 @@ export class KnowledgeService extends Service {
   /** Persist source/placeholder before parsing, so path imports recover just
    * like uploads if the host stops during a long-running processor call. */
   private async ingestPathFile(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
+    return retryDocument(() => this.ingestPathFileAttempt(baseId, sourcePath, fileName, parentDirectoryId))
+  }
+
+  private async ingestPathFileAttempt(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
     const store = this.requireStore()
     if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
     const externalRoot = store.getBase(baseId)?.storageMode === 'external' ? store.getBase(baseId)?.externalPath : undefined
@@ -2534,7 +2579,7 @@ export class KnowledgeService extends Service {
     const bound = await this.bindDocumentSourcePath(document, sourcePath)
     const stored = bound.rawFilePath !== undefined ? await store.raw?.read(bound.rawFilePath) : undefined
     const unchanged = stored !== undefined && stored !== null && stored.byteLength > 0 && Buffer.from(stored).equals(buffer)
-    if (unchanged) return bound === document ? 'unchanged' : 'updated'
+    if (unchanged && !bound.incomplete && !bound.embeddingError) return bound === document ? 'unchanged' : 'updated'
     // The unified source reader validates and parses once. A changed live
     // source must not silently fall back to the previous snapshot.
     await this.reindexDocument(bound.id, { mode: 'reparse', strictSource: true })
@@ -3049,9 +3094,14 @@ export class KnowledgeService extends Service {
 
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
-  enterEmbeddingForeground() { return embeddingAcceleration.enterForeground() }
-  embeddingAccelerationStatus() { return embeddingAcceleration.status() }
-  prepareEmbeddingAcceleration() { return embeddingAcceleration.prepare() }
+  async enterEmbeddingForeground() {
+    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(), embeddingFp16Acceleration.enterForeground()])
+    const failed = releases.find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); throw failed.reason }
+    return () => { for (const result of releases) if (result.status === 'fulfilled') result.value() }
+  }
+  embeddingAccelerationStatus(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).status() }
+  prepareEmbeddingAcceleration(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).prepare() }
 
   listLocalModels(): Promise<LocalModelSummary[]> {
     return listLocalModels()
@@ -4208,19 +4258,23 @@ export class KnowledgeService extends Service {
       // similar ones (length-weighted mean vector — no extra embedding pass).
       // Segment embedding is best-effort: any failure falls back to the
       // regular chunker and the normal embedding flow below still runs.
-      const segments = splitSemanticSegments(text, { separator: config.chunkSeparator })
+      const segments = refineChunksByTokenLimit(splitSemanticSegments(text, { separator: config.chunkSeparator, candidateTokens: config.semanticChunkCandidateTokens ?? 128 }), config.chunkSize, estimateTokens)
       let merged: Array<ChunkPiece & { embedding?: number[] }> | null = null
       if (segments.length > 0 && config.embeddingProvider !== 'none') {
         try {
-          const vectors: Array<number[] | undefined> = []
+          const merger = createSemanticMerger(segments, config.chunkSize, config.semanticChunkThreshold)
           const batchSize = Math.max(1, config.embeddingBatchSize)
           for (let i = 0; i < segments.length; i += batchSize) {
+            signal?.throwIfAborted()
+            this.assertIndexTargetAlive(docId, baseId)
             const batch = segments.slice(i, i + batchSize)
             const embedded = await this.embedTextsOnce(config, batch.map(segment => segment.text))
-            for (const vector of embedded) vectors.push(vector)
+            if (embedded.length !== batch.length) throw new Error('Semantic embedding count mismatch')
+            batch.forEach((segment, index) => merger.add(segment, embedded[index]))
           }
-          merged = mergeSemanticSegments(segments, vectors, config.chunkSize, config.semanticChunkThreshold)
+          merged = merger.finish()
         } catch (error) {
+          signal?.throwIfAborted()
           this.ctx.logger.warn(`knowledge: semantic chunking embedding failed, using regular chunker: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
@@ -4309,7 +4363,7 @@ export class KnowledgeService extends Service {
         // uses 10) so one forward pass never allocates a huge intermediate
         // tensor in the shared main-process WASM heap.
         const batchSize = config.embeddingProvider === 'local'
-          ? Math.min(config.embeddingBatchSize, 8)
+          ? Math.min(config.embeddingBatchSize, config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8)
           : config.embeddingBatchSize
         for (let i = 0; i < need.length; i += batchSize) {
           const batch = need.slice(i, i + batchSize)
@@ -4400,19 +4454,9 @@ export class KnowledgeService extends Service {
    * interrupts the request chain immediately.
    */
   private async embedWithRetry(config: KnowledgeConfig, texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
-    let attempt = 1
-    for (;;) {
-      if (signal?.aborted === true) throw new Error('embedding aborted (document was deleted)')
-      try {
-        return await this.embedTextsOnce(config, texts, signal)
-      } catch (error) {
-        if (attempt >= EMBED_MAX_ATTEMPTS) throw error
-        const delay = Math.min(EMBED_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), EMBED_RETRY_MAX_DELAY_MS)
-        attempt += 1
-        this.ctx.logger.warn(`knowledge: embedding attempt ${attempt - 1}/${EMBED_MAX_ATTEMPTS} failed, retrying in ${delay}ms: ${error instanceof Error ? error.message : String(error)}`)
-        await new Promise(resolve => setTimeout(resolve, delay))
-      }
-    }
+    return retryDocument(() => this.embedTextsOnce(config, texts, signal), { signal,
+      onRetry: attempt => { this.ctx.logger.warn(`knowledge: embedding attempt ${attempt}/3 failed; retrying`) },
+    })
   }
 
   /** Bump the base's updatedAt so the data view's "更新于" stays meaningful. */
@@ -4456,7 +4500,7 @@ function embeddingKey(config: KnowledgeConfig): string | undefined {
   if (model === '') return undefined
   // Older padded Qwen batches are not numerically compatible with the
   // canonical single-text path, despite identical dimensions and weights.
-  const format = config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
+  const format = config.embeddingProvider === 'local' && model === FP16_EMBEDDING_MODEL ? ':canonical-fp16-v1' : config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
     ? ':canonical-single-v1' : config.embeddingProvider === 'local' && /(?:bge|gte|e5)/i.test(model) ? ':full-context-v1' : ''
   return `${config.embeddingProvider}:${model}${format}`
 }

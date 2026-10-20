@@ -33,6 +33,8 @@ export interface ProcessingJobRecord {
   readonly errorCode?: string
   /** Durable count incremented before each automatic startup parse attempt. */
   readonly startupAttempts?: number
+  /** Attempt within the current processing run (three total before failure). */
+  readonly attempt?: number
 }
 
 /** Immutable artifacts scoped to one document. No downloaded paths are used as

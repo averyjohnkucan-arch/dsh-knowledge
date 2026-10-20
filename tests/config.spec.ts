@@ -60,6 +60,7 @@ describe('resolveConfig', () => {
       mineruTier: 'basic',
       documentProcessingTimeoutMs: 1_800_000,
       structuredChunking: true,
+      semanticChunkCandidateTokens: 128,
       injectUsagePrompt: true,
       localEmbeddingThreads: 0,
       localEmbeddingInstances: 0,
