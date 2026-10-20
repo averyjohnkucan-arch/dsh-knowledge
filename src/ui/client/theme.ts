@@ -414,11 +414,11 @@ export function formatRelativeTime(
 ): string {
   const diff = Math.max(0, now - timestamp)
   const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return t !== undefined ? t('timeJustNow') : '刚刚'
-  if (minutes < 60) return t !== undefined ? t('timeMinutes').replace('{n}', String(minutes)) : `${minutes} 分钟前`
+  if (minutes < 1) return t !== undefined ? t('timeJustNow') : 'just now'
+  if (minutes < 60) return t !== undefined ? t('timeMinutes').replace('{n}', String(minutes)) : `${minutes} minutes ago`
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return t !== undefined ? t('timeHours').replace('{n}', String(hours)) : `${hours} 小时前`
+  if (hours < 24) return t !== undefined ? t('timeHours').replace('{n}', String(hours)) : `${hours} hours ago`
   const days = Math.floor(hours / 24)
-  if (days < 30) return t !== undefined ? t('timeDays').replace('{n}', String(days)) : `${days} 天前`
+  if (days < 30) return t !== undefined ? t('timeDays').replace('{n}', String(days)) : `${days} days ago`
   return new Date(timestamp).toLocaleDateString()
 }

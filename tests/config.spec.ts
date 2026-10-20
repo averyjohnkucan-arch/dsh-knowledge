@@ -53,6 +53,8 @@ describe('resolveConfig', () => {
     const { chunkStorePath: _chunkStorePath, ...expected } = base
     expect(resolveConfig(base, {})).toEqual({
       ...expected,
+      ocrEnabled: true,
+      structureV3Charts: true,
       mineruLocalUrl: 'http://127.0.0.1:8000',
       mineruLocalApiKey: '',
       mineruTier: 'basic',

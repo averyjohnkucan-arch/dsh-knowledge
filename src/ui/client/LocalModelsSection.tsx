@@ -13,6 +13,7 @@ import type { LocalModelSummary } from './api.js'
 import { C, style } from './theme.js'
 import { IconBot, IconBox, IconDownload, IconFolderInput, IconFolderOpen, IconFolderSearch, IconRefresh, IconScanText, IconTrash, IconX } from './icons.js'
 import type { Translate } from './locales.js'
+import { RecommendedLocalStack } from './RecommendedLocalStack.js'
 import { MineruDeploymentSection } from './MineruDeploymentSection.js'
 import type { DirectoryActions } from './directory-actions.js'
 
@@ -397,7 +398,10 @@ export function LocalModelsSection(props: LocalModelsSectionProps): JSX.Element 
     <div style={{ minWidth: 0 }}>
       <h2 style={{ fontSize: 17, fontWeight: 650, color: C.text, margin: '0 0 6px' }}>{t('localModelsTitle')}</h2>
       <p style={{ marginTop: 0, marginBottom: 16, fontSize: 13, color: C.muted, lineHeight: 1.65, maxWidth: 760 }}>{t('localModelsDesc')}</p>
+      <RecommendedLocalStack api={api} />
+      <details style={{ marginBottom: 16 }}><summary style={{ cursor: 'pointer', color: C.muted }}>Advanced: optional MinerU deployment</summary>
       <MineruDeploymentSection api={api} t={t} pickDirectory={typeof directoryActions?.pickDirectory === 'function' ? directoryActions.pickDirectory.bind(directoryActions) : undefined} />
+      </details>
 
       {mirrorLoaded && (
         <div style={{ marginBottom: 14, padding: 16, border: `1px solid ${C.border}`, borderRadius: 12, background: C.surface }}>

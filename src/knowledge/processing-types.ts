@@ -1,5 +1,5 @@
 /** Versioned, provider-independent document evidence. No runtime/Node imports. */
-export type DocumentProcessor = 'builtin' | 'mineru' | 'mineru-local'
+export type DocumentProcessor = 'builtin' | 'paddle' | 'mineru' | 'mineru-local'
 export type MineruTier = 'flash' | 'basic' | 'standard' | 'advanced'
 export type ParsedBlockType = 'text' | 'heading' | 'table' | 'equation' | 'image' | 'caption' | 'code' | 'list' | 'unknown'
 

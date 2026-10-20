@@ -4,7 +4,7 @@
 
 **A knowledge base plugin for DSH**
 
-[**English**](./README.en.md) · [**中文**](./README.md)
+[**English**](./README.en.md) · [**Chinese**](./README.zh-CN.md)
 
 [![npm version](https://img.shields.io/npm/v/dsh-knowledge?color=cb3837&logo=npm)](https://www.npmjs.com/package/dsh-knowledge)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-knowledge?color=cb3837&logo=npm)](https://www.npmjs.com/package/dsh-knowledge)
@@ -18,6 +18,15 @@ A **knowledge base system** as a standalone, open-source bundle plugin for [Deep
 </div>
 
 ---
+
+## Local pipeline configuration
+
+Use the built-in PDF parser, PaddleOCR for scanned documents, and optional
+PP-StructureV3/PP-Chart2Table for chart and table extraction. Each stage has its own
+selection or switch. Processing defaults and per-base overrides are separate;
+existing documents require explicit reprocessing after a parser change.
+See the [English local pipeline guide](docs/local-pipeline.md) for settings,
+progress counters, ETA behavior, and current validation limits.
 
 ## Why dsh-knowledge
 

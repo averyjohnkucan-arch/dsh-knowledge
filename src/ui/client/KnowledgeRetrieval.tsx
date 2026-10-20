@@ -29,17 +29,38 @@ export const retrievalDefinition = {
   }),
 }
 
-/** Render the exact model-facing text as text, never executable source Markdown/HTML. */
+/** Source frames are producer formatting, not user-facing prose. Never render their HTML. */
+export function parseRetrievalPassages(text: string) {
+  const frames = [...text.matchAll(/^\[source: ([^\]\n]+)\] ?/gm)]
+  return frames.map((frame, index) => {
+    const fields = frame[1].split('; ')
+    const value = (name: string) => fields.find(field => field.startsWith(name + '='))?.slice(name.length + 1) ?? ''
+    const title = value('title') || 'Retrieved passage'
+    const heading = value('heading')
+    let excerpt = text.slice(frame.index! + frame[0].length, frames[index + 1]?.index ?? text.length).trim()
+    for (const label of new Set([title, heading].filter(Boolean))) excerpt = excerpt.split(`[${label}] `).join('')
+    return { title, heading, base: fields[0].startsWith('baseId=') ? 'Knowledge base' : fields[0], documentId: value('docId'), chunkId: value('chunkId'), excerpt }
+  })
+}
+
 export function KnowledgeRetrieval({ node }: { node: { data: ReturnType<typeof retrievalRecord> } }) {
   const { text, count } = node.data
-  const sources = [...text.matchAll(/\[source: [^\]\n]*?docId=([^;\]\s]+);[^\]\n]*?chunkId=([^;\]\s]+)[^\]\n]*\]/g)]
+  const passages = parseRetrievalPassages(text)
+  const linkStyle = { color: 'var(--dsw-alias-brand-primary, #80b6ff)' }
   return <details data-knowledge-retrieval style={{ color: 'var(--dsw-alias-label-secondary, #aaa)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)', margin: '4px 0 8px' }}>
     <summary style={{ cursor: 'pointer', lineHeight: '24px' }}>Knowledge retrieved — {count} {count === 1 ? 'passage' : 'passages'}</summary>
     <div style={{ marginLeft: 20 }}>
-      {sources.length > 0 && <nav aria-label="Retrieved sources" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, margin: '6px 0' }}>
-        {sources.map((source, index) => <a key={`${source[1]}:${source[2]}:${index}`} href={`/knowledge/documents/${encodeURIComponent(source[1])}/raw?inline=1`} target="_blank" rel="noreferrer" style={{ color: 'var(--dsw-alias-brand-primary, #80b6ff)' }}>Original {index + 1}</a>)}
+      {passages.length > 0 && <nav aria-label="Retrieved sources" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, margin: '6px 0 12px' }}>
+        {passages.filter(p => p.documentId).map((p, index) => <a key={`${p.documentId}:${p.chunkId}:${index}`} title={p.title} href={`/knowledge/documents/${encodeURIComponent(p.documentId)}/raw?inline=1`} target="_blank" rel="noreferrer" style={linkStyle}>Original {index + 1}</a>)}
       </nav>}
-      <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 320, overflow: 'auto', padding: 12, borderRadius: 6, background: 'var(--dsw-alias-markdown-code-block, #222)', fontSize: 12, lineHeight: 1.5 }}>{text}</pre>
+      <div style={{ maxHeight: 420, overflow: 'auto', padding: '0 12px 0 0' }}>
+        {passages.map((p, index) => <article key={`${p.documentId}:${p.chunkId}:${index}`} style={{ padding: '12px 0', borderTop: '1px solid var(--dsw-alias-border-l2, #3a3a3a)' }}>
+          <strong style={{ color: 'var(--dsw-alias-label-primary, #ddd)', fontSize: 14 }}>{p.title}</strong>
+          <div style={{ fontSize: 12, marginTop: 3, opacity: .8 }}>{p.base}{p.heading && p.heading !== p.title ? ` · ${p.heading}` : ''}</div>
+          {p.excerpt.split(/\n\s*\n/).map((paragraph, i) => <p key={i} style={{ margin: '8px 0', lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', ...(paragraph.startsWith('>>> ') ? { borderLeft: '2px solid var(--dsw-alias-brand-primary, #80b6ff)', paddingLeft: 10 } : {}) }}>{paragraph.replace(/^>>> /gm, '')}</p>)}
+        </article>)}
+        {passages.length === 0 && <p style={{ lineHeight: 1.6 }}>{count === 0 ? 'No new passages were supplied for this question.' : 'This older retrieval has no readable source frames.'}</p>}
+      </div>
     </div>
   </details>
 }

@@ -334,6 +334,7 @@ function ensureLocalWorker(): ChildProcess {
   if (localWorker !== null) return localWorker
   const worker = fork(localWorkerPath(), [], {
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    env: { ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '' },
     // Test runners and `--input-type` cannot be forwarded to a child that
     // executes an ESM file. The process needs no debugger inheritance either.
     execArgv: process.execArgv.filter(arg => !arg.startsWith('--input-type') && !arg.startsWith('--inspect')),
@@ -618,7 +619,7 @@ export async function cancelLocalModel(modelId: string): Promise<void> {
 /** Drop a loaded extractor (frees its native sessions) and delete its cached weights. */
 export async function removeLocalModel(modelId: string): Promise<void> {
   if (localModelStatus.get(modelId)?.status === 'downloading') {
-    throw new Error('模型正在下载，完成后才能删除')
+    throw new Error('The model is downloading. Wait for the download to finish before deleting it')
   }
   await withTimeout(callWorker('release', { modelId }), LOCAL_RELEASE_ACK_TIMEOUT_MS).catch(() => {})
   localModelStatus.delete(modelId)

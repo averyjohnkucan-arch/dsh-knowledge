@@ -18,11 +18,15 @@
  * @module dsh-knowledge/knowledge/caption
  */
 
+import { structureV3, type StructureV3Manager } from './structure-v3.js'
 import { httpFetch } from './net.js'
 import { extractPdfImages, rgbaToPng } from './ocr.js'
 
 export interface CaptionConfig {
-  provider: 'off' | 'openai' | 'ollama'
+  structureV3?: StructureV3Manager
+  charts?: boolean
+  signal?: AbortSignal
+  provider: 'off' | 'paddle' | 'openai' | 'ollama'
   model: string
   baseUrl: string
   apiKey: string
@@ -40,7 +44,7 @@ const MIN_CAPTION_EDGE = 160
  * vision request and the process heap. Skip anything above ~4M pixels.
  */
 const MAX_CAPTION_PIXELS = 4_000_000
-const CAPTION_PROMPT = '请用简洁的中文描述这张图片/图表的内容：说明它展示的主题、数据趋势或关键结论。若信息不足请直接说无法判断。'
+const CAPTION_PROMPT = 'Describe this image or chart concisely in English. Explain its subject, data trends, or key findings. If there is insufficient evidence, say that the content cannot be determined. Do not invent details.'
 
 /**
  * Caption the embedded images of a PDF. Returns the descriptions joined into
@@ -49,6 +53,10 @@ const CAPTION_PROMPT = '请用简洁的中文描述这张图片/图表的内容�
  */
 export async function captionPdfImages(bytes: Uint8Array, config: CaptionConfig): Promise<string> {
   if (config.provider === 'off') return ''
+  if (config.provider === 'paddle') {
+    const output = await (config.structureV3 ?? structureV3).extract(bytes, 'chart-caption', config.charts !== false, 1800000, config.signal)
+    return output.document.blocks.filter(block => block.type === 'table').map(block => `Chart/table data · page ${(block.pageIndex ?? 0) + 1}:\n${block.text}`).join('\n\n')
+  }
   const model = config.model.trim()
   if (model === '') return ''
   let images: Array<{ page: number; png: Buffer }> = []
@@ -77,7 +85,7 @@ export async function captionPdfImages(bytes: Uint8Array, config: CaptionConfig)
   for (const { page, png } of images) {
     try {
       const text = await captionImage(png, config)
-      if (text.trim().length > 0) descriptions.push(`（第 ${page} 页图表描述）${text.trim()}`)
+      if (text.trim().length > 0) descriptions.push(`Image/chart description · page ${page}: ${text.trim()}`)
     } catch (error) {
       failures += 1
       if (firstError === '') firstError = error instanceof Error ? error.message : String(error)
@@ -87,7 +95,7 @@ export async function captionPdfImages(bytes: Uint8Array, config: CaptionConfig)
     console.warn(`[dsh-knowledge] captioning failed for ${failures}/${images.length} image(s): ${firstError}`)
   }
   if (descriptions.length === 0) return ''
-  return `\n\n[文档图表描述]\n${descriptions.join('\n')}`
+  return `\n\n[Document image/chart descriptions]\n${descriptions.join('\n')}`
 }
 
 /** Describe one PNG through the configured vision provider. */

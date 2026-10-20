@@ -110,6 +110,11 @@ describe('parseDocumentBuffer — PDF', () => {
       .rejects.toThrow(/PDF parsing failed/)
   })
 
+  it('honors disabled OCR for a textless PDF', async () => {
+    await expect(parseDocumentBuffer(makePdf(''), 'scan.pdf', 'application/pdf', { ocrEnabled: false }))
+      .rejects.toThrow('PaddleOCR is disabled')
+  })
+
   it('flags a textless PDF (scanned/image-only) instead of importing garbage', async () => {
     // Valid structure, but the page stream draws nothing indexable. Both
     // engines fail to extract text, so the import must reject either way.

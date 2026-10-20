@@ -1,3 +1,4 @@
+import type { ProcessingSnapshot } from '../../knowledge/processing-meter.js'
 /**
  * Cherry Studio-style knowledge base UI: a sidebar-foot nav action plus a
  * frame-wide floating panel. Left navigator holds search + base cards; the
@@ -180,6 +181,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
   const [checkedDocIds, setCheckedDocIds] = useState<Set<string>>(new Set())
   const [globalConfig, setGlobalConfig] = useState<KnowledgeConfig | null>(null)
   const [toggle, setToggle] = useState<{ enabled: boolean; enabledBaseIds: string[] } | null>(null)
+  const [processingSummary, setProcessingSummary] = useState<ProcessingSnapshot[]>([])
   const [stats, setStats] = useState<BaseStats | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[]>([])
@@ -415,12 +417,13 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
     const poll = async (): Promise<void> => {
       let anyActive = false
       try {
-        const entries = await api.getIndexingStatus()
+        const [entries, summary] = await Promise.all([api.getIndexingStatus(), api.getProcessingSummary()])
+        if (!disposed) setProcessingSummary(summary.filter(row => row.baseId === selectedBaseId))
         const activeIds = new Set<string>()
         for (const entry of entries) {
           if (entry.baseId === selectedBaseId) activeIds.add(entry.docId)
         }
-        anyActive = activeIds.size > 0
+        anyActive = activeIds.size > 0 || summary.some(row => row.baseId === selectedBaseId && row.active)
         const changed = !sameSet(activeIdsRef.current, activeIds)
         activeIdsRef.current = activeIds
         if (!disposed) {
@@ -437,8 +440,8 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
       // Continue only while active; otherwise stop and wait for the next
       // reloadDocuments kick (no more idle-timeout polling — the list is
       // always fresh right after any user action anyway).
-      if (!disposed && anyActive) {
-        timer = window.setTimeout(() => { void poll() }, 800)
+      if (!disposed) {
+        timer = window.setTimeout(() => { void poll() }, anyActive ? 800 : 5000)
       }
     }
     void poll()
@@ -1481,6 +1484,16 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                   )}
                 </span>
               </div>
+
+              {processingSummary.filter(row => row.baseId === selectedBase.id).map(row => <div key={row.id} style={{ fontSize: 12, color: C.muted, margin: '8px 0 12px' }} role="status">
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                  <span>{row.completed.toLocaleString()} / {row.total.toLocaleString()} documents</span>
+                  <span>{row.processed.toLocaleString()} processed · {row.skipped.toLocaleString()} unchanged · {row.failed.toLocaleString()} failed</span>
+                  {row.active && <span>{row.queued.toLocaleString()} queued · {row.running} running</span>}
+                  <span>{row.discovering ? 'Discovering files…' : !row.active ? (row.completed >= row.total ? 'Finished' : 'Stopped before completion') : row.etaSeconds === null ? 'Estimating time remaining…' : `About ${row.etaSeconds < 60 ? `${row.etaSeconds}s` : `${Math.ceil(row.etaSeconds / 60)} min`} remaining`}</span>
+                </div>
+                <progress aria-label="Document processing progress" max={Math.max(1, row.total)} value={row.discovering ? undefined : row.completed} title="ETA uses completions from the last two minutes" style={{ width: '100%', height: 5, marginTop: 6, accentColor: C.accent }} />
+              </div>)}
 
               {selectedBase.storageMode === 'external' && <div style={{ ...style.card, marginBottom: 12 }}>
                 <div style={{ fontSize: 13, color: ['disconnected', 'error'].includes(selectedBase.syncStatus?.state ?? '') ? C.warn : C.muted }} role="status">

@@ -271,7 +271,7 @@ describe('auto retrieval through the real SQLite lane', () => {
     }
   })
 
-  it('never runs a local reranker in auto search but still runs it for explicit search', async () => {
+  it('runs a configured local reranker once for automatic and once for explicit search', async () => {
     const mounted = await mountService()
     try {
       const base = await mounted.service.createBase({ name: 'local-rerank' })
@@ -294,7 +294,7 @@ describe('auto retrieval through the real SQLite lane', () => {
       )
 
       expect(background).toBeDefined()
-      expect(rerankMock).not.toHaveBeenCalled()
+      expect(rerankMock).toHaveBeenCalledTimes(1)
 
       const explicit = await mounted.service.search({
         query: '发票审批流程',
@@ -303,7 +303,7 @@ describe('auto retrieval through the real SQLite lane', () => {
       })
 
       expect(explicit.reranked).toBe(true)
-      expect(rerankMock).toHaveBeenCalledTimes(1)
+      expect(rerankMock).toHaveBeenCalledTimes(2)
       expect(rerankMock.mock.calls[0]?.[1]).toBe('local:Xenova/bge-reranker-base')
     } finally {
       await mounted.close()

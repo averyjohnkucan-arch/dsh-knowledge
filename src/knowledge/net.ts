@@ -116,4 +116,4 @@ export function describeNetworkError(error: unknown): string {
 }
 
 /** Guidance appended to network failures surfaced in the panel. */
-export const NETWORK_HINT = '若无法访问 huggingface.co：在「本地模型」页面设置镜像站（如 https://hf-mirror.com），或配置 HTTP(S)_PROXY 代理后重启服务。'
+export const NETWORK_HINT = 'If huggingface.co is unreachable, configure a trusted mirror in Local Models, or set HTTP(S)_PROXY and restart the service.'

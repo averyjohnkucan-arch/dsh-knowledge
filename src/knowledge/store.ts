@@ -130,7 +130,7 @@ export interface Store {
   putBase(base: KnowledgeBase): Promise<void>
   deleteBase(id: string): Promise<void>
 
-  listDocuments(baseId: string): KnowledgeDocument[]
+  listDocuments(baseId: string, options?: { includeRawText?: boolean }): KnowledgeDocument[]
   getDocument(id: string): KnowledgeDocument | undefined
   putDocument(doc: KnowledgeDocument): Promise<void>
   deleteDocument(id: string): Promise<void>
@@ -222,6 +222,8 @@ export interface StorageDomainFacility {
 }
 
 export interface OpenStoreOptions {
+  /** Legacy adapter retained for compatibility tests; new stores use incremental SQLite metadata. */
+  documentMetadataBackend?: 'domain' | 'sqlite'
   /** Chunk SQLite file; default `<DSH_HOME>/storages/knowledge-chunks.sqlite`. */
   chunkStorePath?: string
   /** Legacy JSON unit file to migrate chunks from; default `<DSH_HOME>/storages/knowledge.json`. */
@@ -274,7 +276,9 @@ export async function openStore(
     // Original source bytes live next to the chunk store (Cherry's `raw/`
     // material store): `<chunkStoreDir>/knowledge-raw`.
     const raw = new RawFileStorage(join(dirname(chunkStorePath), 'knowledge-raw'))
-    const store = new DomainStore(domain, chunkDb, raw)
+    const sqliteDocuments = options?.documentMetadataBackend !== 'domain'
+    if (sqliteDocuments) chunkDb.migrateDocumentMetadata(domain.table(TABLES.documents).entries())
+    const store = new DomainStore(domain, chunkDb, raw, sqliteDocuments)
     await store.recoverDocumentGenerations()
     // Startup self-healing: drop documents a crashed import left behind
     // (pure placeholders with no recoverable text), then reconcile stale
@@ -309,6 +313,7 @@ class DomainStore implements Store {
     private readonly domain: Domain<typeof knowledgeDomainSpec>,
     private readonly chunkDb: ChunkDatabase,
     private readonly rawStore: RawFileStorage,
+    private readonly sqliteDocuments = true,
   ) {}
 
   private get bases() {
@@ -316,7 +321,14 @@ class DomainStore implements Store {
   }
 
   private get documents() {
-    return this.domain.table(TABLES.documents)
+    if (!this.sqliteDocuments) return this.domain.table(TABLES.documents)
+    const db = this.chunkDb
+    return {
+      get: (id: string) => db.getDocumentMetadata(id),
+      entries: () => db.listDocumentMetadata().map(doc => [doc.id, doc] as [string, KnowledgeDocument]).values(),
+      put: async (_id: string, doc: KnowledgeDocument) => { db.putDocumentMetadata(doc) },
+      delete: async (id: string) => db.deleteDocumentMetadata(id),
+    }
   }
 
   listBases(): KnowledgeBase[] {
@@ -338,9 +350,10 @@ class DomainStore implements Store {
     })
   }
 
-  listDocuments(baseId: string): KnowledgeDocument[] {
+  listDocuments(baseId: string, options?: { includeRawText?: boolean }): KnowledgeDocument[] {
     const pending = new Map(this.chunkDb.pendingDocumentGenerations().map(item => [item.document.id, item]))
-    return [...this.documents.entries()].map(([, value]) => {
+    const records = this.sqliteDocuments ? this.chunkDb.listDocumentMetadata(baseId, options?.includeRawText !== false) : [...this.documents.entries()].map(([, value]) => value)
+    return records.map(value => {
       const next = pending.get(value.id)
       return next !== undefined && next.previousCreatedAt === value.createdAt && next.document.baseId === value.baseId
         ? next.document : value
@@ -407,6 +420,12 @@ class DomainStore implements Store {
       const current = this.documents.get(doc.id)
       if (current === undefined || current.baseId !== doc.baseId || current.createdAt !== doc.createdAt || this.getBase(doc.baseId) === undefined) {
         throw new Error('document_generation_target_missing')
+      }
+      if (this.sqliteDocuments) {
+        // Metadata and retrieval rows now share one SQLite commit. A failed write
+        // preserves the previous generation; no cross-backend journal is needed.
+        this.chunkDb.publishDocumentGeneration(doc, chunks, current.createdAt, true)
+        return
       }
       this.chunkDb.stageDocumentGeneration(doc, chunks)
       this.chunkDb.publishDocumentGeneration(doc, chunks, current.createdAt)
@@ -560,7 +579,7 @@ class DomainStore implements Store {
   async reconcileOrphanRaws(): Promise<number> {
     const referenced = new Set<string>()
     for (const base of this.listBases()) {
-      for (const doc of this.listDocuments(base.id)) {
+      for (const doc of this.listDocuments(base.id, { includeRawText: false })) {
         if (doc.rawFilePath !== undefined) referenced.add(doc.rawFilePath)
         const staged = this.getStagedDocumentGeneration(doc.id)
         if (staged?.document.rawFilePath !== undefined) referenced.add(staged.document.rawFilePath)
@@ -583,7 +602,7 @@ class DomainStore implements Store {
   async reconcileOrphanChunks(): Promise<number> {
     const known = new Set<string>()
     for (const base of this.listBases()) {
-      for (const doc of this.listDocuments(base.id)) known.add(doc.id)
+      for (const doc of this.listDocuments(base.id, { includeRawText: false })) known.add(doc.id)
     }
     let removed = 0
     for (const docId of this.chunkDb.docIdsWithChunks()) {
@@ -702,7 +721,7 @@ class MemoryStore implements Store {
     for (const [docId, generation] of this.staged) if (generation.document.baseId === id) this.staged.delete(docId)
   }
 
-  listDocuments(baseId: string): KnowledgeDocument[] {
+  listDocuments(baseId: string, options?: { includeRawText?: boolean }): KnowledgeDocument[] {
     return [...this.documents.values()].filter(doc => doc.baseId === baseId)
   }
 

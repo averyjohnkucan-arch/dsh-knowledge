@@ -166,10 +166,11 @@ async function createRunner(
         // "Unsupported pipeline"). Download through the primitive loaders
         // instead — AutoModel/AutoTokenizer exist in every version — then
         // run the cross-encoder manually below.
-        await tf.AutoModel.from_pretrained(modelId, { dtype: 'q8', progress_callback: progressCallback })
+        await tf.AutoModel.from_pretrained(modelId, { device: 'cpu', dtype: 'q8', progress_callback: progressCallback })
         await tf.AutoTokenizer.from_pretrained(modelId, { progress_callback: progressCallback })
       } else {
         await tf.pipeline(task, modelId, {
+          device: 'cpu',
           dtype: 'q8',
           progress_callback: progressCallback,
         })
@@ -197,7 +198,7 @@ async function createRunner(
   //    HF repo id, so transformers.js treats it as a local model and never
   //    touches the network. `ready` is emitted only after this load succeeds.
   if (task === 'reranking') {
-    const model = await tf.AutoModel.from_pretrained(join(cacheDir, modelId), { dtype: 'q8' })
+    const model = await tf.AutoModel.from_pretrained(join(cacheDir, modelId), { device: 'cpu', dtype: 'q8' })
     const tokenizer = await tf.AutoTokenizer.from_pretrained(join(cacheDir, modelId))
     post({ type: 'progress', modelId, status: 'ready', progress: 100, message: '' })
     return {
@@ -237,7 +238,7 @@ async function createRunner(
       dispose: async (): Promise<void> => { await model.dispose?.() },
     }
   }
-  const pipeline = await tf.pipeline(task, join(cacheDir, modelId), { dtype: 'q8' }) as
+  const pipeline = await tf.pipeline(task, join(cacheDir, modelId), { device: 'cpu', dtype: 'q8' }) as
     | (((text: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): unknown }>) & { dispose?(): Promise<void> })
     | (((query: string, texts: string[], options?: Record<string, unknown>) => Promise<Array<{ score: number }>>) & { dispose?(): Promise<void> })
   const embed = pipeline as (text: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): unknown }>

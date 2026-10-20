@@ -6,6 +6,10 @@
  * @module dsh-knowledge/knowledge
  */
 
+import { OcrAcceleration } from './ocr-acceleration.js'
+import { useOcrAcceleration } from './ocr-pool.js'
+import { ProcessingMeter } from './processing-meter.js'
+import { StructureV3Manager } from './structure-v3.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { createHash } from 'node:crypto'
 import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
@@ -287,6 +291,9 @@ export class KnowledgeService extends Service {
   private readonly storeReady: Promise<void>
   private resolveStore: () => void = () => {}
   private readonly jobs = new Map<string, BackgroundJob>()
+  readonly ocrAcceleration = new OcrAcceleration()
+  private readonly processingMeter = new ProcessingMeter()
+  processingSummary() { return this.processingMeter.snapshots() }
   private readonly indexing = new Map<string, { baseId: string; title: string; phase: 'parsing' | 'embedding'; total: number; progress: number; controller?: AbortController }>()
   /**
    * Progress values that linger after a job exits (Cherry's 60s TTL), so the
@@ -299,7 +306,7 @@ export class KnowledgeService extends Service {
   // Cherry Studio parity: per-base worker pool (Cherry's knowledge jobs run at
   // defaultConcurrency 5 on a per-base queue). Rows are created up front and
   // flip status as the queued parse+ingest tasks run in the background.
-  private readonly ingestQueues = new Map<string, { pending: Array<() => Promise<void>>; running: number }>()
+  private readonly ingestQueues = new Map<string, { pending: Array<() => Promise<void | boolean>>; running: number }>()
   // Per-base write chain guarding dedup-check + first persist (read-then-write),
   // so two concurrent imports of identical content cannot both pass the check.
   private readonly baseWriteChains = new Map<string, Promise<unknown>>()
@@ -321,6 +328,8 @@ export class KnowledgeService extends Service {
   }
 
   protected async [Service.init](): Promise<void> {
+    useOcrAcceleration(this.ocrAcceleration)
+    this.ctx.effect(() => () => { this.ocrAcceleration.dispose(); useOcrAcceleration(undefined) }, 'knowledge: OCR accelerator workers')
     setLocalModelCacheDir(this.baseConfig.localModelCacheDir)
     setHfEndpoint(this.baseConfig.hfEndpoint)
     const facility = this.ctx.get('storageDomain') as StorageDomainFacility | undefined
@@ -344,6 +353,7 @@ export class KnowledgeService extends Service {
     this.ctx.effect(() => () => { void disposeLocalModelWorker() }, 'knowledge: dispose local model worker')
     this.ctx.effect(() => () => { void disposeLocalRerankProcess() }, 'knowledge: dispose local rerank process')
     this.ctx.effect(() => () => { void disposeOcrWorker() }, 'knowledge: dispose OCR worker')
+    this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
     this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
     if (store === undefined) { this.resolveStore(); return }
     this.artifacts = new ArtifactRepository(store.raw !== undefined
@@ -370,6 +380,7 @@ export class KnowledgeService extends Service {
     const resolved = this.getConfig()
     setHfEndpoint(resolved.hfEndpoint)
     setLocalModelCacheDir(resolved.localModelCacheDir)
+    await this.ocrAcceleration.status()
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     // One-time compatibility path for caches created before readiness markers:
@@ -731,7 +742,7 @@ export class KnowledgeService extends Service {
     // model: an explicit config overrides the source's (used when the user
     // switches models), otherwise the source config carries over.
     const base = await this.createBase({
-      name: name.trim() || `${source.name} (恢复)`,
+      name: name.trim() || `${source.name} (restored)`,
       description: source.description,
       group: source.group,
       config: config ?? source.config,
@@ -833,7 +844,7 @@ export class KnowledgeService extends Service {
       if (modelChanged && store.listDocuments(id).length > 0) {
         const hadModel = oldConfig.embeddingProvider !== 'none' && oldConfig.embeddingModel.trim() !== ''
         if (hadModel) {
-          throw new Error('切换嵌入模型会使已有向量全部失效——请使用「重建知识库」以新模型重建（Cherry Studio 语义）')
+          throw new Error('Changing the embedding model invalidates existing vectors. Use Rebuild knowledge base to generate vectors with the new model')
         }
         // BM25-only → enable-in-place: commit the model, then backfill vectors
         // in the background (Cherry's enableEmbeddingModel). Cherry gates the
@@ -841,13 +852,13 @@ export class KnowledgeService extends Service {
         // would race the backfill, and a source-less document would leave a
         // model committed with nothing to back it — refuse both up front.
         if (this.indexing.size > 0) {
-          throw new Error('有文档正在处理中——请等待导入/重建完成后再启用嵌入模型（Cherry Studio 语义）')
+          throw new Error('Documents are being processed. Wait for importing or rebuilding to finish before enabling embeddings')
         }
         const documents = store.listDocuments(id)
         const sourceLess = documents.some(doc => doc.sourceType !== 'directory'
           && doc.rawText === undefined && doc.rawFilePath === undefined)
         if (sourceLess) {
-          throw new Error('存在无源文本的文档，无法回填向量——请删除后重新添加（Cherry Studio 语义）')
+          throw new Error('Some documents have no saved source text, so their embeddings cannot be generated. Re-add the affected documents from their originals')
         }
         await store.putBase(next)
         const baseId = id
@@ -864,7 +875,7 @@ export class KnowledgeService extends Service {
   listBases(): BaseSummary[] {
     const store = this.requireStore()
     return store.listBases().map(base => {
-      const documents = store.listDocuments(base.id)
+      const documents = store.listDocuments(base.id, { includeRawText: false })
       const chunkCount = documents.reduce((sum, doc) => sum + doc.chunkCount, 0)
       const charCount = documents.reduce((sum, doc) => sum + doc.charCount, 0)
       const tokenCount = documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
@@ -1103,6 +1114,7 @@ export class KnowledgeService extends Service {
           text,
           processed: extracted,
         }, taskController.signal)
+        if (store.getDocument(docId)?.embeddingError) return false
       } catch (error) {
         this.indexing.delete(docId)
         taskController.abort()
@@ -1125,6 +1137,7 @@ export class KnowledgeService extends Service {
         } catch {
           // best-effort: the row already exists; the status flip is cosmetic
         }
+        return false
       } finally {
         this.processingProgress.delete(docId)
         this.indexing.delete(docId)
@@ -1365,7 +1378,7 @@ export class KnowledgeService extends Service {
         throw new Error('parentDirectoryId must identify a directory in the target knowledge base')
       }
     }
-    const candidates = store.listDocuments(baseId).filter(document =>
+    const candidates = store.listDocuments(baseId, { includeRawText: false }).filter(document =>
       document.sourceType === 'directory'
       && document.sourcePath !== undefined
       && this.sameSourcePath(document.sourcePath, sourcePath),
@@ -1879,7 +1892,7 @@ export class KnowledgeService extends Service {
     const budget = processingBudget(config.documentProcessingTimeoutMs ?? 1_800_000, signal)
     this.processingProgress.set(input.documentId, { stage: 'queued' })
     try {
-      return await this.processingQueue.run(() => processDocumentFile({ ...input, config, artifacts: this.artifacts, signal: budget.signal,
+      return await this.processingQueue.run(() => processDocumentFile({ ...input, structureV3: this.structureV3, config, artifacts: this.artifacts, signal: budget.signal,
         onProgress: progress => { this.processingProgress.set(input.documentId, progress) },
       }), budget.signal)
     } catch (error) {
@@ -2054,7 +2067,7 @@ export class KnowledgeService extends Service {
       throw new Error(`source directory is unreadable: ${error instanceof Error ? error.message : String(error)}`)
     }
 
-    const allDocuments = store.listDocuments(root.baseId)
+    const allDocuments = store.listDocuments(root.baseId, { includeRawText: false })
     const childrenByParent = new Map<string, KnowledgeDocument[]>()
     for (const document of allDocuments) {
       if (document.parentDirectoryId === undefined) continue
@@ -2063,8 +2076,22 @@ export class KnowledgeService extends Service {
       childrenByParent.set(document.parentDirectoryId, children)
     }
     const items: DirectorySyncItem[] = []
+    this.processingMeter.start(root.id, root.baseId, true)
     this.indexing.set(root.id, { baseId: root.baseId, title: root.title, phase: 'parsing', total: 0, progress: 0 })
     try {
+      // Inventory supported files before parsing so the denominator includes queued work.
+      const countFiles = async (path: string, depth: number): Promise<void> => {
+        if (this.shuttingDown || !store.getBase(root.baseId)) throw new Error('Folder synchronization stopped')
+        if (depth > DIRECTORY_MAX_DEPTH) return
+        let entries
+        try { entries = await readdir(path, { withFileTypes: true }) } catch { return }
+        for (const entry of entries) {
+          if (entry.isDirectory()) await countFiles(join(path, entry.name), depth + 1)
+          else if (entry.isFile() && DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) this.processingMeter.add(root.id)
+        }
+      }
+      await countFiles(canonicalSource, 0)
+      this.processingMeter.discovered(root.id)
       const boundRoot = await this.bindDocumentSourcePath(root, canonicalSource)
       items.push({
         relativePath: '.',
@@ -2073,6 +2100,7 @@ export class KnowledgeService extends Service {
         action: mode === 'created' ? 'created' : boundRoot === root ? 'unchanged' : 'updated',
       })
       await this.syncDirectoryNode({
+        meterId: root.id,
         rootPath: canonicalSource,
         diskPath: canonicalSource,
         directory: boundRoot,
@@ -2085,6 +2113,7 @@ export class KnowledgeService extends Service {
       await this.touchBase(root.baseId)
     } finally {
       this.indexing.delete(root.id)
+      this.processingMeter.finish(root.id)
     }
     const count = (action: DirectorySyncItem['action']): number => items.filter(item => item.action === action).length
     const failed = count('failed')
@@ -2103,7 +2132,9 @@ export class KnowledgeService extends Service {
 
   private async bindDocumentSourcePath(document: KnowledgeDocument, sourcePath: string): Promise<KnowledgeDocument> {
     if (document.sourcePath === sourcePath) return document
-    const next = { ...document, sourcePath, updatedAt: Date.now() }
+    const current = this.requireStore().getDocument(document.id)
+    if (!current) throw new Error('Document was deleted while binding its source')
+    const next = { ...current, sourcePath, updatedAt: Date.now() }
     await this.requireStore().putDocument(next)
     return next
   }
@@ -2144,6 +2175,7 @@ export class KnowledgeService extends Service {
   }
 
   private async syncDirectoryNode(args: {
+    meterId: string
     rootPath: string
     diskPath: string
     directory: KnowledgeDocument
@@ -2151,7 +2183,7 @@ export class KnowledgeService extends Service {
     childrenByParent: Map<string, KnowledgeDocument[]>
     items: DirectorySyncItem[]
   }): Promise<void> {
-    const { rootPath, diskPath, directory, depth, childrenByParent, items } = args
+    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items } = args
     const store = this.requireStore()
     if (this.shuttingDown || !store.getBase(directory.baseId)) throw new Error('Folder synchronization stopped')
     if (store.getBase(directory.baseId)?.storageMode === 'external') await readableRoot(rootPath)
@@ -2245,7 +2277,7 @@ export class KnowledgeService extends Service {
             const childIndex = children.findIndex(candidate => candidate.id === child!.id)
             if (childIndex >= 0) children[childIndex] = bound
             items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
-            await this.syncDirectoryNode({ rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items })
+            await this.syncDirectoryNode({ meterId, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items })
           } catch (error) {
             items.push({ relativePath, kind: 'directory', action: 'failed', error: this.directoryItemError(error) })
           }
@@ -2263,6 +2295,8 @@ export class KnowledgeService extends Service {
           continue
         }
         fileJobs.push((async () => {
+          this.processingMeter.begin(meterId)
+          let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
           try {
             const before = await stat(fullPath)
             const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
@@ -2288,10 +2322,11 @@ export class KnowledgeService extends Service {
               const fresh = store.getDocument(document.id)
               if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
             }
+            outcome = document.incomplete || document.embeddingError ? 'failed' : action === 'unchanged' ? 'skipped' : 'processed'
             items.push({ relativePath, kind: 'file', documentId: document.id, action })
           } catch (error) {
             items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: this.directoryItemError(error) })
-          }
+          } finally { this.processingMeter.settle(meterId, outcome) }
         })())
         // Bound file buffers and parser requests. Heavy processors retain their
         // own two-worker queue; this overlaps disk I/O, parsing and index writes.
@@ -2668,7 +2703,7 @@ export class KnowledgeService extends Service {
     // One grouped pass over the base's chunks (embedding is all-or-nothing per
     // doc), avoiding a full chunk scan per document on every list.
     const { withChunks, missingEmbedding } = store.docChunkStatus(baseId)
-    const allDocs = store.listDocuments(baseId)
+    const allDocs = store.listDocuments(baseId, { includeRawText: false })
     const childCount = new Map<string, number>()
     for (const doc of allDocs) {
       if (doc.parentDirectoryId !== undefined) {
@@ -2900,6 +2935,10 @@ export class KnowledgeService extends Service {
 
   // ── local OCR (scanned-PDF recognition, Cherry's local-document posture) ──
 
+  readonly structureV3 = new StructureV3Manager()
+  getStructureStatus() { return this.structureV3.status() }
+  prepareStructure() { return this.structureV3.prepare() }
+
   getOcrStatus(): OcrModelStatus {
     return getOcrModelStatus()
   }
@@ -2974,14 +3013,14 @@ export class KnowledgeService extends Service {
         return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
       }
       if (inside(from, managedRoot) || inside(target, managedRoot) || inside(managedRoot, from) || inside(managedRoot, target)) {
-        throw new Error('MinerU 托管目录与缓存迁移路径重叠；请保持 MinerU 独立目录，不随嵌入模型缓存迁移。')
+        throw new Error('The managed MinerU directory overlaps the cache migration path. Keep MinerU in a separate directory when moving the embedding model cache.')
       }
     }
     // A download in flight writes into the current cache directory; moving
     // its half-written files out from under the worker would corrupt the
     // model. Refuse instead of silently breaking the download.
     if (hasActiveLocalModelDownload() || hasActiveLocalRerankDownload()) {
-      throw new Error('模型正在下载，请先等待下载完成或取消后再迁移')
+      throw new Error('A model is downloading. Wait for completion or cancel the download before moving the cache')
     }
     // Release loaded models (up to ~600MB each) and the OCR worker BEFORE
     // touching the files, and wait for the worker threads to actually exit:
@@ -3262,7 +3301,7 @@ export class KnowledgeService extends Service {
       throw new NotFoundError(`knowledge base not found: ${baseId}`)
     }
     const bases = baseId !== undefined ? store.listBases().filter(base => base.id === baseId) : store.listBases()
-    const documents = bases.flatMap(base => store.listDocuments(base.id))
+    const documents = bases.flatMap(base => store.listDocuments(base.id, { includeRawText: false }))
     const charCount = documents.reduce((sum, doc) => sum + doc.charCount, 0)
     const tokenCount = documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
     const chunkStats = store.chunkStats(bases.map(base => base.id))
@@ -3817,12 +3856,15 @@ export class KnowledgeService extends Service {
   }
 
   /** Queue one parse+ingest task behind a per-base worker pool (Cherry's job queue). */
-  private enqueueIngest(baseId: string, task: () => Promise<void>): void {
+  private enqueueIngest(baseId: string, task: () => Promise<void | boolean>): void {
     let entry = this.ingestQueues.get(baseId)
     if (entry === undefined) {
       entry = { pending: [], running: 0 }
       this.ingestQueues.set(baseId, entry)
     }
+    const meterId = `uploads:${baseId}`
+    if (!this.processingMeter.active(meterId)) this.processingMeter.start(meterId, baseId)
+    this.processingMeter.add(meterId)
     entry.pending.push(task)
     this.pumpIngestQueue(baseId)
   }
@@ -3835,17 +3877,20 @@ export class KnowledgeService extends Service {
       const task = entry.pending.shift()
       if (task === undefined) break
       entry.running += 1
+      this.processingMeter.begin(`uploads:${baseId}`)
       // Swallow the finally chain's rejection: a task that throws (e.g. an
       // unexpected store error) would otherwise become an unhandledRejection
       // and kill the whole DSH process.
-      void task().finally(() => {
+      let outcome: 'processed' | 'failed' = 'failed'
+      void task().then(result => { outcome = result === false ? 'failed' : 'processed' }).finally(() => {
+        this.processingMeter.settle(`uploads:${baseId}`, outcome)
         entry.running -= 1
         this.pumpIngestQueue(baseId)
       }).catch((error: unknown) => {
         this.ctx.logger.warn(`knowledge: ingest task failed: ${error instanceof Error ? error.message : String(error)}`)
       })
     }
-    if (entry.running === 0 && entry.pending.length === 0) this.ingestQueues.delete(baseId)
+    if (entry.running === 0 && entry.pending.length === 0) { this.ingestQueues.delete(baseId); this.processingMeter.finish(`uploads:${baseId}`) }
   }
 
   /** Serialize a read-then-write section per base (dedup check + first persist). */

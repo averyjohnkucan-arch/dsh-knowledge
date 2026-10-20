@@ -9,6 +9,7 @@ import type { EmbeddingProvider } from '../src/knowledge/types.js'
 // Replace the embedding module with a deterministic stub so we can count how
 // often the API would actually be called (the reuse path must not call it).
 vi.mock('../src/knowledge/embed.js', () => ({
+  localModelCacheDir: vi.fn(() => '/tmp/dsh-knowledge-test-missing-model-cache'),
   DEFAULT_LOCAL_MODEL: 'onnx-community/Qwen3-Embedding-0.6B-ONNX',
   embedTexts: vi.fn(async (_provider: EmbeddingProvider, _baseUrl: string, _model: string, _apiKey: string, texts: readonly string[]) =>
     texts.map(text => {

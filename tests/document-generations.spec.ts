@@ -41,7 +41,7 @@ afterEach(async () => {
 async function storage(fixture = domainFixture()) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-generations-'))
   dirs.push(dir)
-  const options = { chunkStorePath: join(dir, 'chunks.sqlite'), legacyJsonPath: join(dir, 'no-legacy.json') }
+  const options = { documentMetadataBackend: 'domain' as const, chunkStorePath: join(dir, 'chunks.sqlite'), legacyJsonPath: join(dir, 'no-legacy.json') }
   const store = await openStore(fixture.facility, options)
   stores.push(store)
   await store.putBase(base)

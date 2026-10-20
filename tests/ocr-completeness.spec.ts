@@ -92,6 +92,12 @@ describe('complete and bounded OCR rasters (#37)', () => {
     expect(mock.documentDestroyed).toHaveBeenCalledOnce()
   })
 
+  it('renders only the selected scanned pages', async () => {
+    const pages = await renderPdfPages(new Uint8Array([1]), 100, [2])
+    expect(pages?.map(page => page.page)).toEqual([2])
+    expect(mock.pixmapDestroyed).toHaveBeenCalledTimes(1)
+  })
+
   it('does not publish recognized text when a later page crashes the OCR child', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-ocr-complete-')); dirs.push(dir)
     await mkdir(join(dir, 'ocr'))
@@ -99,6 +105,6 @@ describe('complete and bounded OCR rasters (#37)', () => {
     setLocalModelCacheDir(dir)
     mock.recognize.mockResolvedValueOnce('page one').mockRejectedValueOnce(Object.assign(new Error('child exited'), { code: 'ocr_process_crash' }))
     await expect(ocrPdfText(new Uint8Array([1]))).rejects.toMatchObject({ code: 'ocr_process_crash' })
-    expect(mock.recognize).toHaveBeenCalledTimes(2)
+    expect(mock.recognize).toHaveBeenCalledTimes(3) // another page may already be in flight in the bounded pool
   })
 })

@@ -87,14 +87,14 @@ const readinessCache = new Map<string, { cacheDir: string; record: ReadinessReco
 let registryWriteChain: Promise<void> = Promise.resolve()
 
 export const LOCAL_MODELS: readonly LocalModelDescriptor[] = [
-  { id: 'onnx-community/Qwen3-Embedding-0.6B-ONNX', name: 'Qwen3 Embedding 0.6B', kind: 'embedding', subtitle: '1024 维 · 中文强 · last-token 池化', dimensions: 1024, maxTokens: 32768 },
-  { id: 'Xenova/bge-small-zh-v1.5', name: 'BGE Small zh v1.5', kind: 'embedding', subtitle: '512 维 · 中文检索 · CLS 池化', dimensions: 512, maxTokens: 512 },
-  { id: 'Xenova/bge-small-en-v1.5', name: 'BGE Small en v1.5', kind: 'embedding', subtitle: '384 维 · 英文检索 · CLS 池化', dimensions: 384, maxTokens: 512 },
-  { id: 'Xenova/gte-small', name: 'GTE Small', kind: 'embedding', subtitle: '384 维 · 多语言 · mean 池化', dimensions: 384, maxTokens: 512 },
-  { id: 'Xenova/multilingual-e5-small', name: 'Multilingual E5 Small', kind: 'embedding', subtitle: '384 维 · 多语言 · CLS 池化', dimensions: 384, maxTokens: 512 },
+  { id: 'onnx-community/Qwen3-Embedding-0.6B-ONNX', name: 'Qwen3 Embedding 0.6B', kind: 'embedding', subtitle: '1024 dimensions · multilingual · last-token pooling', dimensions: 1024, maxTokens: 32768 },
+  { id: 'Xenova/bge-small-zh-v1.5', name: 'BGE Small zh v1.5', kind: 'embedding', subtitle: '512 dimensions · Chinese retrieval · CLS pooling', dimensions: 512, maxTokens: 512 },
+  { id: 'Xenova/bge-small-en-v1.5', name: 'BGE Small en v1.5', kind: 'embedding', subtitle: '384 dimensions · English retrieval · CLS pooling', dimensions: 384, maxTokens: 512 },
+  { id: 'Xenova/gte-small', name: 'GTE Small', kind: 'embedding', subtitle: '384 dimensions · multilingual · mean pooling', dimensions: 384, maxTokens: 512 },
+  { id: 'Xenova/multilingual-e5-small', name: 'Multilingual E5 Small', kind: 'embedding', subtitle: '384 dimensions · multilingual · CLS pooling', dimensions: 384, maxTokens: 512 },
   {
     id: 'Xenova/bge-reranker-base', name: 'BGE Reranker Base', kind: 'reranking', support: 'official',
-    subtitle: '本地重排 · 单 logit 跨编码器 · sigmoid · 双语（约 280MB）', maxTokens: 512, recommendedBatchSize: 16,
+    subtitle: 'Local reranking · single-logit cross-encoder · sigmoid · bilingual (~280 MB)', maxTokens: 512, recommendedBatchSize: 16,
   },
 ]
 
@@ -167,7 +167,7 @@ async function descriptors(): Promise<LocalModelDescriptor[]> {
     .filter(entry => !LOCAL_MODELS.some(model => model.id === entry.id))
     .map(entry => ({
       id: entry.id, name: basename(entry.id), kind: 'reranking' as const, support: 'experimental' as const,
-      subtitle: '自定义本地重排 · 实验性 · 需要兼容性验证', maxTokens: 512, recommendedBatchSize: 16,
+      subtitle: 'Custom local reranker · experimental · compatibility check required', maxTokens: 512, recommendedBatchSize: 16,
     }))
   return [...LOCAL_MODELS, ...custom]
 }
@@ -248,7 +248,7 @@ async function summarize(descriptor: LocalModelDescriptor): Promise<LocalModelSu
         status: live.status === 'ready' ? 'validating' : 'unhealthy',
         health: live.status === 'ready' ? 'checking' : 'unchecked',
         progress: 100,
-        message: '模型已下载，正在或等待隔离运行时兼容性验证',
+        message: 'Model downloaded; isolated runtime compatibility check is running or queued',
       }
     }
     return { ...descriptor, status: 'ready', health: 'healthy', progress: 100, message: '', lastCheckedAt: ready.validatedAt }
@@ -258,7 +258,7 @@ async function summarize(descriptor: LocalModelDescriptor): Promise<LocalModelSu
   const files = await modelFingerprint(descriptor.id)
   if (!files.complete) return { ...descriptor, status: 'not_downloaded', health: 'unchecked', progress: 0, message: '' }
   const ready = await readReadiness(descriptor.id)
-  if (ready === undefined) return { ...descriptor, status: 'unhealthy', health: 'unchecked', progress: 100, message: '模型已下载，使用前需要完成兼容性验证' }
+  if (ready === undefined) return { ...descriptor, status: 'unhealthy', health: 'unchecked', progress: 100, message: 'Model downloaded; complete a compatibility check before use' }
   return { ...descriptor, status: 'ready', health: 'healthy', progress: 100, message: '', lastCheckedAt: ready.validatedAt, latencyMs: ready.latencyMs }
 }
 
@@ -365,9 +365,9 @@ export async function deleteLocalModel(id: string): Promise<LocalModelSummary> {
 export async function assertLocalRerankerReady(modelId: string): Promise<void> {
   let descriptor: LocalModelDescriptor
   try { descriptor = await findModel(modelId) } catch {
-    throw new LocalRerankError('unsupported_model', '本地重排模型尚未登记，请在设置 → 本地模型中添加并验证', false)
+    throw new LocalRerankError('unsupported_model', 'Local reranker is not registered. Add and validate it in Settings → Local Models', false)
   }
-  if (descriptor.kind !== 'reranking') throw new LocalRerankError('unsupported_model', '所选本地模型不是重排模型', false)
+  if (descriptor.kind !== 'reranking') throw new LocalRerankError('unsupported_model', 'The selected local model is not a reranker', false)
   const live = liveRerankStatus.get(modelId)
   // A `downloading`/`validating` flag is only trusted while it is fresh. Its
   // owner is the rerank child, and a child that died without publishing a final
@@ -376,12 +376,12 @@ export async function assertLocalRerankerReady(modelId: string): Promise<void> {
   // real checks below (weights fingerprint + persisted readiness marker).
   const liveIsFresh = live?.statusChangedAt === undefined || Date.now() - live.statusChangedAt < RERANK_STATUS_STALE_MS
   if (liveIsFresh && (live?.status === 'downloading' || live?.status === 'validating')) {
-    throw new LocalRerankError('model_checking', '本地重排模型正在下载或验证，请稍后重试', true)
+    throw new LocalRerankError('model_checking', 'Local reranker is downloading or being validated. Try again shortly', true)
   }
-  if (live?.status === 'unhealthy' || live?.status === 'error') throw new LocalRerankError('model_unhealthy', '本地重排模型验证失败，请在设置中重新验证', false)
+  if (live?.status === 'unhealthy' || live?.status === 'error') throw new LocalRerankError('model_unhealthy', 'Local reranker validation failed. Run validation again in Settings', false)
   const files = await modelFingerprint(modelId)
-  if (!files.complete) throw new LocalRerankError('model_not_downloaded', '本地重排模型尚未下载，请在设置 → 本地模型中下载', false)
-  if (await readReadiness(modelId) === undefined) throw new LocalRerankError('model_unhealthy', '本地重排模型尚未通过兼容性验证，请在设置中运行自检', false)
+  if (!files.complete) throw new LocalRerankError('model_not_downloaded', 'Local reranker is not downloaded. Download it in Settings → Local Models', false)
+  if (await readReadiness(modelId) === undefined) throw new LocalRerankError('model_unhealthy', 'Local reranker has not passed its compatibility check. Run validation in Settings', false)
 }
 
 export function localRerankActionFor(code: LocalRerankFailureCode): 'download_model' | 'run_self_test' | 'check_config' | 'retry_later' {

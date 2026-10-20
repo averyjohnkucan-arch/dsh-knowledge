@@ -137,6 +137,7 @@ function renderer(file: string, props: Record<string, unknown>) {
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'fragment' },
     './theme.js': { C, accentSoft, style },
     './icons.js': new Proxy({}, { get: () => () => null }),
+    './RecommendedLocalStack.js': { RecommendedLocalStack: () => null },
     './MineruDeploymentSection.js': { MineruDeploymentSection: mineruPlaceholder },
   }, { window, setTimeout: window.setTimeout, clearTimeout: window.clearTimeout })
   const component = exported[file.replace('.tsx', '')] as Component

@@ -12,6 +12,8 @@ import type { BaseConfig, EmbeddingProvider, KnowledgeConfig, SearchMode } from 
 import type { DocumentProcessor, MineruTier } from './processing-types.js'
 
 export interface Config {
+  ocrEnabled?: boolean
+  structureV3Charts?: boolean
   embeddingProvider: EmbeddingProvider
   embeddingBaseUrl: string
   embeddingModel: string
@@ -43,7 +45,7 @@ export interface Config {
   /** Chunk SQLite file; empty = `<DSH_HOME>/storages/knowledge-chunks.sqlite`. */
   chunkStorePath: string
   /** Built-in parsing, legacy MinerU cloud, or an independently deployed V1 service. */
-  documentProcessorProvider: DocumentProcessor
+  documentProcessorProvider: Exclude<DocumentProcessor, 'paddle'>
   /** MinerU API key (required when provider is `mineru`). */
   mineruApiKey: string
   /** MinerU API host; empty = https://mineru.net */
@@ -64,7 +66,7 @@ export interface Config {
   /** Auto-refresh URL documents older than this many hours (0 = off). */
   urlRefreshHours: number
   /** Image/table captioning: `off` / `openai` (vision chat API) / `ollama` (local VLM). */
-  imageCaptionProvider: 'off' | 'openai' | 'ollama'
+  imageCaptionProvider: 'off' | 'paddle' | 'openai' | 'ollama'
   /** Captioning model id (OpenAI-compatible vision model, or an Ollama VLM like llava / qwen2.5vl). */
   imageCaptionModel: string
   /** Captioning API root; empty = the embedding base URL (openai) or http://127.0.0.1:11434 (ollama). */
@@ -103,6 +105,8 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
+  ocrEnabled: Schema.boolean().default(true),
+  structureV3Charts: Schema.boolean().default(true),
   embeddingProvider: Schema.union(['openai', 'ollama', 'local', 'none']).default('none'),
   embeddingBaseUrl: Schema.string().default(''),
   embeddingModel: Schema.string().default(''),
@@ -139,7 +143,7 @@ export const Config: Schema<Config> = Schema.object({
   chunkTokenLimit: Schema.number().default(0),
   conflictStrategy: Schema.union(['keep', 'replace', 'rename']).default('rename'),
   urlRefreshHours: Schema.number().default(0),
-  imageCaptionProvider: Schema.union(['off', 'openai', 'ollama']).default('off'),
+  imageCaptionProvider: Schema.union(['off', 'paddle', 'openai', 'ollama']).default('off'),
   imageCaptionModel: Schema.string().default(''),
   imageCaptionBaseUrl: Schema.string().default(''),
   imageCaptionApiKey: Schema.string().default(''),
@@ -199,6 +203,8 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     chunkTokenLimit: clampInt(overrides.chunkTokenLimit ?? config.chunkTokenLimit, 0, 1_000_000, 0),
     conflictStrategy: overrides.conflictStrategy ?? config.conflictStrategy,
     urlRefreshHours: clampInt(overrides.urlRefreshHours ?? config.urlRefreshHours, 0, 24 * 365, 0),
+    ocrEnabled: overrides.ocrEnabled ?? config.ocrEnabled ?? true,
+    structureV3Charts: overrides.structureV3Charts ?? config.structureV3Charts ?? true,
     imageCaptionProvider: overrides.imageCaptionProvider ?? config.imageCaptionProvider,
     imageCaptionModel: overrides.imageCaptionModel ?? config.imageCaptionModel,
     imageCaptionBaseUrl: overrides.imageCaptionBaseUrl ?? config.imageCaptionBaseUrl,
@@ -257,6 +263,8 @@ export function resolveConfigFor(config: Config, overrides: ConfigOverrides, bas
     chunkTokenLimit: clampInt(baseConfig.chunkTokenLimit ?? resolved.chunkTokenLimit, 0, 1_000_000, 0),
     conflictStrategy: baseConfig.conflictStrategy ?? resolved.conflictStrategy,
     urlRefreshHours: clampInt(baseConfig.urlRefreshHours ?? resolved.urlRefreshHours, 0, 24 * 365, 0),
+    ocrEnabled: baseConfig.ocrEnabled ?? resolved.ocrEnabled ?? true,
+    structureV3Charts: baseConfig.structureV3Charts ?? resolved.structureV3Charts ?? true,
     imageCaptionProvider: baseConfig.imageCaptionProvider ?? resolved.imageCaptionProvider,
     imageCaptionModel: baseConfig.imageCaptionModel ?? resolved.imageCaptionModel,
     imageCaptionBaseUrl: baseConfig.imageCaptionBaseUrl ?? resolved.imageCaptionBaseUrl,

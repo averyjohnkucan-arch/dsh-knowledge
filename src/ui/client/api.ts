@@ -1,3 +1,4 @@
+import type { ProcessingSnapshot } from '../../knowledge/processing-meter.js'
 /**
  * Browser fetch client for the knowledge host service. Same-origin JSON calls
  * against `/knowledge/*`, with local types mirroring the host vocabulary (the
@@ -33,6 +34,8 @@ export interface BaseConfig {
   rrfVectorWeight?: number
   embeddingBatchSize?: number
   siblingChunks?: number
+  ocrEnabled?: boolean
+  structureV3Charts?: boolean
   documentProcessorProvider?: 'builtin' | 'mineru' | 'mineru-local'
   mineruApiKey?: string
   mineruApiHost?: string
@@ -46,7 +49,7 @@ export interface BaseConfig {
   chunkTokenLimit?: number
   conflictStrategy?: 'keep' | 'replace' | 'rename'
   urlRefreshHours?: number
-  imageCaptionProvider?: 'off' | 'openai' | 'ollama'
+  imageCaptionProvider?: 'off' | 'paddle' | 'openai' | 'ollama'
   imageCaptionModel?: string
   imageCaptionBaseUrl?: string
   imageCaptionApiKey?: string
@@ -220,7 +223,7 @@ export interface KnowledgeConfig {
   chunkTokenLimit: number
   conflictStrategy: 'keep' | 'replace' | 'rename'
   urlRefreshHours: number
-  imageCaptionProvider: 'off' | 'openai' | 'ollama'
+  imageCaptionProvider: 'off' | 'paddle' | 'openai' | 'ollama'
   imageCaptionModel: string
   imageCaptionBaseUrl: string
   imageCaptionApiKey: string
@@ -228,6 +231,8 @@ export interface KnowledgeConfig {
   siblingChunks: number
   hfEndpoint: string
   mineruPythonIndexUrl?: string
+  ocrEnabled?: boolean
+  structureV3Charts?: boolean
   documentProcessorProvider: 'builtin' | 'mineru' | 'mineru-local'
   mineruApiKey: string
   mineruApiHost: string
@@ -385,7 +390,7 @@ export class KnowledgeApi {
   private async call<T>(method: string, path: string, body?: unknown, timeoutMs = 60_000): Promise<T> {
     const response = await fetch(`/knowledge${path}`, {
       method,
-      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path === '/folder-picker' || path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
+      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path.startsWith('/ocr-acceleration') || path.startsWith('/structure-v3') || path === '/folder-picker' || path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       // A hung host must not pin the panel's busy state forever: fail the
       // call with a clear error instead of an indefinite spinner. Long-running
@@ -456,6 +461,11 @@ export class KnowledgeApi {
   removeLocalModel(id: string): Promise<LocalModelSummary> {
     return this.call('DELETE', `/local-models/remove?model=${encodeURIComponent(id)}`)
   }
+
+  getOcrAcceleration(): Promise<{ status: string; message: string; devices: Array<{ device: string; name: string; qualified: boolean; medianMs?: number; error?: string }> }> { return this.call('GET', '/ocr-acceleration') }
+  prepareOcrAcceleration(): Promise<{ status: string; message: string; devices: Array<{ device: string; name: string; qualified: boolean; medianMs?: number; error?: string }> }> { return this.call('POST', '/ocr-acceleration', {}) }
+  getStructureStatus(): Promise<{ status: string; progress: number; message: string; device: string }> { return this.call('GET', '/structure-v3') }
+  prepareStructure(): Promise<{ status: string; progress: number; message: string; device: string }> { return this.call('POST', '/structure-v3/prepare', {}) }
 
   getOcrStatus(): Promise<{ status: string; progress: number; message: string }> {
     return this.call('GET', '/local-ocr')
@@ -682,6 +692,8 @@ export class KnowledgeApi {
   cancelDirectoryImport(jobId: string): Promise<{ cancelled: boolean }> {
     return this.call('POST', `/import-directory/${encodeURIComponent(jobId)}/cancel`)
   }
+
+  getProcessingSummary(): Promise<ProcessingSnapshot[]> { return this.call('GET', '/processing-summary') }
 
   getIndexingStatus(): Promise<Array<{
     docId: string

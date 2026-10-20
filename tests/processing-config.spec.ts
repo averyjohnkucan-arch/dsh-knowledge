@@ -43,6 +43,16 @@ describe('document processing configuration', () => {
     })
   })
 
+  it('keeps parser, OCR and chart settings independent across global and base overrides', () => {
+    const global = { documentProcessorProvider: 'builtin' as const, ocrEnabled: true, imageCaptionProvider: 'paddle' as const, structureV3Charts: true }
+    const local = { ocrEnabled: false, imageCaptionProvider: 'off' as const }
+    expect(resolveConfigFor(deployment, global, local)).toMatchObject({ documentProcessorProvider: 'builtin', ocrEnabled: false, imageCaptionProvider: 'off', structureV3Charts: true })
+    for (const schema of [baseConfigSchema, configOverridesSchema]) {
+      expect(schema.parse(global)).toMatchObject(global)
+      expect(schema.parse(local)).toMatchObject(local)
+    }
+  })
+
   it('bounds processor deadlines at every resolution layer', () => {
     expect(resolveConfig(deployment, { documentProcessingTimeoutMs: 1 }).documentProcessingTimeoutMs).toBe(10_000)
     expect(resolveConfig(deployment, { documentProcessingTimeoutMs: Infinity }).documentProcessingTimeoutMs).toBe(1_800_000)

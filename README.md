@@ -1,10 +1,12 @@
+> Development fork: [averyjohnkucan-arch/dsh-knowledge](https://github.com/averyjohnkucan-arch/dsh-knowledge), based on [Soren-ABT/dsh-knowledge](https://github.com/Soren-ABT/dsh-knowledge). The original AGPL-3.0 license and upstream history are preserved. Local accelerator and document-pipeline changes are under development; see [fork status](docs/fork-status.md) for validation limits.
+
 <div align="center">
 
-#  dsh-knowledge
+# dsh-knowledge
 
-**DSH 的知识库插件**
+**A knowledge base plugin for DSH**
 
-[**English**](./README.en.md) · [**中文**](./README.md)
+[**English**](./README.en.md) · [**Chinese**](./README.zh-CN.md)
 
 [![npm version](https://img.shields.io/npm/v/dsh-knowledge?color=cb3837&logo=npm)](https://www.npmjs.com/package/dsh-knowledge)
 [![npm downloads](https://img.shields.io/npm/dm/dsh-knowledge?color=cb3837&logo=npm)](https://www.npmjs.com/package/dsh-knowledge)
@@ -13,38 +15,45 @@
 [![SQLite](https://img.shields.io/badge/SQLite-node%3Asqlite-%23003B57?logo=sqlite)](https://www.sqlite.org/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
-一个深度的**知识库系统**，作为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的独立、可开源 bundle 插件。提供知识库（含**分组**）与文档管理、文本分块、向量化（OpenAI 兼容 / Ollama / **本地模型** / 关键词降级）、检索，以及模型可见工具与浏览器管理面板。
-
-<img width="1000" height="667" alt="image" src="https://github.com/user-attachments/assets/8fab3aed-709e-4a59-87fa-c1a52c29c11e" />
+A **knowledge base system** as a standalone, open-source bundle plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): bases (with **groups**) and documents, text chunking, embeddings (OpenAI-compatible / Ollama / **local model** / lexical fallback), retrieval, model-facing tools, and a browser management panel.
 
 </div>
 
 ---
 
-## 为什么选择 dsh-knowledge
+## Local pipeline configuration
 
-dsh-knowledge 把文档导入、解析、分块、检索、证据组织和模型续读整合进 DSH。它既可以零向量配置运行，也可以完全使用本地模型，不要求额外部署独立的知识库服务。
+Use the built-in PDF parser, PaddleOCR for scanned documents, and optional
+PP-StructureV3/PP-Chart2Table for chart and table extraction. Each stage has its own
+selection or switch. Processing defaults and per-base overrides are separate;
+existing documents require explicit reprocessing after a parser change.
+See the [English local pipeline guide](docs/local-pipeline.md) for settings,
+progress counters, ETA behavior, and current validation limits.
 
-| 能力 | 说明 |
+## Why dsh-knowledge
+
+dsh-knowledge brings document ingestion, parsing, chunking, retrieval, evidence composition, and anchored follow-up reading into DSH. It works without vector configuration and can also run with fully local models, without a separate knowledge-base service.
+
+| Capability | What it provides |
 |---|---|
-| 文档来源 | 文件、目录、网页和文本笔记；本地路径可持续重扫和重新索引 |
-| 混合检索 | FTS5 BM25、向量召回、RRF 融合、MMR 去重以及可选重排 |
-| 证据上下文 | 按文档顺序动态生成 `ContextWindow`，支持围绕命中位置继续阅读 |
-| 本地运行 | 本地 embedding、本地 rerank、本地 OCR；也支持 OpenAI 兼容接口和 Ollama |
-| 文档处理 | 常见办公格式、扫描 PDF、PaddleOCR、Tesseract 回退及可选 MinerU |
-| 管理界面 | 知识库分组、批量导入、预览、召回测试、模型管理和索引重建 |
+| Document sources | Files, directories, web pages, and text notes, with durable local-path rescans and reindexing |
+| Hybrid retrieval | FTS5 BM25, vector recall, RRF fusion, MMR diversity, and optional reranking |
+| Evidence context | Ordered `ContextWindow` composition and continuation around a specific search hit |
+| Local operation | Local embeddings, reranking, and OCR, plus OpenAI-compatible APIs and Ollama |
+| Document processing | Common office formats, scanned PDFs, PaddleOCR, Tesseract fallback, and optional MinerU |
+| Management UI | Base groups, batch import, previews, recall testing, model management, and index rebuilds |
 
 ---
 
-## 快速开始
+## Quick start
 
-### 1. 准备环境
+### 1. Prepare the environment
 
-- Node.js：`^22.19.0 || >=24.0.0`
-- pnpm：`>=10`
-- 已安装并初始化 DeepSeek Harness
+- Node.js: `^22.19.0 || >=24.0.0`
+- pnpm: `>=10`
+- An installed and initialized DeepSeek Harness profile
 
-在安装插件之前，将以下构建许可**合并到**目标 profile 的 `pnpm-workspace.yaml` 中已有的 `allowBuilds` 映射。不要重复添加第二个 `allowBuilds:` 键，否则 YAML 会失效。这些依赖包含安装期构建；pnpm 10 默认拒绝执行时，`dsh plugin add` 会在登记 bundle 前退出。
+Before installing the plugin, **merge** the following build permissions into the target profile's existing `allowBuilds` mapping in `pnpm-workspace.yaml`. Do not add a second `allowBuilds:` key: duplicate YAML keys make the file invalid. These dependencies require installation-time builds; when pnpm 10 blocks them, `dsh plugin add` exits before it can register the bundle.
 
 ```yaml
 allowBuilds:
@@ -55,48 +64,48 @@ allowBuilds:
   tesseract.js: false
 ```
 
-### 2. 安装插件
+### 2. Install the plugin
 
 ```bash
 dsh plugin --profile <name> add dsh-knowledge
 ```
 
-插件安装在 profile 层。无论 DSH 来自 npm 还是源码 checkout，都使用同一条命令。安装完成后重启 web 服务，并刷新页面加载管理面板。
+The plugin is installed at the profile level, so the same command works whether DSH came from npm or a source checkout. Restart the web service after installation and refresh the page to load the management panel.
 
-### 3. 完成首次配置
+### 3. Complete the first setup
 
-1. 点击侧边栏底部、设置旁的“知识库”入口。
-2. 新建知识库并导入文件、目录、网页或文本。
-3. 如需本地向量检索，在“设置 > 本地模型”下载 embedding 模型；也可以配置 OpenAI 兼容服务或 Ollama。
-4. 如需识别扫描件，再下载约 21 MB 的 OCR 模型。
-5. 在“召回测试”中检查结果，再让模型通过 `knowledge_search` 使用知识库。
+1. Open Knowledge from the bottom of the sidebar, beside Settings.
+2. Create a base and import files, a directory, a web page, or text.
+3. For local vector retrieval, download an embedding model from Settings > Local Models. You can instead configure an OpenAI-compatible endpoint or Ollama.
+4. Download the approximately 21 MB OCR model if you need scanned-document recognition.
+5. Check results in Recall Test, then let the model use the base through `knowledge_search`.
 
-不下载模型也可以使用关键词检索。扫描件 OCR、本地 embedding 和本地 rerank 只有在对应模型已下载并通过就绪检查后才启用。
+Lexical retrieval works without downloading a model. Scanned-document OCR, local embeddings, and local reranking activate only after their respective models are downloaded and pass readiness checks.
 
 <details>
-<summary>其他安装方式</summary>
+<summary>Other installation methods</summary>
 
 ```bash
-# GitHub Release 或 npm pack 生成的 tarball
+# Tarball from GitHub Releases or npm pack
 dsh plugin --profile <name> add ./dsh-knowledge-0.5.2.tgz
 
-# 本地源码目录，需要先完成构建
+# Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
 ```
 
-如果第一次安装因 pnpm 构建许可失败，请补全 `allowBuilds` 后重新运行 add。包通常已经进入 `node_modules`，第二次执行会继续完成 bundle 登记。
+If the first installation fails because pnpm blocked build scripts, add the `allowBuilds` entries and run the add command again. The package is normally already present in `node_modules`, and the second run completes bundle registration.
 
 </details>
 
 <details>
-<summary>恢复 <code>ERR_PNPM_WORKSPACE_MANIFEST_WRITER_PARSE</code></summary>
+<summary>Recover from <code>ERR_PNPM_WORKSPACE_MANIFEST_WRITER_PARSE</code></summary>
 
-这表示 pnpm 无法解析 DSH profile 自己的 `pnpm-workspace.yaml`，发生在下载或构建本插件之前。先备份文件，再修复错误信息指出的 YAML 行：
+This means pnpm could not parse the DSH profile's own `pnpm-workspace.yaml`; it happens before this plugin is downloaded or built. Back up the file first, then repair the YAML line named in the error:
 
-- Windows：`%USERPROFILE%\.dsh\profiles\<profile>\pnpm-workspace.yaml`
-- macOS / Linux：`~/.dsh/profiles/<profile>/pnpm-workspace.yaml`
+- Windows: `%USERPROFILE%\.dsh\profiles\<profile>\pnpm-workspace.yaml`
+- macOS / Linux: `~/.dsh/profiles/<profile>/pnpm-workspace.yaml`
 
-不要在不清楚原有设置用途时覆盖该文件。如果 profile 没有其他有意保留的 pnpm 设置，可恢复为以下最小有效配置，再将上方的 `allowBuilds` 合并进去：
+Do not overwrite the file if you do not know what its existing settings do. If the profile has no other intentional pnpm settings, it can be restored to this minimal valid configuration:
 
 ```yaml
 packages:
@@ -113,101 +122,101 @@ allowBuilds:
   tesseract.js: false
 ```
 
-随后重新执行同一条 `dsh plugin --profile <profile> add ...` 命令。若修复 YAML 后出现 `ERR_PNPM_IGNORED_BUILDS`，这是独立的构建授权问题；仅按 pnpm 输出的确切包名补充授权，不要宽泛地允许所有脚本。
+Then rerun the same `dsh plugin --profile <profile> add ...` command. If YAML repair reveals `ERR_PNPM_IGNORED_BUILDS`, that is a separate build-approval error: add only the exact package key printed by pnpm, rather than broadly allowing scripts.
 
 </details>
 
 ---
 
-## 核心能力
+## Core capabilities
 
-### 文档与来源管理
+### Documents and source tracking
 
-- 创建、重命名、分组和删除知识库；侧边栏支持分组折叠和库间移动。
-- 从文件、绝对路径、目录、URL 或纯文本导入文档。目录来源保留稳定 ID、类型和原始路径，可重新扫描磁盘变化。
-- 批量上传单次最多 20 个文件、单文件最大 22 MB，并使用 5 路后台导入池。
-- 同名冲突由服务端统一检测，可选择重命名、替换或取消；内容哈希用于避免重复导入。
-- 文档列表展示等待、解析、embedding、完成和失败状态；支持 PDF 原文、文本和完整分块预览。
-- 原始文件保存到知识库 raw 存储。不同目录根的同名相对路径互不冲突，失败的替换重建不会破坏上一份已提交内容。
+- Create, rename, group, and delete bases; collapse groups in the sidebar and move bases between them.
+- Import documents from uploads, absolute file paths, directories, URLs, or plain text. Directory sources retain a stable ID, kind, and original path for later rescans.
+- Upload up to 20 files per selection, with a 22 MB per-file limit and a five-way background import pool.
+- Resolve same-name conflicts through server-authoritative rename, replace, or cancel choices; content hashes prevent duplicate imports.
+- Track queued, parsing, embedding, ready, and failed states, with inline PDF, source-text, and complete chunk previews.
+- Store recoverable raw sources. Identical relative paths under different directory roots do not collide, and a failed replacement rebuild keeps the previously committed source.
 
 <details>
-<summary>支持的文档格式与目录行为</summary>
+<summary>Supported formats and directory behavior</summary>
 
-目录导入递归扫描 `txt`、`md`、`csv`、`html`、`json`、`pdf`、`docx`、`doc`、`pptx`、`ppt`、`xlsx`、`xls`、`epub` 等格式，并在界面中保留可下钻的文件夹树。
+Directory imports recursively scan `txt`, `md`, `csv`, `html`, `json`, `pdf`, `docx`, `doc`, `pptx`, `ppt`, `xlsx`, `xls`, `epub`, and other supported formats while retaining a drillable folder tree in the panel.
 
-重新扫描目录时会导入新增文件、重建已修改文件并移除已不存在的文件。单个文件失败不会隐藏其他成功结果，服务端和界面都会保留逐文件错误信息。
+A directory rescan imports new files, rebuilds changed files, and removes files that disappeared from disk. One failed item does not obscure successful imports; the service and UI retain per-file errors.
 
-**更新已导入目录的正确方式**：重新导入同一路径，或在界面中对目录容器执行重扫——两者现在走同一条同步路径，都只会原地更新原来那棵树。目录来源以“知识库 + 规范化真实路径”确定身份，所以重复导入不会再新建第二棵树。目录中的文件以“目录来源 + 相对路径”确定身份；只有名称和类型都唯一的旧文件才会被认领，出现两个候选时报告 `ambiguous_source`，不会猜测、合并或自动删除。管理 API 的文档详情会返回目录容器的 `sourcePath`，客户端可据此找到该重扫哪一个容器。
+**How to update an already-imported directory**: import the same path again, or rescan the directory container in the panel. Both now take the same synchronization path and update the original tree in place. A directory source is identified by its knowledge base plus its resolved real path, so a repeat import never builds a second tree. Files inside it are identified by that source plus their relative path; a legacy file is adopted only when its name and kind are unique, and two candidates are reported as `ambiguous_source` rather than guessed, merged, or deleted. Administrative document details return the container's `sourcePath`, so a client can tell which container to rescan.
 
 </details>
 
-### 检索与证据链
+### Retrieval and evidence flow
 
-- 未配置 embedding 时使用 CJK 二元组和拉丁词 BM25；配置向量后可使用 hybrid、vector、lexical 或 auto 模式。
-- 混合检索通过 Reciprocal Rank Fusion 合并 BM25 与向量结果，并支持相似度阈值、MMR 多样性和多查询融合。
-- 可选远程或本地 cross-encoder 重排。重排失败、超时或返回无效分数时保留原始召回顺序。
-- 每个命中动态生成有序的 `ContextWindow`，按 `before → anchor → after` 组织证据，不把桥接文本写入索引或 embedding。
-- 自动检索默认开启；它在模型回答前注入高相关证据，同时限制延迟、重复内容和单个知识库占用的上下文份额。
-- 召回测试展示来源、相关度、关键词/向量分数、耗时和重排状态，并支持复制引用与重放历史查询。
+- Without embeddings, retrieval uses CJK bigrams and Latin-token BM25. With vectors available, bases can use auto, hybrid, vector, or lexical mode.
+- Hybrid retrieval combines BM25 and vector rankings through Reciprocal Rank Fusion, with optional similarity thresholds, MMR diversity, and multi-query fusion.
+- Remote and local cross-encoder rerankers are optional. A timeout, process failure, or invalid score response preserves the original recall order.
+- Every hit receives a dynamically composed `ContextWindow` ordered as `before → anchor → after`; bridge text is never duplicated into the index or embeddings.
+- Proactive retrieval is enabled by default and injects strongly relevant evidence before the answer while bounding latency, duplicate context, and each base's share.
+- Recall Test shows sources, relevance, lexical/vector scores, latency, and rerank state, and supports citation copying and query-history replay.
 
 <details>
-<summary>ContextWindow 与自动检索细节</summary>
+<summary>ContextWindow and proactive-retrieval details</summary>
 
-`SearchHit.text` 始终保留完整 canonical anchor。`contextWindow` 默认不跨标题路径；超长锚点围绕查询命中按句子边界裁剪，相邻 chunk 的重复前后缀会被移除。旧字段 `siblingContext` 在 0.3.x 中继续兼容，但新调用方应优先使用 `contextWindow`。
+`SearchHit.text` remains the complete canonical anchor. `contextWindow` stays within the same heading path by default, crops oversized anchors around the query at sentence boundaries, and removes repeated suffix/prefix text between adjacent chunks. The legacy `siblingContext` field remains compatible throughout 0.3.x, but new consumers should prefer `contextWindow`.
 
-`knowledge_get_document` 支持普通 `chunkOffset` / `chunkLimit` 分页，也支持通过 `anchorChunkId` 或 `anchorIndex` 进入锚点模式。锚点模式可控制 `before`、`after`、`maxTokens`、`focus` 和 `crossHeading`。
+`knowledge_get_document` supports normal `chunkOffset` / `chunkLimit` pagination and an anchored mode selected with `anchorChunkId` or `anchorIndex`. Anchored reads accept `before`, `after`, `maxTokens`, `focus`, and `crossHeading` controls.
 
-自动检索的首 Token 路径不会启动本地 reranker；远程 rerank 最多调用一次，并共享 4 秒总预算。取消、超时或 provider 故障不会污染注入记忆，也不会把检索范围扩大到无关知识库。
+The first-token proactive path never launches a local reranker. A remote reranker may run at most once within the shared four-second deadline. Cancellation, timeouts, and provider failures do not mutate retrieval memory or widen the search into unrelated bases.
 
-v0.5.2 已修复 #51：证据和读取片段裁剪不会拆开 emoji 等字符的 UTF-16 代理对；模型可见文本中的既有孤立代理项会替换为 `U+FFFD`，避免上游 JSON 解析失败。存储文本与字符偏移保持原样，已损坏的会话历史不会自动修复。
+v0.5.2 fixes #51: evidence and document-read trimming preserve UTF-16 surrogate pairs in emoji and other astral characters. Existing lone surrogates in model-facing text are replaced with `U+FFFD` to avoid upstream JSON parsing failures. Stored text and character offsets are retained; previously poisoned session history is not repaired automatically.
 
 </details>
 
-### 分块、解析与 OCR
+### Chunking, parsing, and OCR
 
-- 标题感知分块保留 Markdown 标题路径和代码围栏，并把文档标题与标题路径作为检索上下文。
-- `chunkSize` 与 `chunkOverlap` 使用 Token 预算；长文本按标题、代码、段落、句读、列表和换行的优先级寻找断点。
-- 可选语义分块会合并相邻的相似段落；可选 Token 上限会继续在句号、逗号或空格附近细分超长块。
-- 扫描 PDF、无文本层矢量 PDF、损坏文本层和逐字符排版 PDF 可自动进入整页 OCR 路径。
-- PaddleOCR PP-OCRv5 为首选本地识别器，识别失败时回退 Tesseract；1-bit JBIG2/CCITT 扫描件也包含在处理路径中。
-- OCR 推理在独立子进程中运行，原生崩溃或超时会使文档导入失败，不会带走 DSH。页面光栅分配前按 64 MiB 预算选择缩放，逐页释放 pixmap；漏页、超出页数或内存预算时明确报错，不再把残缺正文标为成功。旧版本已丢页的扫描件需手动重新解析。
-- 可选 MinerU 远程处理可将公式、表格和复杂版式恢复为 Markdown；未配置时继续使用本地解析与 OCR。
-- 设置中提供 MinerU Basic/ONNX 本地托管实验入口：使用独立 Python 环境、固定模型 revision 与文件校验值，并可配置 Hugging Face 镜像和 Python 包源。真实托管推理仍按平台验收；安装不会修改全局 Python 包，也不会自动改用云端。参见 [MinerU 自部署与验证说明](docs/mineru-self-hosted.md)。
+- Heading-aware chunking preserves Markdown heading paths and fenced code, and includes the document title and heading path as retrieval context.
+- `chunkSize` and `chunkOverlap` are token budgets. Long text looks for boundaries in headings, code, paragraphs, sentence punctuation, lists, and line breaks.
+- Optional semantic chunking merges similar adjacent paragraphs; an optional token ceiling further divides oversized chunks near sentence, comma, or whitespace boundaries.
+- Scanned PDFs, vector-only PDFs without a text layer, corrupt text layers, and per-glyph layouts can switch automatically to full-page OCR.
+- PaddleOCR PP-OCRv5 is the primary local recognizer, with Tesseract fallback. The pipeline also handles 1-bit JBIG2/CCITT-style scans.
+- OCR inference runs in a separate process: a native crash or timeout fails the document without killing DSH. Page scaling is chosen before allocation under a 64 MiB raster budget, and each pixmap is explicitly released. Missing pages and work-budget limits fail visibly instead of completing with truncated text. Reparse scans that older versions already indexed with missing pages.
+- Optional remote MinerU processing can recover formulas, tables, and complex layouts as Markdown. Without it, documents continue through the local parser and OCR path.
+- Settings offer an experimental managed MinerU Basic/ONNX setup. It uses an isolated Python environment and pinned model revision/checksums, with separate Hugging Face mirror and Python package-index settings. Managed inference still requires per-platform qualification; setup does not modify global Python packages or silently switch to cloud parsing. See the [MinerU self-hosting and verification guide](docs/mineru-self-hosted.md).
 
-### 模型与管理界面
+### Models and management UI
 
-- 每个知识库可以覆盖 embedding、rerank、分块、topK、自动检索、冲突策略和文档处理设置；空字段继承全局值。
-- embedding 支持 OpenAI 兼容 `/embeddings`、Ollama 和 transformers.js 本地模型。
-- 本地模型页面管理 embedding、rerank 和 OCR 模型的下载、重试、删除、进度与健康状态。
-- 模型缓存目录支持原生文件夹选择、打开目录和安全迁移，可把较大的本地权重移出系统盘。
-- Ollama 页面支持查看、拉取、取消和删除模型；浏览或拉取不会隐式更改当前 embedding 配置。
-- 管理面板提供知识库导航、资料表格、批量重建/删除、原文与分块预览、召回测试、全局和每库设置及 Toast 反馈。
+- Each base can override embedding, reranking, chunking, topK, proactive retrieval, conflict handling, and document-processing settings; empty fields inherit global values.
+- Embeddings can come from an OpenAI-compatible `/embeddings` endpoint, Ollama, or a local transformers.js model.
+- The Local Models page manages embedding, rerank, and OCR downloads, retries, deletion, progress, readiness, and health state.
+- The cache directory supports native folder selection, opening, and safe migration so large local weights can live outside the system drive.
+- Ollama management supports listing, pulling, cancelling, and deleting models. Browsing or pulling never changes the active embedding configuration implicitly.
+- The management panel provides base navigation, document tables, batch rebuild/delete actions, source and chunk previews, recall testing, global/per-base settings, and toast feedback.
 
-**v0.5.1 修复（issue #42）：** 本地模型缓存目录的「浏览／打开目录」与 MinerU 安装目录选择兼容 DSH 0.2 的新接口及旧版接口。取消选择保留原输入；宿主缺少对应能力时，缓存目录显示提示，MinerU 隐藏选择按钮，路径仍可手动填写。
+**v0.5.1 fix (issue #42):** Cache-directory Browse/Open and the MinerU installation-directory picker support DSH 0.2's new interfaces and the older interfaces. Cancelling preserves the existing input. If the Host lacks a capability, cache-directory actions display a notice and MinerU hides the picker button; paths remain editable manually.
 
-「打开目录」在输入为空时使用实际缓存目录，由后端展开 `~`，并可创建尚不存在的目标目录。此操作不保存配置、不移动模型，也不启动下载。
+Open uses the effective cache directory when the input is empty. The backend expands `~` and can create a missing target directory. Opening does not save configuration, move models, or start a download.
 
-**v0.5.2 修复（#47 / #49）：** 目录操作按需查询可选的 `remote.session` 服务，避免注入门禁导致设置页空白，也能跟随宿主服务的晚注册或替换。本地文本模型运行时升级为 Transformers.js 4.3.1 / ONNX Runtime 1.30.0，锁定依赖中的 sharp 0.35.5 修复了三项高危告警。旧模型权重保留，旧运行时的健康记录需在设置中重新验证；详情见 [安全策略](SECURITY.md)。
+**v0.5.2 fixes (#47 / #49):** Directory actions query the optional `remote.session` service when needed, preventing an inject-gate crash and following later service registration or replacement. Local text models use Transformers.js 4.3.1 / ONNX Runtime 1.30.0; the lockfile resolves sharp 0.35.5, fixing three high-severity advisories. Cached weights are retained, but health records from the old runtime require revalidation in Settings. See the [security policy](SECURITY.md).
 
 <details>
-<summary>本地模型运行方式</summary>
+<summary>How local models run</summary>
 
-默认本地 embedding 模型为 `onnx-community/Qwen3-Embedding-0.6B-ONNX`，约 585 MB、1024 维。它在带版本 IPC 的独立 child process 中运行；空闲时可释放 ONNX session，崩溃或硬超时后只重建干净的子进程，无需重启 DSH。下载使用模型专属 staging 目录，只有隔离加载和真实向量 probe 成功后才会提升到正式缓存，并写入带文件指纹的 readiness marker。
+The default local embedding model is `onnx-community/Qwen3-Embedding-0.6B-ONNX`, approximately 585 MB with 1024 output dimensions. It runs in a dedicated child process with versioned IPC. The process can release idle sessions, and a crash or hard timeout is recovered by starting a clean child without restarting DSH. Downloads use model-specific staging storage; only a successful isolated load and vector probe are promoted and recorded in a fingerprinted readiness marker.
 
-`rerankModel: local:Xenova/bge-reranker-base` 在另一个独立 child process 中运行，与 embedding process 生命周期完全隔离。搜索不会隐式下载 rerank 模型；模型必须先在本地模型页面下载并通过健康检查。自定义 Hugging Face ONNX reranker 属于实验性能力，需要通过单 logit 能力验证和正负样例自检。
+`rerankModel: local:Xenova/bge-reranker-base` runs in its own child process, independent from the embedding process. Search never downloads a reranker implicitly; the model must be downloaded and pass its health check first. Custom Hugging Face ONNX rerankers are experimental and must pass single-logit capability validation plus a positive/negative self-test.
 
-本地模型默认缓存在 `<DSH_HOME>/cache/dsh-knowledge/local-models`。下载端点可通过界面的 `hfEndpoint` 或环境变量 `HF_ENDPOINT` 调整；OCR 默认使用 `hf-mirror.com`，海外用户可改为 `https://huggingface.co`。
+Models are cached under `<DSH_HOME>/cache/dsh-knowledge/local-models` by default. Set `hfEndpoint` in the panel or use the `HF_ENDPOINT` environment variable to choose a mirror. OCR defaults to `hf-mirror.com`; users outside China can use `https://huggingface.co`.
 
-下载**不与发起它的那一次 HTTP 请求绑定**：请求返回后传输在后台继续，浏览器关闭或客户端超时都**不会**取消下载，进度通过本地模型状态持续上报。要停止下载必须显式调用取消；取消只中止进行中的传输，已完成并通过校验的模型不会被删除（删除请用「删除」）。下载的请求预算按进度重置，因此慢速链路不会被「总时长」误杀，只有**长时间无进度**才会被判为卡死。
+A download is **not tied to the HTTP request that started it**: it keeps running in the background after that request returns, so closing the browser or letting a client time out never cancels it — progress stays visible through the local model status. Stopping a download requires an explicit cancel, and cancelling stops only an in-flight transfer: a complete, validated model is never deleted (that is what delete is for). The request budget is re-armed by progress, so a slow link is never killed for taking long; only a long stretch with no progress is treated as stuck.
 
 </details>
 
-### 模型工具
+### Model-facing tools
 
-插件向模型提供 14 个工具。所有读取、写入和自动检索都遵守“已启用知识库”边界；空或失效选择匹配零个知识库，不会静默扩大到全库。永久删除必须经过宿主确认。
+The plugin exposes 14 tools. Reads, writes, and proactive retrieval all obey the enabled-base boundary; an empty or stale selection matches zero bases instead of silently expanding to the entire library. Permanent deletion requires host approval.
 
 <details>
-<summary>查看全部工具</summary>
+<summary>View all tools</summary>
 
 - `knowledge_search`
 - `knowledge_list_bases`
@@ -224,337 +233,337 @@ v0.5.2 已修复 #51：证据和读取片段裁剪不会拆开 emoji 等字符�
 - `knowledge_reindex_document`
 - `knowledge_reindex_base`
 
-`knowledge_search` 返回 citations、`chunkIndex` 和有序 `ContextWindow`。`knowledge_read_document` 支持字符区间读取和正则定位，`knowledge_get_document` 支持分页及围绕检索锚点续读。
+`knowledge_search` returns citations, `chunkIndex`, and an ordered `ContextWindow`. `knowledge_read_document` supports character-range reads and regex location, while `knowledge_get_document` supports pagination and continuation around a retrieval anchor.
 
 </details>
 
-#### 按请求排除篇目（issue #39，待发布）
+#### Exclude documents per request (issue #39, pending release)
 
-HTTP `POST /knowledge/search` 在 `filter` 内接受 `excludeDocIds` 和 `titleExcludes`；`knowledge_search` 工具使用同名顶层参数。例如，只检索正文、排除书目与处理记录：
+HTTP `POST /knowledge/search` accepts `excludeDocIds` and `titleExcludes` inside `filter`. The `knowledge_search` tool accepts the same names as top-level arguments. For example, exclude bibliography, table-of-contents, and processing-log documents by title:
 
 ```json
 {
-  "query": "方剂用法",
+  "query": "formula usage",
   "topK": 5,
   "filter": {
-    "titleExcludes": ["书目信息", "目录", "处理记录"]
+    "titleExcludes": ["bibliography", "table of contents", "processing log"]
   }
 }
 ```
 
-以上是 HTTP 请求体。工具参数为：
+The example above is an HTTP request body. Tool arguments are:
 
 ```json
 {
-  "query": "方剂用法",
+  "query": "formula usage",
   "topK": 5,
-  "titleExcludes": ["书目信息", "目录", "处理记录"]
+  "titleExcludes": ["bibliography", "table of contents", "processing log"]
 }
 ```
 
-- `excludeDocIds` 按文档 ID 精确排除，可由 `GET /knowledge/bases/<baseId>/documents` 或 `knowledge_list_documents` 取得 ID。规范字段名为 `excludeDocIds`，不支持 `notDocIds` 别名。
-- `titleExcludes` 是字符串数组。每项去除首尾空白后按大小写不敏感的普通子串匹配，任一非空项命中即排除；不解释正则表达式。
-- 两项可以与 `docIds`、`titleIncludes`、`sourceTypes`、`updatedAfter` 和 `updatedBefore` 叠加；包含与排除重叠时，排除优先。空排除数组、空白标题项和未知 ID 无影响；`docIds: []` 仍匹配零篇。
-- 排除在词法、向量和内存检索的候选截断前生效，覆盖短词回退、多查询、融合、MMR 和重排；被排除的篇目不占用 TopK 配额。ID 过滤集合支持超过 500 项。
-- HTTP 的两个新增字段必须是字符串数组，否则返回 `400 invalid_request`；工具按参数 schema 校验。省略 `baseId` 的 HTTP 请求搜索全部库，工具仍遵守已启用知识库范围；限定单库时传入真实 `baseId`，不要传空字符串。
+- `excludeDocIds` excludes exact document IDs. Obtain IDs with `GET /knowledge/bases/<baseId>/documents` or `knowledge_list_documents`. The canonical field is `excludeDocIds`; `notDocIds` is not a supported alias.
+- `titleExcludes` is an array of strings. Terms are trimmed and matched as case-insensitive literal substrings; any nonblank match excludes the document. Terms are not regular expressions.
+- Both fields combine with `docIds`, `titleIncludes`, `sourceTypes`, `updatedAfter`, and `updatedBefore`. Exclusion wins over inclusion. Empty exclusion arrays, blank title terms, and unknown IDs have no effect; `docIds: []` still matches zero documents.
+- Exclusions apply before candidate limits in lexical, vector, and memory retrieval, including short-query fallback, multiple queries, fusion, MMR, and reranking. Excluded documents cannot consume TopK slots. ID filter sets can exceed 500 entries.
+- Both new HTTP fields must be arrays of strings; malformed values return `400 invalid_request`. The tool validates its parameter schema. HTTP requests without `baseId` search all bases; the tool still obeys enabled-base scope. To target one base, pass its actual ID rather than an empty string.
 
-这些条件仅作用于本次请求，无需数据库迁移、重新索引或移动书籍；未传排除条件的请求保持原有行为。
+Filters apply only to the current request. No database migration, reindex, or document move is required, and requests without exclusions retain their existing behavior.
 
-### 存储与索引
+### Storage and indexes
 
-- 知识库、文档和运行时配置通过 DSH `storageDomain` 持久化。
-- 分块保存在独立 SQLite 文件 `<DSH_HOME>/storages/knowledge-chunks.sqlite`，可通过 `chunkStorePath` 调整。
-- 词法检索使用 SQLite FTS5 trigram 索引；向量使用 Float32Array 常驻缓存并精确失效。
-- 旧 JSON 分块数据在首次启动时执行幂等迁移；没有存储后端时自动退化为内存模式。
-- 修改分块或 embedding 配置后，可以重建单条资料或整个知识库的索引。
-
----
-
-## v0.5.2 更新重点
-
-- **Unicode 文本安全（#51）**：证据、文档读取和来源标签裁剪保留 UTF-16 代理对；检索注入、工具输出、使用提示及 embedding/rerank 输入中的孤立代理项替换为 `U+FFFD`，避免上游 JSON 解析错误。
-- **设置页恢复（#47）**：按需访问可选的 `remote.session`，恢复本地模型设置与目录操作，兼容宿主服务的晚注册及替换。
-- **依赖安全（#49）**：升级 Transformers.js 4.3.1，锁定 sharp 0.35.5，移除全部旧审计豁免；生产审计拒绝任何高危／严重告警。
-- **升级方式**：无需数据库迁移或重新索引；保留模型权重，在设置中重新验证旧运行时的健康状态。已有损坏会话需单独处理，现有 DSH profile 也应确认实际安装的 sharp 至少为 0.35.5。
-
-[查看 v0.5.2 发布说明](./docs/releases/v0.5.2.md) · [查看 CHANGELOG](./CHANGELOG.md)
+- Bases, documents, and runtime configuration are persisted through DSH `storageDomain`.
+- Chunks live in a dedicated SQLite file at `<DSH_HOME>/storages/knowledge-chunks.sqlite`, configurable through `chunkStorePath`.
+- Lexical retrieval uses a SQLite FTS5 trigram index; vectors use a resident Float32Array cache with precise invalidation.
+- Legacy JSON chunk data is migrated idempotently on first start. The service falls back to memory storage when no persistent backend is available.
+- After changing chunk or embedding settings, rebuild one document or the entire base from the panel or model tools.
 
 ---
 
-## v0.5.1 更新重点
+## v0.5.2 highlights
 
-- **检索排除（#39）**：HTTP `filter` 和 `knowledge_search` 新增 `excludeDocIds`、`titleExcludes`，可与包含条件叠加，排除条件在候选池与 TopK 截断前生效。
-- **目录操作兼容（#42）**：恢复 DSH 0.2 的缓存目录选择／打开与 MinerU 目录选择，兼容旧版接口，并保留取消选择和手动输入。
-- **升级方式**：从 0.5.0 升级无需数据库迁移、重新索引或迁移书籍；本版本没有新增依赖。
+- **Unicode text safety (#51):** preserve UTF-16 surrogate pairs when trimming evidence, document reads and source labels. Replace lone surrogates with `U+FFFD` in retrieval injection, tool output, the usage prompt, and embedding/rerank inputs to avoid upstream JSON parsing failures.
+- **Settings recovery (#47):** access the optional `remote.session` service when needed, restoring Local Models settings and directory actions even when host services register late or are replaced.
+- **Dependency security (#49):** upgrade to Transformers.js 4.3.1, lock sharp 0.35.5, and remove all previous audit exceptions. Production auditing rejects every high/critical advisory.
+- **Upgrade:** no database migration or reindexing. Retain cached weights and revalidate health in Settings after the runtime upgrade. Previously poisoned sessions need separate repair; existing DSH profiles should also verify that every installed sharp version is at least 0.35.5.
 
-[查看 v0.5.1 发布说明](./docs/releases/v0.5.1.md) · [查看 CHANGELOG](./CHANGELOG.md)
-
----
-
-## v0.5.0 更新重点
-
-- **结构化证据链**：保留解析器输出中的页码、块范围、表格/公式等结构信息，并贯穿分块、索引、检索上下文和证据续读；重分块可复用已保存的解析产物，不必重复解析。
-- **可选托管 MinerU（实验性）**：提供独立 Python 环境预检、模型文件校验、Hugging Face / Python 包源设置和部署状态显示。候选安装仅在真实 PDF 解析探针通过后才成为可用部署；现有云 API 和外部自部署服务仍可继续使用。
-- **可恢复处理流程**：统一导入和重建入口，增加处理队列与可见状态；替换索引失败时保留上一代可用数据。
-- **验证边界**：自动化单测、检索 benchmark、打包与 worker 检查已通过。托管 MinerU 的 Windows/Linux 实机部署矩阵和浏览器设置页验收尚未完成，因此该能力仍标注为实验性，不宣称 OCR 准确率或跨平台稳定性已获认证。
-
-本版本新增结构化证据及处理能力。已有数据的升级兼容性以发布候选的独立实测结果为准；托管 MinerU 默认不下载模型，只有用户显式预检并确认安装才会创建独立环境。
-
-[查看 v0.5.0 发布说明](./docs/releases/v0.5.0.md) · [查看 CHANGELOG](./CHANGELOG.md)
+[Read the v0.5.2 release notes](./docs/releases/v0.5.2.md) · [Read the changelog](./CHANGELOG.md)
 
 ---
 
-## v0.4.1 更新重点
+## v0.5.1 highlights
 
-- **MinerU 失败的导入不再走进死路**（issue #30）：MinerU 提取失败、退回本地解析也失败时，文档会留下一条只有原始 PDF、没有正文和分块的占位行，点「重建」只会报 `has no source text to reindex`，从界面和 API 都无法脱困。现在导入、单文档重建与启动恢复走同一条提取链，重建会重新尝试 MinerU；双重失败时同时报出 MinerU 与本地解析两个原因，而不是只把 MinerU 的真实原因写进日志。
-- **关闭 0.4.0 审计中推迟的 5 项**：`rawTextLimit` 钳制、未知知识库的统计接口返回 404、不再产生空分块、`context.ts` 不再被重复打包、stress 脚本纳入类型检查；检索基准改用临时 `DSH_HOME`，不再读写开发者真实 profile。
-- 这是一个补丁版本。0.4.0 的主要改动（目录来源身份、诚实上报、删除级联护栏、本地模型生命周期等）见下方小节与 v0.4.0 发布说明。
+- **Search exclusions (#39):** HTTP `filter` and `knowledge_search` support `excludeDocIds` and `titleExcludes` alongside inclusion filters. Exclusions apply before candidate and TopK limits.
+- **Directory compatibility (#42):** restore cache Browse/Open and MinerU directory selection on DSH 0.2, retain legacy interfaces, and preserve cancellation and manual entry.
+- **Upgrade:** no database migration, reindexing or document relocation is required when upgrading from 0.5.0. No dependencies are added.
 
-0.4.1 不迁移数据库、不强制重建索引、不重新下载模型。唯一可感知的行为变化是：未知知识库的统计接口现在返回 404，而不是一个全 0 的 200。
-
-[查看 v0.4.1 GitHub Release](https://github.com/Soren-ABT/dsh-knowledge/releases/tag/v0.4.1) · [查看 CHANGELOG](./CHANGELOG.md) · [v0.4.1 发布说明](./docs/releases/v0.4.1.md)
+[Read the v0.5.1 release notes](./docs/releases/v0.5.1.md) · [Read the changelog](./CHANGELOG.md)
 
 ---
 
-## v0.4.0 更新重点
+## v0.5.0 highlights
 
-- 目录来源以“知识库 + 规范化真实路径”确定身份：再次导入同一目录会原地同步原树，不再新建第二棵树。
-- 首次导入、重复导入、单文件重建和整库后台重建统一走同一套同步引擎，逐项返回新建 / 更新 / 未变化 / 删除 / 失败。未变化不再算失败，部分失败返回 `partial` 并保留已完成的同步。
-- 目录中的文件按“目录来源 + 相对路径”确定身份；历史遗留的重复树报告 `ambiguous_source`，不猜测、不合并、不自动删除。
-- 单文件重建会重新读取磁盘而不是重放旧快照；`sourcePath` 对管理 API 只读暴露，且不会出现在模型可见的检索结果中。
-- 删除非空目录必须显式 `recursive` 确认，并提供 `delete-impact` 预检，列出将被删除的目录、文件、分块和原始快照。
-- 合并 #16–#18 的本地模型生命周期与检索状态修复，并补充 #22 的配置文件安装恢复文档。
+- **Structured evidence chain:** preserve parser page references, block ranges, tables and formula structure through chunking, indexing, retrieval context and anchored evidence reads. Rechunking can reuse saved parse artifacts instead of parsing the source again.
+- **Optional managed MinerU (experimental):** preflight an isolated Python environment, verify model files, configure Hugging Face/Python package sources, and inspect deployment state. A candidate becomes usable only after a real PDF parse probe succeeds. Existing cloud APIs and external self-hosted services remain available.
+- **Recoverable processing:** share ingestion and rebuild paths, expose queue/progress state, and keep the previous usable index generation when replacement fails.
+- **Verification boundary:** unit tests, retrieval benchmarks, package checks and worker smoke pass locally. The Windows/Linux managed MinerU install matrix and live-browser settings acceptance are still pending, so managed MinerU remains experimental; no OCR accuracy or cross-platform stability certification is claimed.
 
-本次升级不迁移数据库、不自动重建索引、不清理历史目录、不重新下载模型，也不改变既有字段与调用签名；新增的同步结果、`sourcePath`、删除影响预检与 `recursive` 参数均为加法接口。唯一收紧的是：非空目录不再允许被静默级联删除。
+This release adds structured evidence and processing capabilities. Upgrade compatibility with existing data is subject to the release candidate's separate migration/upgrade checks. Managed MinerU does not download models by default; users must explicitly preflight and confirm installation into an isolated environment.
 
-[查看 v0.4.0 GitHub Release](https://github.com/Soren-ABT/dsh-knowledge/releases/tag/v0.4.0) · [查看 CHANGELOG](./CHANGELOG.md)
+[Read the v0.5.0 release notes](./docs/releases/v0.5.0.md) · [Read the changelog](./CHANGELOG.md)
 
 ---
 
-## 工作流程
+## v0.4.1 highlights
 
-1. **导入**：接收文件、目录、URL 或文本，并保存来源元数据与可恢复的原始内容。
-2. **解析**：按格式提取正文；扫描件或异常 PDF 按需进入本地 OCR，也可选择 MinerU。
-3. **分块**：根据标题、结构和 Token 预算生成带稳定索引的 chunk。
-4. **向量化**：使用远程 API、Ollama、本地模型或纯关键词模式建立检索数据。
-5. **召回**：BM25 与向量检索按配置运行，hybrid 模式通过 RRF 融合。
-6. **整理证据**：可选 rerank 和 MMR 处理候选，Context Composer 生成受预算约束的有序上下文。
-7. **模型续读**：模型可以从 `chunkIndex` 或锚点 ID 继续读取上下文或文档正文。
+- **A failed MinerU import is no longer a dead end** (issue #30). When MinerU extraction failed and the local fallback failed too, the document was left as a placeholder row holding the raw PDF but no text and no chunks, and rebuilding it only reported `has no source text to reindex` — with no way out from the panel or the API. Import, single-document rebuild and crash recovery now share one extraction chain, so a rebuild retries MinerU. A double failure reports both reasons instead of writing MinerU's real reason only to the log.
+- **Five deferred audit items closed**: `rawTextLimit` is clamped, an unknown knowledge base answers 404 from the statistics route, chunking no longer emits empty chunks, `context.ts` is no longer bundled twice, and the stress script is inside the typecheck. The retrieval benchmark also runs against a throwaway `DSH_HOME` instead of the developer's real profile.
+- This is a patch release. The main 0.4.0 changes — directory source identity, truthful reporting, the delete-cascade guard, the local model lifecycle — are in the section below and in the v0.4.0 release notes.
+
+0.4.1 needs no database migration, no forced reindex and no model redownload. The one behaviour change a client can notice is that the statistics route now answers 404 for an unknown knowledge base instead of a zero-filled 200.
+
+[Read the v0.4.1 GitHub Release](https://github.com/Soren-ABT/dsh-knowledge/releases/tag/v0.4.1) · [Read the changelog](./CHANGELOG.md) · [v0.4.1 release notes](./docs/releases/v0.4.1.md)
 
 ---
 
-## 技术设计：从查询到可续读证据
+## v0.4.0 highlights
 
-dsh-knowledge 的检索目标不只是返回一组 Top K 文本，而是生成一条可解释、可降级、可继续阅读的证据链。显式搜索的主路径如下：
+- A directory source is identified by its base plus its canonical real path, so re-importing the same directory synchronizes the original tree in place instead of building a second root.
+- The first import, a repeat import, a single-file reindex, and the base-wide background reindex now share one sync engine. Each item reports created / updated / unchanged / deleted / failed; unchanged is never a failure, and a partly failed sync returns `partial` while keeping the work that succeeded.
+- Files in a directory are identified by directory source plus relative path. A tree that old behaviour already duplicated is reported as `ambiguous_source` and is never guessed, merged, or auto-deleted.
+- A single-file reindex re-reads the file from disk instead of replaying the stored snapshot. `sourcePath` is exposed read-only to the administrative API and never appears in model-facing search results.
+- Deleting a non-empty directory requires an explicit `recursive` confirmation and offers a `delete-impact` preview listing the directories, files, chunks, and raw snapshots that would be removed.
+- Includes the local model lifecycle and retrieval-status fixes from #16–#18 and the profile installation recovery documentation from #22.
+
+The upgrade requires no database migration, automatic reindex, legacy directory cleanup, or model redownload and does not change existing fields or call signatures. The sync report, `sourcePath`, the delete-impact preview, and the `recursive` argument are additive. The one deliberate tightening is that a non-empty directory can no longer be deleted silently.
+
+[Read the v0.4.0 GitHub Release](https://github.com/Soren-ABT/dsh-knowledge/releases/tag/v0.4.0) · [Read the changelog](./CHANGELOG.md)
+
+---
+
+## How it works
+
+1. **Ingest**: accept a file, directory, URL, or text note and retain source metadata plus recoverable original content.
+2. **Parse**: extract text by format; route scans and abnormal PDFs through local OCR when needed, or use MinerU when configured.
+3. **Chunk**: produce stable, indexed chunks from headings, document structure, and token budgets.
+4. **Embed**: build retrieval data through a remote API, Ollama, a local model, or lexical-only mode.
+5. **Recall**: run BM25 and vector lanes as configured, with RRF fusion in hybrid mode.
+6. **Compose evidence**: optionally rerank and apply MMR, then build an ordered, token-bounded context window.
+7. **Continue reading**: use `chunkIndex` or an anchor ID to read nearby context or the source document.
+
+---
+
+## Technical design: from a query to continuable evidence
+
+dsh-knowledge is designed to produce an explainable, degradable evidence chain, not merely a list of Top K strings. The main explicit-search path is:
 
 ```text
-当前查询
-  └─ Query Planner：主查询 + 可选查询变体
-       ├─ SQLite FTS5 / BM25 词法召回
-       └─ embedding / cosine 向量召回
-            └─ 加权 RRF 融合
-                 └─ 可选 MMR 去冗余
-                      └─ 可选 remote/local cross-encoder rerank
+current query
+  └─ Query Planner: primary query + optional variants
+       ├─ SQLite FTS5 / BM25 lexical recall
+       └─ embedding / cosine vector recall
+            └─ weighted RRF fusion
+                 └─ optional MMR deduplication
+                      └─ optional remote/local cross-encoder rerank
                            └─ Context Composer
-                                ├─ 有序、限额的模型可见证据
-                                └─ anchorChunkId / chunkIndex 锚点续读
+                                ├─ ordered, budgeted model-visible evidence
+                                └─ anchorChunkId / chunkIndex continuation
 ```
 
-### 召回、融合与排序
+### Recall, fusion, and ranking
 
-| 阶段 | 实现 | 设计目的 |
+| Stage | Implementation | Design purpose |
 |---|---|---|
-| Query Planner | 主查询始终来自当前消息；多查询变体先分别召回，再统一融合 | 避免历史覆盖当前问题，同时提高换说法查询的覆盖率 |
-| 词法召回 | SQLite FTS5 trigram 索引、BM25 排序；查询侧识别 CJK 二元组与拉丁词 | 无 embedding、模型未下载或远程服务不可用时仍可搜索 |
-| 向量召回 | 对查询 embedding 后执行余弦相似度检索，并校验向量维度 | 补充关键词未重合的语义命中 |
-| RRF 融合 | `score(d) = Σᵢ wᵢ / (60 + rankᵢ(d))`，向量路权重由 `rrfVectorWeight` 控制 | 只融合名次，不直接混合量纲不同的 BM25 与 cosine 原始分数 |
-| MMR | 在相关度与已选结果的向量相似度之间取舍 | 减少 Top K 中语义重复的片段 |
-| Rerank | 对有界候选执行远程 API 或本地 cross-encoder；多查询最终只重排一次 | 让成本和延迟与候选池相关，而不是随查询变体重复增长 |
-| 阈值 | 只对可比较的 vector 或 rerank relevance 分数应用 | 避免用同一个阈值错误过滤 BM25/RRF 排名分数 |
+| Query Planner | The primary query always comes from the current message; multi-query variants are recalled independently and fused afterwards | Preserve current-turn intent while covering paraphrased questions |
+| Lexical recall | SQLite FTS5 trigram index with BM25 ranking; query processing recognizes CJK bigrams and Latin words | Remain searchable without embeddings, downloaded weights, or a remote service |
+| Vector recall | Embed the query, run cosine retrieval, and validate vector dimensions | Recover semantic matches with little keyword overlap |
+| RRF fusion | `score(d) = Σᵢ wᵢ / (60 + rankᵢ(d))`; `rrfVectorWeight` controls the vector lane | Fuse ranks without pretending raw BM25 and cosine scores share a scale |
+| MMR | Trade relevance against similarity to already selected candidates | Reduce semantic repetition within Top K |
+| Rerank | Apply a remote API or local cross-encoder to a bounded pool; a multi-query request reranks only once at the end | Keep cost and latency tied to the candidate pool rather than query-variant count |
+| Threshold | Apply only to comparable vector or rerank relevance scores | Avoid filtering BM25/RRF ranks with an unrelated numeric scale |
 
-同分结果保留原召回顺序。rerank 必须返回与候选一一对应、有限且位于 `[0, 1]` 的分数；缺失、越界、数量不一致或协议不匹配都被视为降级，而不是成功。
+Ties retain the original recall order. A reranker must return exactly one finite score in `[0, 1]` for every retained candidate. Missing, out-of-range, mismatched, or protocol-invalid results are degradation events, never successful reranks.
 
-### Context Composer：查询时连接上下文
+### Context Composer: connect context at query time
 
-分块负责稳定索引，Context Composer 负责模型实际看到的证据。插件不会把前后块永久拼入每个 chunk，也不会为桥接文本重复生成 embedding；它会在命中发生后批量读取相邻范围，并围绕 anchor 动态组装：
+Chunking produces stable index units; Context Composer decides what the model actually sees. It does not permanently copy neighboring text into every chunk or embed bridge text twice. After a hit, it batch-loads adjacent ranges and composes them around the anchor:
 
-- 顺序固定为 `before → anchor → after`，默认不跨越不同 heading path。
-- anchor 永远优先；超预算时围绕查询命中并尽量在句子边界裁剪。
-- 相邻块存在至少 24 个字符的精确 suffix/prefix 重叠时去重，避免 overlap 被模型重复阅读。
-- `SearchHit.text` 保持完整 canonical anchor；`ContextWindow` 只描述本次查询实际选择的窗口。
-- 搜索结果携带稳定 `anchorChunkId` 和 `chunkIndex`。模型需要更多上下文时，可以围绕同一锚点续读，而不是重新猜测文档位置。
+- Evidence order is always `before → anchor → after`, within the same heading path by default.
+- The anchor has priority. When it exceeds the budget, the composer crops around the query and prefers sentence boundaries.
+- An exact suffix/prefix overlap of at least 24 characters is removed between adjacent excerpts, preventing overlap from being read twice.
+- `SearchHit.text` remains the complete canonical anchor; `ContextWindow` records only the window selected for this query.
+- Every result carries a stable `anchorChunkId` and `chunkIndex`. The model can continue around the same location instead of guessing a new document position.
 
-| 使用位置 | 固定预算 |
+| Consumer | Fixed budget |
 |---|---|
-| Rerank pair | query 最多 128 Tokens、evidence 最多 352 Tokens、合计最多 480 Tokens |
-| 显式 `knowledge_search` | 每个 hit 目标 768 Tokens，整次模型可见输出最多 8192 Tokens |
-| 自动检索背景 | 每个 hit 最多 180 Tokens，完整背景最多 640 Tokens |
-| 锚点续读 | 默认 1600 Tokens，可配置 128–4096 Tokens |
+| Rerank pair | Up to 128 tokens for the query, 352 for evidence, and 480 total |
+| Explicit `knowledge_search` | Target 768 tokens per hit; 8192 tokens maximum model-visible output per call |
+| Proactive-retrieval background | Up to 180 tokens per hit and 640 tokens total |
+| Anchored continuation | 1600 tokens by default, configurable from 128 to 4096 |
 
 <details>
-<summary>自动检索为什么不是“每轮都塞一遍 Top K”</summary>
+<summary>Why proactive retrieval does not inject Top K on every turn</summary>
 
-自动检索采用 current-turn-first 的查询规划：当前消息最长保留 200 字符；只有消息不超过 40 字符，并含有“这个、上述、继续、第 N 步”等指代表达或缺少足够主题词时，才使用最近最多两条用户消息生成第二个历史增强查询。两个查询分别进行词法召回，再以 RRF 融合，历史不会替换当前问题。
+Proactive retrieval uses current-turn-first planning. The current message is bounded to 200 characters. Only when it is at most 40 characters and contains a deictic expression such as “that,” “above,” “continue,” or “step N,” or lacks enough topic terms, may the planner use up to the two latest user messages to form a second history-enhanced query. Both queries run lexical recall independently and are fused through RRF; history never replaces the current question.
 
-整个首 Token 前路径共享 4 秒 wall-clock deadline。service 内部 rerank 被明确跳过，本地 reranker 调用次数固定为零；如果配置了远程 rerank，最多调用一次且不重试。取消立即退出，超时或 provider 错误则保留词法排序并停止注入，不会重复获得新的超时预算。
+The entire pre-first-token path shares a four-second wall-clock deadline. Service-level reranking is explicitly skipped and the number of local-reranker calls is always zero. A configured remote reranker may run once with no retry. Cancellation exits immediately; a timeout or provider failure retains lexical order and stops injection without receiving a fresh timeout budget.
 
-已经注入的 chunk 会在相关性判断和知识库席位分配前移除。同主题五分钟内最多补充一条新证据，新主题最多注入三条；每库的 `autoRetrieveWeight` 限制它能占用的席位。纯数字 ID 和型号、版本号、错误码走严格 identifier 通道，最终模型可见文本必须包含完整且边界正确的 identifier，否则不注入。
+Previously delivered chunks are removed before relevance gates and per-base seat allocation. A same-topic turn can add at most one fresh item within five minutes; a new topic can add at most three. Each base's `autoRetrieveWeight` limits its seats. Numeric IDs and compound model/version/error identifiers use a strict channel: the final text visible to the model must contain the complete identifier with correct boundaries or nothing is injected.
 
-检索内容在注入时明确标记为不可信参考资料，不能覆盖当前用户指令、权限边界或工具规则。只有背景实际折叠成功后，去重和节流状态才会提交。
+Injected material is explicitly labelled as untrusted reference evidence and cannot override the current user's instructions, permissions, or tool rules. Deduplication and throttling state is committed only after the background is actually folded into the model context.
 
 </details>
 
 ---
 
-## 工程可靠性
+## Engineering reliability
 
-| 风险 | 处理方式 | 对调用方的结果 |
+| Risk | Handling | Caller-visible outcome |
 |---|---|---|
-| 空或失效的知识库/文档过滤 | `undefined` 才表示不限制；空集合明确匹配零文档，SQLite 词法和向量路均 fail-closed | 不会因过滤错误意外搜索全部资料 |
-| 远程 rerank 超时或响应异常 | 共享 deadline、严格索引和分数校验、结构化 `rerank` 状态 | 返回原始召回结果，不误用 rerank 阈值 |
-| 本地 embedding 或 rerank 卡死、崩溃 | 两个独立 child process、版本化严格 IPC、硬超时终止、embedding 单次干净恢复、生命周期分离 | 只恢复或降级受影响的操作，不必重启 DSH，也不连带影响另一条本地模型链路 |
-| 本地模型文件不完整或不兼容 | 下载时记录权重文件的期望字节数并在落盘后比对；本地加载失败则**隔离删除**该缓存，下次重新下载。取消下载只中止进行中的传输，**绝不动**已完成并通过校验的模型 | 截断的权重不会再被当成「已下载」而永久失败；搜索不隐式下载，也不会把「目录里有 ONNX」误判为可用 |
-| 连续本地 rerank 故障 | 队列总上限 16；连续 3 次 timeout/crash/runtime/invalid-response 后熔断 5 分钟，并限制半开探测 | 避免故障模型持续占用进程和延迟预算 |
-| 替换重建或目录扫描部分失败 | 新 raw source、解析结果和索引成功后才替换已提交来源；逐文件保留结果 | 单个失败不破坏旧版本，也不掩盖同批成功项 |
-| 插件发布物缺文件或跨平台差异 | Node 22.19/24/26 质量门槛、Windows/Linux/macOS 原生测试、Windows/Linux tarball 安装启动测试、手动触发的真实本地模型 smoke | npm tarball 与源码构建均受到自动化发布检查 |
+| Empty or stale base/document filters | Only `undefined` means unrestricted; an empty set matches zero documents in both SQLite lanes | A filtering mistake cannot silently search the whole library |
+| Remote-rerank timeout or malformed output | Shared deadline, strict result-index and score validation, structured `rerank` status | Return the original recall order and do not apply a rerank threshold |
+| Local embedding or rerank hangs/crashes | Independent child processes, versioned strict IPC, hard-timeout termination, one clean embedding recovery, and separate lifecycles | Recover or degrade the affected operation without restarting DSH or the other local-model lane |
+| Incomplete or incompatible local weights | Record each weights file's expected byte size during download and compare it on disk; **quarantine and remove** a cache that fails to load so the next attempt re-downloads. Cancelling a download stops only an in-flight transfer and **never** deletes a complete, validated model | A truncated file is no longer treated as downloaded and left failing forever; search never downloads implicitly or treats “an ONNX file exists” as readiness |
+| Repeated local-rerank failures | Total queue cap of 16; open a five-minute circuit after three consecutive timeout/crash/runtime/invalid-response failures, with one half-open probe | Prevent a broken model from repeatedly consuming process and latency budgets |
+| Partial replacement rebuild or directory rescan | Replace the committed source only after the new raw source, parse, and index succeed; retain per-file results | One failed item does not destroy the old version or hide successful siblings |
+| Missing release files or platform drift | Node 22.19/24/26 quality gates, Windows/Linux/macOS native tests, Windows/Linux tarball install-and-boot smoke, and manually triggered real local-model smoke | Both source builds and the published npm shape are continuously checked |
 
-这些约束的共同原则是：范围错误时宁可返回空，排序增强失败时宁可保留基础召回，涉及已提交资料时宁可保留旧版本。降级原因会通过结构化状态或界面提示暴露，而不是静默伪装成成功。
+These constraints share one principle: fail closed on scope, fail soft on ranking enhancement, and preserve the committed version of user data. Degradation is exposed through structured state or UI feedback instead of being presented as success.
 
 ---
 
-## 架构
+## Architecture
 
-一个 bundle 挂载三个插件行。本地 embedding、本地 rerank 与 OCR 推理分别运行在可终止、可重建的独立 child process。mupdf 页面渲染仍在 host 中同步执行，受页面尺寸和光栅预算约束。
+One bundle mounts three plugin rows. Local embeddings, local reranking, and OCR inference run in separate replaceable child processes. Synchronous mupdf page rendering remains in the host, bounded by page geometry and raster budgets.
 
-| 组件 | 平台 | 职责 |
+| Component | Platform | Responsibility |
 |---|---|---|
-| `knowledge`（`ctx.knowledge`） | host | 存储、分块、embedding/解析调度、检索、OCR 调度及 `/knowledge/*` HTTP 服务 |
-| `tool-knowledge` | host | 注册并执行 14 个模型工具 |
-| `ui-knowledge` | client | 侧边栏入口、工作区管理面板及同源 API 调用 |
-| `embed-process` | child process | transformers.js 本地 embedding 推理；严格 IPC、staging/readiness probe 与可恢复的原生模型生命周期 |
-| `ocr-process` | child process | PaddleOCR、OpenCV 和 Tesseract 识别；串行推理、超时终止及退出感知 |
-| `rerank-process.mjs` | child process | 本地 cross-encoder 重排、超时隔离和进程级恢复 |
+| `knowledge` (`ctx.knowledge`) | host | Storage, chunking, embedding/parser orchestration, retrieval, OCR scheduling, and `/knowledge/*` HTTP APIs |
+| `tool-knowledge` | host | Registration and execution of the 14 model-facing tools |
+| `ui-knowledge` | client | Sidebar entry, workspace management panel, and same-origin API calls |
+| `embed-process` | child process | Local transformers.js embedding inference; strict IPC, staging/readiness probing, and recoverable native-model lifecycle |
+| `ocr-process` | child process | PaddleOCR, OpenCV, and Tesseract recognition; serialized inference, timeout termination, and observed process exit |
+| `rerank-process.mjs` | child process | Local cross-encoder reranking, hard-timeout isolation, and process-level recovery |
 
-业务状态中的 `bases`、`documents` 和全局配置位于 `knowledge` storage domain；chunk 与可选 embedding 位于插件自己的 SQLite 存储；文件原始字节位于 SQLite 同级的 `knowledge-raw` 目录。
+The `knowledge` storage domain contains `bases`, `documents`, and global configuration. Chunks and optional embeddings live in the plugin-owned SQLite store. Original file bytes live in the adjacent `knowledge-raw` directory.
 
 ---
 
-## 在 DSH 知识库与 RAG 生态中的定位
+## Position in the DSH knowledge and RAG ecosystem
 
-dsh-knowledge 的定位是“一体化文档知识库”。下面的对照用于说明设计边界：截至 **2026-09-04**，内容依据各项目默认分支的公开 README；“未在 README 中公开说明”不等同于该项目绝对不支持，对方项目更新后本表也可能过时。
+dsh-knowledge is an integrated document knowledge base; it does not claim that every workload is better served by it than by a focused plugin. The comparison below explains design boundaries. It was reviewed on **2026-09-04** from each project's public README on its default branch. “Not documented in the README” does not prove that a capability is impossible, and the table may become stale as those projects evolve.
 
 <details>
-<summary>查看 DSH 知识库与 RAG 项目对照</summary>
+<summary>Compare adjacent DSH knowledge and RAG projects</summary>
 
-| 项目 | 公开定位与主要设计 | 与 dsh-knowledge 的边界差异 |
+| Project | Public positioning and primary design | Boundary relative to dsh-knowledge |
 |---|---|---|
-| [dsh-knowledge-base](https://github.com/htcqp802/dsh-knowledge-base) | 通用文档库，提供多格式导入、文件夹 UI、FTS5 trigram 与 BM25 | dsh-knowledge 在此基础范围外还覆盖向量/RRF/MMR/rerank、自动证据注入、ContextWindow、本地 OCR 与模型管理；对方更轻量 |
-| [Mindspace Local RAG](https://github.com/Spirtxiaoqi7/mindspace-dsh-local-rag) | 技术完整的本地混合 RAG：BM25+、向量、RRF、父子分块、来源续查、文档修订与 compaction summary | Mindspace 明确坚持模型按需调用、刻意不做 rerank；其修订/回滚和会话摘要治理更专注。dsh-knowledge 更强调完整管理 UI、复杂格式/OCR、本地 cross-encoder 与可选自动注入 |
-| [dsh-plugin-rag](https://github.com/mervyn-teo/dsh-plugin-rag) | 监听 DSH session 事件，增量维护可检索的跨会话语义记忆，向量保存在本地 JSON | 核心对象是会话表面而非用户文档；dsh-knowledge 处理文档来源、解析、重建、引用和锚点阅读，两者可以承担不同层次的记忆 |
-| [dsh-ragflow](https://github.com/staff-os/dsh-ragflow) | 将 DSH 工具连接到已有 RAGFlow dataset，提供清晰的 provider/seam/tool/config 分层 | RAGFlow 负责建库和解析，插件公开说明自身仅做 retrieval；dsh-knowledge 无需另一套知识库服务即可完成导入到证据输出的闭环 |
-| [dsh-plugin-kb4rag](https://github.com/yyang8891/dsh-plugin-kb4rag) | 面向论文写作，使用 Python 离线提取/建库、Ollama embedding 和 Node Float32Array Top K | 设计简单、运行时检索依赖少；dsh-knowledge 提供运行时导入/重建、混合召回、OCR、管理界面和多级证据续读 |
-| [dsh-rag-kb](https://github.com/AlowEnsoul/dsh-rag-kb) | Ollama 向量检索、多知识库、JSON 持久化和可拖拽悬浮 UI | dsh-knowledge 使用 SQLite/FTS5 与多阶段排序，并进一步覆盖来源事务、本地模型健康体系、复杂 PDF OCR 和发布验证 |
+| [dsh-knowledge-base](https://github.com/htcqp802/dsh-knowledge-base) | General document library with multi-format import, a folder UI, FTS5 trigram, and BM25 | dsh-knowledge additionally covers vector/RRF/MMR/rerank, proactive evidence, ContextWindow, local OCR, and model management; the other project is lighter |
+| [Mindspace Local RAG](https://github.com/Spirtxiaoqi7/mindspace-dsh-local-rag) | A technically substantial local hybrid RAG with BM25+, vectors, RRF, parent/child chunks, source follow-up, document revisions, and compaction summaries | Mindspace deliberately keeps retrieval model-directed and currently avoids reranking; its revision/rollback and summary governance are more specialized. dsh-knowledge emphasizes the complete management UI, complex-format OCR, local cross-encoder, and optional proactive retrieval |
+| [dsh-plugin-rag](https://github.com/mervyn-teo/dsh-plugin-rag) | Listens to DSH session events and incrementally maintains cross-session semantic memory in a local JSON vector index | Its primary object is the live session surface rather than user documents. dsh-knowledge owns source ingestion, parsing, rebuilds, citations, and anchored document reading; the two serve different memory layers |
+| [dsh-ragflow](https://github.com/staff-os/dsh-ragflow) | Connects a DSH tool to existing RAGFlow datasets through a clean provider/seam/tool/config split | RAGFlow owns ingestion and parsing, and the plugin documents itself as retrieval-only. dsh-knowledge completes ingestion through evidence delivery without requiring another knowledge-base service |
+| [dsh-plugin-kb4rag](https://github.com/yyang8891/dsh-plugin-kb4rag) | Paper-oriented Python offline extraction/build, Ollama embeddings, and Node Float32Array Top K | Its runtime retrieval is deliberately simple and dependency-light. dsh-knowledge adds runtime ingestion/rebuild, hybrid recall, OCR, a management UI, and multi-level evidence continuation |
+| [dsh-rag-kb](https://github.com/AlowEnsoul/dsh-rag-kb) | Ollama vector retrieval, multiple bases, JSON persistence, and a draggable floating UI | dsh-knowledge uses SQLite/FTS5 and a multi-stage ranking pipeline, then adds source transactions, local-model health, complex-PDF OCR, and release validation |
 
 </details>
 
-在上述已检查项目中，没有单个项目在公开 README 中同时描述以下组合：
+Among the projects reviewed above, no single public README documents the same complete combination of:
 
-- 文件、目录、URL、文本的完整来源生命周期，以及可恢复 raw source 和安全重建；
-- 本地复杂文档解析、扫描 PDF OCR、远程 MinerU 和 per-base 处理策略；
-- BM25、向量、加权 RRF、MMR、多查询和本地/远程 rerank 的完整检索链；
-- 查询时动态 ContextWindow、严格 Token 预算、自动证据注入和 anchor 续读；
-- embedding、OCR、rerank 的独立运行单元、模型 readiness/self-test、降级状态和跨平台 tarball 验证。
+- lifecycle management for files, directories, URLs, and text, with recoverable raw sources and safe rebuilds;
+- local complex-document parsing, scanned-PDF OCR, remote MinerU, and per-base processing policy;
+- BM25, vectors, weighted RRF, MMR, multi-query, and local/remote reranking in one retrieval chain;
+- query-time ContextWindow composition, strict token budgets, proactive evidence, and anchored continuation;
+- isolated embedding/OCR/rerank execution units, model readiness and self-tests, structured degradation, and cross-platform tarball verification.
 
-因此，dsh-knowledge 的主要差异不是“又实现了一个向量搜索”，而是把资料进入系统之后直到模型取得可引用、可续读证据之间的工程环节放在同一个 DSH 原生 bundle 中，并为失败路径定义了可观察的行为。
-
----
-
-## 兼容性
-
-- **DSH**：在 [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) 提交 `b150a55`（2026.8.21）上开发并验证。若更新版本出现问题，请在 Issue 中附上 DSH 提交号。
-- **Node.js**：`^22.19.0 || >=24.0.0`。
-- **平台**：Windows、Linux x64/arm64、macOS Apple Silicon 支持完整功能。
-- **Intel Mac**：onnxruntime 没有 darwin-x64 二进制，本地 embedding 与 OCR 不可用；可改用远程 OpenAI 兼容服务或 Ollama。
-- **旧 Office 格式**：`.doc`、`.ppt`、`.xls` 依赖 `@firecrawl/anydoc` 的平台原生二进制。
-- **首次联网**：本地 embedding 与 OCR 首次使用需要下载模型；纯关键词和远程 provider 不要求下载本地权重。
+The primary differentiator is therefore not another vector-search implementation. It is the engineering between a source entering the system and the model receiving citable, continuable evidence, delivered as one DSH-native bundle with defined failure behavior.
 
 ---
 
-## 配置
+## Compatibility
 
-部署默认值位于 `cordis.patch.yml` 的 `knowledge` 行。管理面板可以在运行时覆盖并持久化这些值；大多数检索和文档设置还可以按知识库覆盖。
+- **DSH**: developed and verified against [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) commit `b150a55` (2026.8.21). Include your DSH commit when reporting compatibility problems with a newer version.
+- **Node.js**: `^22.19.0 || >=24.0.0`.
+- **Platforms**: Windows, Linux x64/arm64, and macOS on Apple Silicon support the complete feature set.
+- **Intel Mac**: onnxruntime does not provide a darwin-x64 binary, so local embeddings and OCR are unavailable. Use an OpenAI-compatible remote provider or Ollama instead.
+- **Legacy Office formats**: `.doc`, `.ppt`, and `.xls` parsing depends on the platform-native binaries from `@firecrawl/anydoc`.
+- **First-use network access**: local embedding and OCR models must be downloaded once. Lexical retrieval and remote providers do not require local weights.
+
+---
+
+## Configuration
+
+Deployment defaults live in the `knowledge` row of `cordis.patch.yml`. The management panel can persist runtime overrides, and most retrieval and document settings can also be overridden per base.
 
 <details>
-<summary>查看完整配置字段</summary>
+<summary>View every configuration field</summary>
 
-| 字段 | 默认 | 说明 |
+| Field | Default | Notes |
 |---|---:|---|
-| `embeddingProvider` | `none` | `openai`、`ollama`、`local` 或 `none` |
-| `embeddingBaseUrl` | `''` | embedding API 基址；Ollama 空值回退到本地标准端点 |
-| `embeddingModel` | `''` | 远程模型名或 Hugging Face 本地模型仓库 ID |
-| `embeddingApiKey` | `''` | 也可通过 `KNOWLEDGE_API_KEY` 设置 |
-| `rerankModel` / `rerankBaseUrl` / `rerankApiKey` | `''` | 远程或 `local:` 重排；空模型表示关闭 |
-| `localRerankTimeoutMs` | `60000` | 本地重排总预算，范围 10,000–300,000 ms，包含排队时间 |
-| `smartChunk` | `true` | 标题/段落感知分块；关闭后只使用分隔符 |
-| `chunkSeparator` | `\n\n` | `smartChunk` 关闭时的分隔符 |
-| `chunkSize` | `800` | 分块 Token 目标预算 |
-| `chunkOverlap` | `100` | 相邻分块重叠 Token 预算 |
-| `topK` | `4` | 默认检索结果数，允许 1–50 |
-| `searchMode` | `auto` | `auto`、`hybrid`、`vector` 或 `lexical` |
-| `similarityThreshold` | `0` | 结果最低相似度，范围 0–1 |
-| `mmrDiversity` | `0` | MMR 多样性，`0` 表示关闭 |
-| `rrfVectorWeight` | `1` | hybrid 模式中向量召回的 RRF 权重 |
-| `embeddingBatchSize` | `32` | 每批 embedding 文本数 |
-| `siblingChunks` | `1` | 每侧相邻 chunk 数，范围 0–3；`0` 仍生成 anchor-only 窗口 |
-| `semanticChunk` | `false` | 合并相邻相似语义段落 |
-| `semanticChunkThreshold` | `0.75` | 语义分块余弦阈值 |
-| `chunkTokenLimit` | `0` | 分块 Token 硬上限；`0` 表示不限制 |
-| `conflictStrategy` | `rename` | 同名导入使用 `keep`、`replace` 或 `rename` |
-| `urlRefreshHours` | `0` | URL 自动刷新间隔；`0` 表示关闭 |
-| `imageCaptionProvider` | `off` | `off`、`openai` 或 `ollama` |
-| `imageCaptionModel` | `''` | 图表描述使用的视觉模型 ID |
-| `imageCaptionBaseUrl` | `''` | 图表描述 API 基址 |
-| `imageCaptionApiKey` | `''` | OpenAI 兼容视觉服务密钥 |
-| `hfEndpoint` | `''` | Hugging Face 下载端点或镜像 |
-| `mineruPythonIndexUrl` | `https://pypi.org/simple` | 托管 MinerU 隔离环境使用的 Python 包源 |
-| `documentProcessorProvider` | `builtin` | `builtin` 内置解析、`mineru` 云 API、`mineru-local` 自部署 MinerU 4 V1（Basic 本地托管为实验性） |
-| `mineruApiKey` | `''` | MinerU 模式需要的 API Key |
-| `mineruApiHost` | `''` | 空值使用 `https://mineru.net` |
-| `resumeInterruptedOnStartup` | `true` | 启动时恢复中断的导入；自动解析恢复最多 3 次，失败后保留来源供手动重建 |
-| `autoRetrieve` | `true` | 用户消息进入时自动检索并注入相关背景 |
-| `injectUsagePrompt` | `true` | 每次请求仅列出可用库名；可在每库高级设置中关闭，不影响工具和自动检索 |
-| `autoRetrieveWeight` | `3` | 每库自动注入席位上限，范围 0–5；`0` 表示排除 |
-| `localModelCacheDir` | `''` | 空值使用 `<DSH_HOME>/cache/dsh-knowledge/local-models` |
-| `localWorkerIdleTimeoutMs` | `60000` | 本地 embedding process 空闲释放模型 session 的时间；`0` 表示常驻 |
-| `chunkStorePath` | `''` | 空值使用 `<DSH_HOME>/storages/knowledge-chunks.sqlite` |
+| `embeddingProvider` | `none` | `openai`, `ollama`, `local`, or `none` |
+| `embeddingBaseUrl` | `''` | Embedding API root; an empty Ollama URL falls back to its standard local endpoint |
+| `embeddingModel` | `''` | Remote model name or local Hugging Face repository ID |
+| `embeddingApiKey` | `''` | Can also be supplied through `KNOWLEDGE_API_KEY` |
+| `rerankModel` / `rerankBaseUrl` / `rerankApiKey` | `''` | Remote or `local:` reranking; an empty model disables it |
+| `localRerankTimeoutMs` | `60000` | Total local rerank budget, including queue time; range 10,000–300,000 ms |
+| `smartChunk` | `true` | Heading/paragraph-aware chunking; off uses only the separator |
+| `chunkSeparator` | `\n\n` | Separator used when `smartChunk` is off |
+| `chunkSize` | `800` | Target token budget per chunk |
+| `chunkOverlap` | `100` | Overlap token budget between adjacent chunks |
+| `topK` | `4` | Default result count; accepted range 1–50 |
+| `searchMode` | `auto` | `auto`, `hybrid`, `vector`, or `lexical` |
+| `similarityThreshold` | `0` | Minimum result score, from 0 to 1 |
+| `mmrDiversity` | `0` | MMR diversity; `0` disables it |
+| `rrfVectorWeight` | `1` | Vector-lane weight in hybrid RRF fusion |
+| `embeddingBatchSize` | `32` | Texts sent in each embedding batch |
+| `siblingChunks` | `1` | Adjacent chunks per side, range 0–3; `0` still produces an anchor-only window |
+| `semanticChunk` | `false` | Merge semantically similar adjacent paragraphs |
+| `semanticChunkThreshold` | `0.75` | Cosine threshold for semantic chunking |
+| `chunkTokenLimit` | `0` | Hard per-chunk token ceiling; `0` disables it |
+| `conflictStrategy` | `rename` | Same-name import behavior: `keep`, `replace`, or `rename` |
+| `urlRefreshHours` | `0` | URL refresh interval; `0` disables it |
+| `imageCaptionProvider` | `off` | `off`, `openai`, or `ollama` |
+| `imageCaptionModel` | `''` | Vision model ID used for figure descriptions |
+| `imageCaptionBaseUrl` | `''` | Figure-captioning API root |
+| `imageCaptionApiKey` | `''` | Key for an OpenAI-compatible vision endpoint |
+| `hfEndpoint` | `''` | Hugging Face download endpoint or mirror |
+| `mineruPythonIndexUrl` | `https://pypi.org/simple` | Python package index used only by managed MinerU's isolated environment |
+| `documentProcessorProvider` | `builtin` | `builtin`, cloud `mineru`, or self-hosted MinerU 4 V1 `mineru-local` (managed Basic is experimental) |
+| `mineruApiKey` | `''` | Required for MinerU mode |
+| `mineruApiHost` | `''` | Empty uses `https://mineru.net` |
+| `resumeInterruptedOnStartup` | `true` | Resume interrupted imports; automatic parse recovery stops after 3 attempts and retains sources for manual rebuild |
+| `autoRetrieve` | `true` | Search user messages proactively and inject relevant background |
+| `injectUsagePrompt` | `true` | List available base names per request; can be disabled in per-base advanced settings without disabling tools or auto-retrieval |
+| `autoRetrieveWeight` | `3` | Per-base proactive seat cap, range 0–5; `0` excludes the base |
+| `localModelCacheDir` | `''` | Empty uses `<DSH_HOME>/cache/dsh-knowledge/local-models` |
+| `localWorkerIdleTimeoutMs` | `60000` | Idle time before releasing local embedding-process sessions; `0` keeps them hot |
+| `chunkStorePath` | `''` | Empty uses `<DSH_HOME>/storages/knowledge-chunks.sqlite` |
 
-`knowledge:usage` 不再重复 `knowledge_search` 的行为指令，只提供库名；部署配置或全局覆盖可设置 `injectUsagePrompt: false`，每库配置可以单独覆盖。自动检索消息使用插件自己的 `dsh-knowledge` 来源名称，符合 DSH v4 的来源准入要求。桌面面板通过 Window Controls Overlay 几何和 CSS 标题栏环境变量动态避让窗口按钮，关闭按钮、知识库开关和通知随面板一起进入安全区。
+`knowledge:usage` now supplies only base names; behavioral guidance stays in `knowledge_search`. Set `injectUsagePrompt: false` in deployment/global configuration or override it per base. Auto-retrieval messages use the producer-owned `dsh-knowledge` source accepted by DSH v4. Desktop panels dynamically avoid native window controls using Window Controls Overlay geometry and CSS titlebar environment variables, moving the close button, knowledge toggle, and toasts into the safe area together.
 
-按库设置中的空字段继承全局配置。`localModelCacheDir`、`localWorkerIdleTimeoutMs` 和 `chunkStorePath` 是进程级设置。API Key 以明文保存在本地机器，请保护 profile 数据目录。
+Empty per-base fields inherit the global configuration. `localModelCacheDir`, `localWorkerIdleTimeoutMs`, and `chunkStorePath` are process-wide. API keys are stored as plain text on the local machine, so protect the profile data directory.
 
 </details>
 
 ---
 
-## 召回效果评测
+## Retrieval evaluation
 
-仓库提供两个无额外依赖的脚本，可针对自己的知识库复跑检索和 RAG 上下文指标：
+Two dependency-free scripts can evaluate retrieval and RAG context against your own base:
 
 ```bash
-# Hit@k、Recall@k、MRR
+# Hit@k, Recall@k, and MRR
 node scripts/eval-retrieval.mjs --file scripts/eval-questions.example.json --base <baseId> --mode hybrid
 
-# Hit@k、句子级 Context Recall（RAGAS 风格近似，无需 LLM）、MRR
+# Hit@k, sentence-level Context Recall (RAGAS-style approximation, no LLM), and MRR
 node scripts/eval-rag.mjs --file scripts/eval-rag.example.json --base <baseId> --topK 5
 ```
 
-复制示例 JSON，替换成自己的问题、预期文档标题和参考答案后运行。仓库内固定合成语料用于防止版本回归，其结果不代表所有私有文档、语言或模型配置都能获得相同准确率。
+Copy an example JSON file and replace its questions, expected document-title fragments, and reference answers. The fixed synthetic fixtures in this repository are regression gates, not an accuracy guarantee for every private corpus, language, or model configuration.
 
 ---
 
-## 开发与验证
+## Development and verification
 
-源码开发依赖同级目录中的公开 DeepSeek Harness monorepo，`devDependencies` 使用 `link:../dsh/...`：
+Source development expects the public DeepSeek Harness monorepo as a sibling checkout because `devDependencies` use `link:../dsh/...`:
 
 ```bash
 pnpm install --config.auto-install-peers=false
@@ -562,34 +571,63 @@ pnpm run check
 pnpm run build
 ```
 
-- `pnpm test`：分块、检索、配置、存储和服务测试。
-- `pnpm run typecheck`：执行 `tsc --noEmit`。
-- `pnpm run build`：构建 host ESM、浏览器 client bundle 和类型声明。
-- `npm run release:check -- --expected-version <version>`：执行发布前完整门槛。
+- `pnpm test`: chunking, retrieval, configuration, storage, and service tests.
+- `pnpm run typecheck`: run `tsc --noEmit`.
+- `pnpm run build`: build host ESM entries, the browser client bundle, and declarations.
+- `npm run release:check -- --expected-version <version>`: run the complete release gate.
 
 ---
 
-## 已知局限
+## Known limitations
 
-- 模型选择器是带建议的可编辑组合框，不是 provider 的实时模型列表；可以手动输入自定义 ID。
-- embedding 按批次运行在导入流程内；本地模型第一次下载会阻塞对应导入，但管理页面会显示进度。
-- `mineru` 云模式需要 API Key；`mineru-local` 使用独立服务地址和可选的服务令牌，不会自动降级到云 API。自部署服务不等于完全离线：文件会发送到配置的服务及其上传存储地址。
-- 开发分支新增结构化证据、页码/区域来源、解析产物复用及「重新解析 / 重新分块」。旧文档不会自动重建；真实模型效果仍须验证。参见 [MinerU 自部署与验证说明](docs/mineru-self-hosted.md)。
-- 文本入口适合轻量笔记，不提供富文本编辑器。
-- Intel Mac 无法运行基于 onnxruntime 的本地 embedding 和 OCR。
-
----
-
-## 安全
-
-安全问题请按照 [SECURITY.md](./SECURITY.md) 通过 GitHub 私密漏洞报告通道提交。不要在公开 Issue 中发布利用细节、凭据、私人文档或未脱敏日志。
-
-普通功能缺陷和使用问题可以通过 [GitHub Issues](https://github.com/Soren-ABT/dsh-knowledge/issues) 报告。
+- Model selectors are editable suggestion comboboxes rather than live provider model lists; custom IDs can be entered manually.
+- Embeddings run in batches inside the import flow. The first local-model download blocks that import, while the management panel displays progress.
+- Cloud `mineru` requires an API key. `mineru-local` uses a separate endpoint and optional service token, with no automatic cloud fallback. Self-hosted does not necessarily mean offline: documents go to the configured service and its upload storage.
+- The development branch adds structured evidence, page/block provenance, reusable parsing artifacts, and separate reparse/rechunk actions. Existing documents are not automatically rebuilt; real inference quality still requires validation. See the [self-hosted MinerU guide](docs/mineru-self-hosted.md).
+- The text entry is intended for lightweight notes and is not a rich-text editor.
+- Intel Macs cannot run the onnxruntime-based local embedding and OCR paths.
 
 ---
 
-## 许可
+## Security
 
-[AGPL-3.0](LICENSE)。项目的 PDF 页面渲染依赖 [mupdf](https://mupdf.com/)（AGPL-3.0），因此采用 AGPL-3.0 以保持分发许可一致。项目也与设计参考 [Cherry Studio](https://github.com/CherryHQ/cherry-studio) 使用相同许可证，但代码为独立实现，不包含 Cherry Studio 源码。
+Report vulnerabilities through GitHub's private reporting flow as described in [SECURITY.md](./SECURITY.md). Do not place exploit details, credentials, private documents, or unredacted logs in a public issue.
 
-感谢 [dsh-interconnect](https://github.com/deepseek-ai/deepseek-harness)、[dsh-deeptutor](https://github.com/TecFancy/dsh-deeptutor)、[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 以及为项目提交代码和问题报告的社区贡献者。
+Use [GitHub Issues](https://github.com/Soren-ABT/dsh-knowledge/issues) for ordinary bugs and usage questions.
+
+---
+
+## License
+
+[AGPL-3.0](LICENSE). PDF page rendering depends on [mupdf](https://mupdf.com/) under AGPL-3.0, so the project uses AGPL-3.0 to keep distribution licensing consistent. It also matches the license of the design reference [Cherry Studio](https://github.com/CherryHQ/cherry-studio), but this is an independent implementation containing none of Cherry Studio's source.
+
+Thanks to [dsh-interconnect](https://github.com/deepseek-ai/deepseek-harness), [dsh-deeptutor](https://github.com/TecFancy/dsh-deeptutor), [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin), and the community contributors who submit code and issue reports.
+
+## Local rebuild: internal and external knowledge
+
+New base now has an **Internal / External** storage selector. Existing bases remain internal.
+
+- **Internal** keeps the existing upload/import behavior, including cached originals.
+- **External** selects one folder on the DSH host. The plugin stores parsed text, processing evidence, chunks and embeddings; it does not keep another copy of original source files. Supported document types are indexed; symbolic links are not followed by the folder scanner.
+- Recursive filesystem notifications trigger reconciliation. A periodic scan (60 seconds by default, configurable from 5 seconds to one day) catches missed notifications and reconnects after restarts. Use the per-base switch to pause synchronization. **Reconcile now** requests a one-time scan even while automatic syncing is paused.
+- A missing or unreadable top-level folder is shown as disconnected. Its indexed content remains searchable. Individual missing files/subfolders are removed from the index only after the top-level source is readable. Reconnecting synchronizes again.
+- **Original** reads the current original from its selected folder. It can differ from the indexed snapshot until the next sync. Offline indexed previews remain available, while original-file access requires the source to be online. **Show in document** highlights a loaded chunk within the indexed text preview.
+- Deleting the knowledge base removes the plugin's index/cache, never the source directory. Removing an individual external KB entry does not delete its source file; reconciliation can index it again while that file remains in the selected folder.
+
+Native selection uses Windows Forms through Windows PowerShell on Windows, or Zenity/KDialog on Linux. The dialog opens on the DSH host's desktop. A remote/headless host may require entering its absolute folder path instead. Linux integration is tested; Windows dialog execution still requires qualification on a Windows machine.
+
+The entire implementation is in this plugin. No DSH core files are patched. Accelerator embedding/OCR scheduling and the earlier requested model benchmarks are separate work and are not enabled by this folder-sync feature.
+
+Automatic knowledge retrieval is recorded in the conversation as a collapsed
+“Knowledge retrieved — N passages” row, above the model's reasoning within
+Analysis. Expanding it shows the exact evidence sent to the model and links to
+original sources. Completed searches that deliver no new evidence record zero
+passages; disabled or skipped retrieval does not pretend to have searched. The
+row replays from DSH's existing `user/message` log through the public conversation
+registry and keyed Chat slot, including older saved knowledge injections.
+
+Directory reconciliation overlaps up to four file jobs per source, retaining
+processor-level concurrency limits, and combines base timestamp writes across a
+scan. Two source roots can reconcile concurrently, without overlapping scans of
+the same root. Metadata still uses the DSH storage API; this is not a migration
+of document metadata to SQLite, and a full 50,000-file speedup has not been measured.
