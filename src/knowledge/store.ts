@@ -389,7 +389,13 @@ class DomainStore implements Store {
   }
 
   private writeDocuments<T>(operation: () => Promise<T>): Promise<T> {
-    const next = this.documentWriteChain.then(operation)
+    // A large import can keep resolving SQLite writes synchronously through
+    // promise microtasks. Give sockets, cancellation and chat control a turn
+    // between documents while preserving the single-writer ordering.
+    const next = this.documentWriteChain.then(async () => {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      return operation()
+    })
     this.documentWriteChain = next.then(() => {}, () => {})
     return next
   }

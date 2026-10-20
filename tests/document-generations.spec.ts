@@ -51,6 +51,17 @@ async function storage(fixture = domainFixture()) {
 }
 
 describe('generation staging and atomic publication', () => {
+  it('keeps the event loop responsive while queued document writes preserve ordering', async () => {
+    const { store } = await storage()
+    const writes = Array.from({ length: 40 }, (_, index) =>
+      store.putDocument({ ...document, title: `revision ${index}` }))
+    let heartbeat = false
+    setImmediate(() => { heartbeat = true })
+    await Promise.all(writes)
+    expect(heartbeat).toBe(true)
+    expect(store.getDocument(document.id)?.title).toBe('revision 39')
+  })
+
   it('keeps candidate batches invisible, upserts idempotently, and reuses their vectors', async () => {
     const { store } = await storage()
     await store.stageDocumentGeneration(nextDocument, [newChunk])

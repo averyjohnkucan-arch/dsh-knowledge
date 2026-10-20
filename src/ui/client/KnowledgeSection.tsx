@@ -1296,9 +1296,22 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
 
   useEffect(() => {
     if (selectedBase?.storageMode !== 'external') return
-    const timer = window.setInterval(() => { void refreshBases(); void reloadDocuments() }, 3000)
-    return () => window.clearInterval(timer)
-  }, [selectedBase?.id, selectedBase?.storageMode, refreshBases, reloadDocuments])
+    let disposed = false
+    let timer: number | undefined
+    const poll = async (): Promise<void> => {
+      try {
+        // reloadDocuments also refreshes base summaries. Never overlap a slow
+        // large-library request or keep polling a background browser tab.
+        if (document.visibilityState !== 'hidden') await reloadDocuments()
+      } catch {
+        // Keep the last snapshot on a transient failure.
+      } finally {
+        if (!disposed) timer = window.setTimeout(() => { void poll() }, 3000)
+      }
+    }
+    timer = window.setTimeout(() => { void poll() }, 3000)
+    return () => { disposed = true; window.clearTimeout(timer) }
+  }, [selectedBase?.id, selectedBase?.storageMode, reloadDocuments])
 
   const addSourceMenu: MenuEntry[] = selectedBase?.storageMode === 'external' ? [
     { key: 'sync', label: t('reconcileNow'), onSelect: () => { void api.externalSettings(selectedBase.id, { reconcileNow: true }).then(refreshBases).catch(e => notify('error', String(e))) } },
