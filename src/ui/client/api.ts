@@ -247,6 +247,11 @@ export interface KnowledgeConfig {
   autoRetrieveWeight: number
   /** Local-model worker idle timeout in ms (0 = never release; keeps the
    *  model hot and avoids an onnxruntime binding reload on respawn). */
+  localEmbeddingIgpuIdle?: boolean
+  localEmbeddingMainGpuIdle?: boolean
+  localEmbeddingThreads?: number
+  localEmbeddingInstances?: number
+  localEmbeddingMicroBatchSize?: number
   localWorkerIdleTimeoutMs: number
 }
 
@@ -390,7 +395,7 @@ export class KnowledgeApi {
   private async call<T>(method: string, path: string, body?: unknown, timeoutMs = 60_000): Promise<T> {
     const response = await fetch(`/knowledge${path}`, {
       method,
-      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path.startsWith('/ocr-acceleration') || path.startsWith('/structure-v3') || path === '/folder-picker' || path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
+      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path.startsWith('/embedding-acceleration') || path.startsWith('/ocr-acceleration') || path.startsWith('/structure-v3') || path === '/folder-picker' || path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       // A hung host must not pin the panel's busy state forever: fail the
       // call with a clear error instead of an indefinite spinner. Long-running
@@ -521,6 +526,9 @@ export class KnowledgeApi {
    * Embed one probe text through the given (or current) embedding config and
    * return the vector width (Cherry's dimension probe, run before a save).
    */
+  getEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('GET','/embedding-acceleration') }
+  prepareEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('POST','/embedding-acceleration',{}) }
+
   probeEmbeddingDimensions(options: {
     provider?: EmbeddingProvider
     baseUrl?: string

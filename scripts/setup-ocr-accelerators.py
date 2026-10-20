@@ -2,7 +2,7 @@
 import sys,os,pathlib,subprocess,json,hashlib,tarfile,urllib.request,runpy
 helper=runpy.run_path(str(pathlib.Path(__file__).with_name('python-runtime.py')))
 root=pathlib.Path(sys.argv[1]).resolve();uv,python,env=helper['bootstrap'](root)
-subprocess.run([str(uv),'pip','install','--python',str(python),'openvino==2026.4.1','rapidocr==3.10.0'],env=env,check=True)
+subprocess.run([str(uv),'pip','install','--python',str(python),'--requirement',str(pathlib.Path(__file__).with_name('accelerator-runtime-requirements.txt'))],env=env,check=True)
 if sys.platform=='linux':
     manifest=json.loads(pathlib.Path(__file__).with_name('intel-runtime-manifest.json').read_text())
     downloads=root/'downloads';downloads.mkdir(exist_ok=True);destination=root/'intel';destination.mkdir(exist_ok=True)

@@ -67,6 +67,7 @@ export const baseConfigSchema = z.object({
 })
 
 const baseSchema = z.object({
+  embeddingBackfillPending: z.boolean().optional(),
   storageMode: z.enum(['internal', 'external']).optional(),
   externalPath: z.string().optional(),
   syncEnabled: z.boolean().optional(),
@@ -170,6 +171,11 @@ export const configOverridesSchema = z.object({
   injectUsagePrompt: z.boolean().optional(),
   autoRetrieveWeight: z.number().int().gte(0).lte(5).optional(),
   localModelCacheDir: z.string().optional(),
+  localEmbeddingIgpuIdle: z.boolean().optional(),
+  localEmbeddingMainGpuIdle: z.boolean().optional(),
+  localEmbeddingThreads: z.number().int().gte(0).lte(64).optional(),
+  localEmbeddingInstances: z.number().int().gte(0).lte(4).optional(),
+  localEmbeddingMicroBatchSize: z.number().int().gte(1).lte(8).optional(),
   localWorkerIdleTimeoutMs: z.number().int().gte(0).optional(),
 })
 
@@ -220,6 +226,11 @@ export interface ConfigOverrides {
   injectUsagePrompt?: boolean
   autoRetrieveWeight?: number
   localModelCacheDir?: string
+  localEmbeddingIgpuIdle?: boolean
+  localEmbeddingMainGpuIdle?: boolean
+  localEmbeddingThreads?: number
+  localEmbeddingInstances?: number
+  localEmbeddingMicroBatchSize?: number
   localWorkerIdleTimeoutMs?: number
 }
 

@@ -239,6 +239,11 @@ export interface KnowledgeConfig {
     autoRetrieveWeight: number;
     /** Local-model worker idle timeout in ms (0 = never release; keeps the
      *  model hot and avoids an onnxruntime binding reload on respawn). */
+    localEmbeddingIgpuIdle?: boolean;
+    localEmbeddingMainGpuIdle?: boolean;
+    localEmbeddingThreads?: number;
+    localEmbeddingInstances?: number;
+    localEmbeddingMicroBatchSize?: number;
     localWorkerIdleTimeoutMs: number;
 }
 export interface SearchHit {
@@ -488,6 +493,8 @@ export declare class KnowledgeApi {
      * Embed one probe text through the given (or current) embedding config and
      * return the vector width (Cherry's dimension probe, run before a save).
      */
+    getEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
+    prepareEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
     probeEmbeddingDimensions(options?: {
         provider?: EmbeddingProvider;
         baseUrl?: string;

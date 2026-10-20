@@ -1,4 +1,3 @@
-/** Local embedding/reranker registry, downloads, health, and readiness records. */
 import { type LocalRerankFailureCode } from './local-rerank.js';
 export interface LocalModelDescriptor {
     readonly id: string;

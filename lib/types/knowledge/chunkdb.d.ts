@@ -45,6 +45,8 @@ export interface RetrievalDocumentFilter {
     readonly docIds?: readonly string[];
     /** Exact ids removed before counting, scoring, or limiting candidates. */
     readonly excludeDocIds?: readonly string[];
+    /** Vector lane only: never score a different model/export/vector format. */
+    readonly embeddingModel?: string;
 }
 export interface RetrievalLane {
     /** FTS5 BM25 hits over the scope (score normalized into [0, 1)). */
@@ -191,7 +193,7 @@ export declare class ChunkDatabase implements RetrievalLane {
      */
     listEmbeddingVectorsByHashes(hashes: readonly string[], embeddingModel: string): Map<string, number[]>;
     /** Per-doc chunk presence + embedding coverage in one grouped pass (listDocuments). */
-    docChunkStatus(baseId: string): {
+    docChunkStatus(baseId: string, expectedModel?: string): {
         withChunks: Set<string>;
         missingEmbedding: Set<string>;
     };

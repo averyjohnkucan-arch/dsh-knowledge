@@ -32,6 +32,7 @@ vi.mock('../src/knowledge/embed.js', () => ({
   setLocalModelCacheDir: vi.fn(),
   setHfEndpoint: vi.fn(),
   setLocalWorkerIdleTimeoutMs: vi.fn(),
+  setLocalEmbeddingTuning: vi.fn(),
   applyGlobalProxy: vi.fn(),
 }))
 
@@ -163,17 +164,21 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
   it('backfills unchanged folder files from canonical text instead of a sync that skips them', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kb-embedding-folder-'))
     try {
-      await writeFile(join(root, 'sample.txt'), 'A stable folder document about astronomy.')
+      await writeFile(join(root, 'sample.txt'), 'A stable folder document about astronomy. '.repeat(100))
       const service = await mountService()
       const base = await service.createBase({ name: 'folder backfill' })
       await service.importDirectoryTree(base.id, root)
       await service.waitForIdle()
+      const originalLeaf = service.listDocuments(base.id).find(doc => doc.sourceType === 'file')!
+      const originalChunks = service.listChunks(originalLeaf.id).map(({ id, text }) => ({ id, text }))
+      await service.renameBase(base.id, { config: { chunkSize: 100, chunkOverlap: 0 } })
       embedTextsMock.mockClear()
       const reindex = vi.spyOn(service, 'reindexDocument')
       await service.renameBase(base.id, { config: { embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'folder-model' } })
       await service.waitForIdle()
       expect(embedTextsMock).toHaveBeenCalled()
-      expect(reindex.mock.calls.every(([, options]) => options?.mode === 'rechunk')).toBe(true)
+      expect(reindex).not.toHaveBeenCalled()
+      expect(service.listChunks(originalLeaf.id).map(({ id, text }) => ({ id, text }))).toEqual(originalChunks)
       const leaf = service.listDocuments(base.id).find(doc => doc.sourceType === 'file')!
       expect(service.listChunks(leaf.id).every(chunk => chunk.embeddingModel === 'openai:folder-model')).toBe(true)
       embedTextsMock.mockClear()

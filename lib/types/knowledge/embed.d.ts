@@ -1,12 +1,3 @@
-/**
- * Embedding providers. `openai` targets any OpenAI-compatible `/embeddings`
- * endpoint; `ollama` targets a local Ollama server; `local` runs an embedding
- * model through transformers.js in a DEDICATED CHILD PROCESS: the ~600MB
- * model and every inference tensor live off the main process, so a large
- * import batch can never freeze the host and native failures are recoverable.
- * Every provider returns one L2-normalized vector per input text.
- * @module dsh-knowledge/knowledge/embed
- */
 import { LOCAL_MODEL_RUNTIME } from './local-model-runtime.js';
 import type { EmbeddingProvider } from './types.js';
 /** Default in-process model — the ONNX repo Cherry Studio ships. */
@@ -29,7 +20,7 @@ export declare function expandHomePath(input: string): string;
 /** Persistent cache directory for downloaded local models (mirrors DSH's `resolveDshHome`). */
 export declare function localModelCacheDir(): string;
 /** Embed many texts into normalized vectors. Throws when the provider is `none` or the call fails. */
-export declare function embedTexts(provider: EmbeddingProvider, baseUrl: string, model: string, apiKey: string, texts: readonly string[], signal?: AbortSignal): Promise<number[][]>;
+export declare function embedTexts(provider: EmbeddingProvider, baseUrl: string, model: string, apiKey: string, texts: readonly string[], signal?: AbortSignal, purpose?: 'query' | 'index'): Promise<number[][]>;
 export interface LocalModelStatus {
     model: string;
     status: 'idle' | 'downloading' | 'ready' | 'error';
@@ -65,6 +56,11 @@ export declare function markLocalModelError(modelId: string, message: string): v
 /** Whether a model's cached weights are already on disk (a real `.onnx` weight file). */
 export declare function isLocalModelDownloaded(modelId: string): Promise<boolean>;
 export declare function getLocalEmbeddingReadiness(modelId: string): Promise<LocalEmbeddingReadiness | undefined>;
+export declare function setLocalEmbeddingTuning(config: {
+    localEmbeddingThreads?: number;
+    localEmbeddingInstances?: number;
+    localEmbeddingMicroBatchSize?: number;
+}): void;
 /** Configure the local-model process idle release timeout (0 = never release). */
 export declare function setLocalWorkerIdleTimeoutMs(ms: number): void;
 /**

@@ -21,6 +21,14 @@ A **knowledge base system** as a standalone, open-source bundle plugin for [Deep
 
 ---
 
+## This fork: install the ready-to-run release
+
+Paste `https://github.com/averyjohnkucan-arch/dsh-knowledge` into DSH’s GitHub plugin installer. The default `plugin-release` branch includes compiled plugin files; `rebuild` contains the development source. No changes to DSH core or other plugins are required.
+
+In Settings → Local Models, download the recommended local stack: Qwen3 Embedding 0.6B, BGE Reranker Base, PaddleOCR and optional PP-StructureV3 enrichment. Select the recommended models in base settings and save. Model weights are separate downloads, not bundled into Git. The plugin also offers its own optional OpenVINO CPU/NPU model installer and validates usable devices before enabling them.
+
+[Measured performance, fresh-install steps and hardware limits](docs/embedding-performance.md) · [Version 0.5.3](docs/releases/v0.5.3.md)
+
 ## Local pipeline configuration
 
 Use the built-in PDF parser, PaddleOCR for scanned documents, and optional

@@ -1,3 +1,10 @@
+# 0.5.3 — local embedding performance and device management
+
+- Parallel isolated CPU embedding processes with bounded thread and memory use; configurable threads, instance count, and micro-batch size.
+- Optional pinned OpenVINO Qwen3 embedding export with validated CPU/NPU execution and same-export CPU fallback. Separate model identity prevents mixing incompatible vectors.
+- Idle-only GPU qualification and a ten-second foreground yield deadline through the public LLM stream hook.
+- Durable embedding backfill recovery; metadata-only scans for large libraries; linear folder subtree selection and explicit re-chunk actions.
+
 # Changelog
 
 ## Unreleased

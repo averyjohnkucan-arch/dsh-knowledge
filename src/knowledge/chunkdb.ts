@@ -237,6 +237,8 @@ export interface RetrievalDocumentFilter {
   readonly docIds?: readonly string[]
   /** Exact ids removed before counting, scoring, or limiting candidates. */
   readonly excludeDocIds?: readonly string[]
+  /** Vector lane only: never score a different model/export/vector format. */
+  readonly embeddingModel?: string
 }
 
 export interface RetrievalLane {
@@ -984,10 +986,10 @@ export class ChunkDatabase implements RetrievalLane {
   }
 
   /** Per-doc chunk presence + embedding coverage in one grouped pass (listDocuments). */
-  docChunkStatus(baseId: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
+  docChunkStatus(baseId: string, expectedModel?: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
     const rows = this.db.prepare(
-      'SELECT doc_id, SUM(embedding IS NULL) AS missing FROM chunk WHERE base_id = ? GROUP BY doc_id',
-    ).all(baseId) as Array<{ doc_id: string; missing: number }>
+      'SELECT doc_id, SUM(embedding IS NULL OR (? IS NOT NULL AND (embedding_model IS NULL OR embedding_model != ?))) AS missing FROM chunk WHERE base_id = ? GROUP BY doc_id',
+    ).all(expectedModel ?? null, expectedModel ?? null, baseId) as Array<{ doc_id: string; missing: number }>
     const withChunks = new Set<string>()
     const missingEmbedding = new Set<string>()
     for (const row of rows) {
@@ -1143,6 +1145,7 @@ export class ChunkDatabase implements RetrievalLane {
       for (const entry of this.ensureVectorCache(baseId)) {
         if ((scanned++ & 255) === 0) throwIfDeadlineExpired(deadlineAt)
         if ((allowed !== undefined && !allowed.has(entry.docId)) || excluded.has(entry.docId)) continue
+        if (filter?.embeddingModel !== undefined && entry.row.embedding_model !== filter.embeddingModel) continue
         total += 1
         if (query === null || entry.vector.length !== query.length) continue
         scored.push({ ...rowToChunk(entry.row), score: cosineFloat32(query, entry.vector) })

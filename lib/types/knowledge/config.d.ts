@@ -99,6 +99,11 @@ export interface Config {
      * self-register") cannot happen; the next request reloads from disk (~1s).
      * 0 keeps the models hot forever (fastest, at the cost of resident memory).
      */
+    localEmbeddingIgpuIdle?: boolean;
+    localEmbeddingMainGpuIdle?: boolean;
+    localEmbeddingThreads?: number;
+    localEmbeddingInstances?: number;
+    localEmbeddingMicroBatchSize?: number;
     localWorkerIdleTimeoutMs: number;
 }
 export declare const Config: Schema<Config>;

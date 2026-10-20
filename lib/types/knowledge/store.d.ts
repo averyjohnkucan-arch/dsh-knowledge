@@ -110,7 +110,7 @@ export interface Store {
     /** Actual chunk count per document, for reconciling stale document metadata. */
     chunkCountsByDoc(baseIds: readonly string[]): Map<string, number>;
     /** Per-doc chunk presence + embedding coverage in one pass (document lists). */
-    docChunkStatus(baseId: string): {
+    docChunkStatus(baseId: string, expectedModel?: string): {
         withChunks: Set<string>;
         missingEmbedding: Set<string>;
     };

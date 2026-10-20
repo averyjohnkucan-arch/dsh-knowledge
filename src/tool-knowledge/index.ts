@@ -281,6 +281,13 @@ export function apply(ctx: Context): void {
     return document
   }
 
+  ctx.on('llm/stream', function (_options, next) {
+    return (async function* () {
+      const release = await knowledge.enterEmbeddingForeground()
+      try { yield* next() } finally { release() }
+    })()
+  })
+
   // Search guidance lives in the tool description. This optional section only
   // supplies base names, which the tool schema cannot know at registration.
   ctx.systemPrompt.section({

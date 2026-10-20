@@ -12,6 +12,11 @@ export interface LocalEmbedRequest extends LocalEmbedEnvelope {
     readonly cacheDir: string;
     readonly hfEndpoint?: string;
     readonly texts?: string[];
+    readonly cpuTuning?: {
+        threads?: number;
+        instances?: number;
+        microBatch?: number;
+    };
     readonly pooling?: LocalEmbedPooling;
 }
 export interface LocalEmbedSuccess extends LocalEmbedEnvelope {

@@ -29,9 +29,9 @@ export declare const baseConfigSchema: z.ZodObject<{
     chunkOverlap: z.ZodOptional<z.ZodNumber>;
     topK: z.ZodOptional<z.ZodNumber>;
     searchMode: z.ZodOptional<z.ZodEnum<{
+        vector: "vector";
         auto: "auto";
         hybrid: "hybrid";
-        vector: "vector";
         lexical: "lexical";
     }>>;
     similarityThreshold: z.ZodOptional<z.ZodNumber>;
@@ -187,9 +187,9 @@ export declare const configOverridesSchema: z.ZodObject<{
     chunkOverlap: z.ZodOptional<z.ZodNumber>;
     topK: z.ZodOptional<z.ZodNumber>;
     searchMode: z.ZodOptional<z.ZodEnum<{
+        vector: "vector";
         auto: "auto";
         hybrid: "hybrid";
-        vector: "vector";
         lexical: "lexical";
     }>>;
     similarityThreshold: z.ZodOptional<z.ZodNumber>;
@@ -241,6 +241,11 @@ export declare const configOverridesSchema: z.ZodObject<{
     injectUsagePrompt: z.ZodOptional<z.ZodBoolean>;
     autoRetrieveWeight: z.ZodOptional<z.ZodNumber>;
     localModelCacheDir: z.ZodOptional<z.ZodString>;
+    localEmbeddingIgpuIdle: z.ZodOptional<z.ZodBoolean>;
+    localEmbeddingMainGpuIdle: z.ZodOptional<z.ZodBoolean>;
+    localEmbeddingThreads: z.ZodOptional<z.ZodNumber>;
+    localEmbeddingInstances: z.ZodOptional<z.ZodNumber>;
+    localEmbeddingMicroBatchSize: z.ZodOptional<z.ZodNumber>;
     localWorkerIdleTimeoutMs: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 /** Partial runtime config stored in the domain global slot. */
@@ -290,6 +295,11 @@ export interface ConfigOverrides {
     injectUsagePrompt?: boolean;
     autoRetrieveWeight?: number;
     localModelCacheDir?: string;
+    localEmbeddingIgpuIdle?: boolean;
+    localEmbeddingMainGpuIdle?: boolean;
+    localEmbeddingThreads?: number;
+    localEmbeddingInstances?: number;
+    localEmbeddingMicroBatchSize?: number;
     localWorkerIdleTimeoutMs?: number;
 }
 export declare const knowledgeDomainSpec: {
@@ -317,9 +327,9 @@ export declare const knowledgeDomainSpec: {
                 chunkOverlap: z.ZodOptional<z.ZodNumber>;
                 topK: z.ZodOptional<z.ZodNumber>;
                 searchMode: z.ZodOptional<z.ZodEnum<{
+                    vector: "vector";
                     auto: "auto";
                     hybrid: "hybrid";
-                    vector: "vector";
                     lexical: "lexical";
                 }>>;
                 similarityThreshold: z.ZodOptional<z.ZodNumber>;
@@ -371,6 +381,11 @@ export declare const knowledgeDomainSpec: {
                 injectUsagePrompt: z.ZodOptional<z.ZodBoolean>;
                 autoRetrieveWeight: z.ZodOptional<z.ZodNumber>;
                 localModelCacheDir: z.ZodOptional<z.ZodString>;
+                localEmbeddingIgpuIdle: z.ZodOptional<z.ZodBoolean>;
+                localEmbeddingMainGpuIdle: z.ZodOptional<z.ZodBoolean>;
+                localEmbeddingThreads: z.ZodOptional<z.ZodNumber>;
+                localEmbeddingInstances: z.ZodOptional<z.ZodNumber>;
+                localEmbeddingMicroBatchSize: z.ZodOptional<z.ZodNumber>;
                 localWorkerIdleTimeoutMs: z.ZodOptional<z.ZodNumber>;
             }, z.core.$strip>;
             groups: z.ZodOptional<z.ZodArray<z.ZodString>>;

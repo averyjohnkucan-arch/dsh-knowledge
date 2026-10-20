@@ -198,6 +198,8 @@ export declare class KnowledgeService extends Service {
     /** Enable vectors from saved canonical text; unchanged external files must not be skipped. */
     private backfillBaseEmbeddings;
     private runEmbeddingBackfill;
+    /** Fill vectors without applying newly saved parsing/chunking settings. */
+    private embedExistingDocument;
     listBases(): BaseSummary[];
     listGroups(): string[];
     createGroup(name: string): Promise<string[]>;
@@ -480,6 +482,9 @@ export declare class KnowledgeService extends Service {
         model?: string;
         apiKey?: string;
     }): Promise<number>;
+    enterEmbeddingForeground(): Promise<() => void>;
+    embeddingAccelerationStatus(): Promise<import("./embedding-acceleration.js").EmbeddingAccelerationStatus>;
+    prepareEmbeddingAcceleration(): Promise<import("./embedding-acceleration.js").EmbeddingAccelerationStatus>;
     listLocalModels(): Promise<LocalModelSummary[]>;
     downloadLocalModel(id: string): Promise<LocalModelSummary>;
     registerCustomLocalReranker(id: string): Promise<LocalModelSummary>;

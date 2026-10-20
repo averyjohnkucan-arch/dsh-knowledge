@@ -1,3 +1,5 @@
+import { localEmbeddingPool } from './local-embedding-pool.js'
+import { embeddingAcceleration, OPENVINO_EMBEDDING_MODEL } from './embedding-acceleration.js'
 /**
  * Embedding providers. `openai` targets any OpenAI-compatible `/embeddings`
  * endpoint; `ollama` targets a local Ollama server; `local` runs an embedding
@@ -88,6 +90,7 @@ export async function embedTexts(
   apiKey: string,
   texts: readonly string[],
   signal?: AbortSignal,
+  purpose: 'query' | 'index' = 'query',
 ): Promise<number[][]> {
   throwIfAborted(signal)
   if (texts.length === 0) return []
@@ -96,7 +99,7 @@ export async function embedTexts(
   if (provider === 'local') {
     // The owning search can stop waiting immediately while the isolated child
     // finishes its current job; only a hard fault terminates that child.
-    return await withAbortSignal(embedLocal(model.trim() === '' ? DEFAULT_LOCAL_MODEL : model, safeTexts), signal)
+    return await withAbortSignal(embedLocal(model.trim() === '' ? DEFAULT_LOCAL_MODEL : model, safeTexts, purpose), signal)
   }
   if (model.trim() === '') throw new Error('embedding model is empty')
   if (provider === 'openai') {
@@ -182,6 +185,7 @@ const localModelStatus = new Map<string, LocalModelStatus>()
 const EMBEDDING_READY_FILE = '.dsh-embedding-ready.json'
 
 export function getLocalModelStatus(modelId: string): LocalModelStatus {
+  if (modelId === OPENVINO_EMBEDDING_MODEL) { const s=embeddingAcceleration.snapshot;return {model:modelId,status:s.status==='ready'?'ready':s.status==='installing'?'downloading':s.status==='error'?'error':'idle',progress:s.status==='ready'?100:0,message:s.message} }
   return localModelStatus.get(modelId) ?? { model: modelId, status: 'idle', progress: 0, message: '' }
 }
 
@@ -192,6 +196,7 @@ export function markLocalModelError(modelId: string, message: string): void {
 
 /** Whether a model's cached weights are already on disk (a real `.onnx` weight file). */
 export async function isLocalModelDownloaded(modelId: string): Promise<boolean> {
+  if (modelId === OPENVINO_EMBEDDING_MODEL) return (await embeddingAcceleration.status()).status === 'ready'
   try {
     const modelRoot = join(localModelCacheDir(), modelId)
     const [config, onnxEntries, tokenizer] = await Promise.all([
@@ -280,6 +285,11 @@ async function writeLocalEmbeddingReadiness(modelId: string, dimensions: number)
 // Embeddings run in a disposable child process rather than a worker thread.
 // That gives a crashed or wedged native ONNX binding a genuinely fresh process
 // on every recovery, while local reranking keeps its own independent child.
+let cpuTuning: { threads?: number; instances?: number; microBatch?: number } = {}
+export function setLocalEmbeddingTuning(config: { localEmbeddingThreads?: number; localEmbeddingInstances?: number; localEmbeddingMicroBatchSize?: number }): void {
+  cpuTuning = { threads: config.localEmbeddingThreads, instances: config.localEmbeddingInstances, microBatch: config.localEmbeddingMicroBatchSize }
+  localEmbeddingPool.configure(cpuTuning, localWorkerIdleTimeoutMs)
+}
 let localWorkerIdleTimeoutMs = 60_000
 const LOCAL_WORKER_REQUEST_TIMEOUT_MS = 30 * 60_000
 const LOCAL_RELEASE_ACK_TIMEOUT_MS = 3000
@@ -288,6 +298,7 @@ const LOCAL_PROCESS_MAX_PENDING = 16
 /** Configure the local-model process idle release timeout (0 = never release). */
 export function setLocalWorkerIdleTimeoutMs(ms: number): void {
   localWorkerIdleTimeoutMs = Number.isFinite(ms) && ms >= 0 ? Math.trunc(ms) : 60_000
+  localEmbeddingPool.configure(cpuTuning, localWorkerIdleTimeoutMs)
   clearIdleTimer()
   if (localWorkerIdleTimeoutMs > 0 && localWorker !== null) armIdleTimer()
 }
@@ -511,6 +522,7 @@ function callWorker(
       hfEndpoint: hfEndpointOverride
         ?? (typeof process !== 'undefined' && process.env.HF_ENDPOINT !== undefined ? process.env.HF_ENDPOINT : undefined),
       texts: payload.texts,
+      cpuTuning,
       pooling: payload.pooling,
       })
     } catch (error) {
@@ -521,16 +533,20 @@ function callWorker(
   })
 }
 
-async function embedLocal(modelId: string, texts: readonly string[]): Promise<number[][]> {
+async function embedLocal(modelId: string, texts: readonly string[], purpose: 'query' | 'index' = 'query'): Promise<number[][]> {
+  if (modelId === OPENVINO_EMBEDDING_MODEL) return embeddingAcceleration.embed(texts)
+  const run = () => purpose === 'index'
+    ? localEmbeddingPool.embed(modelId, localModelCacheDir(), texts, poolingFor(modelId), hfEndpointOverride)
+    : callWorker('embed', { modelId, texts: [...texts], pooling: poolingFor(modelId) }) as Promise<number[][]>
   try {
-    const vectors = await callWorker('embed', { modelId, texts: [...texts], pooling: poolingFor(modelId) }) as number[][]
+    const vectors = await run()
     void writeLocalEmbeddingReadiness(modelId, vectors[0]?.length ?? 0).catch(() => {})
     return vectors
   } catch (error) {
     // One clean child restart is safe for a crashed/failed native session.
     // Do not retry malformed input or a repeatedly failing model indefinitely.
     if (!isRecoverableLocalProcessError(error)) throw error
-    const vectors = await callWorker('embed', { modelId, texts: [...texts], pooling: poolingFor(modelId) }) as number[][]
+    const vectors = await run()
     void writeLocalEmbeddingReadiness(modelId, vectors[0]?.length ?? 0).catch(() => {})
     return vectors
   }
@@ -554,6 +570,7 @@ export async function rerankLocal(modelId: string, query: string, texts: readonl
 
 /** Download + load a local model in an isolated process (no inference). */
 export async function loadLocalModel(modelId: string, task: 'feature-extraction' | 'reranking' = 'feature-extraction'): Promise<void> {
+  if (modelId === OPENVINO_EMBEDDING_MODEL) { const state=await embeddingAcceleration.status();if(state.status!=='ready')throw Error('Download and validate the OpenVINO model first');await embeddingAcceleration.embed(['Embedding readiness check']);return }
   if (task === 'reranking') {
     await loadLocalReranker(modelId, localModelCacheDir(), hfEndpointOverride ?? process.env.HF_ENDPOINT)
     return
@@ -610,6 +627,7 @@ async function isDownloadedAt(modelRoot: string): Promise<boolean> {
 
 /** Cancel only an active download. A previously ready model is never removed. */
 export async function cancelLocalModel(modelId: string): Promise<void> {
+  if (modelId === OPENVINO_EMBEDDING_MODEL) {embeddingAcceleration.dispose();return}
   if (localModelStatus.get(modelId)?.status !== 'downloading') return
   await terminateLocalWorker(new Error('local embedding download cancelled'))
   localModelStatus.set(modelId, { model: modelId, status: 'idle', progress: 0, message: '' })
@@ -618,6 +636,8 @@ export async function cancelLocalModel(modelId: string): Promise<void> {
 
 /** Drop a loaded extractor (frees its native sessions) and delete its cached weights. */
 export async function removeLocalModel(modelId: string): Promise<void> {
+  if (modelId === OPENVINO_EMBEDDING_MODEL) {await embeddingAcceleration.remove();return}
+  await localEmbeddingPool.dispose()
   if (localModelStatus.get(modelId)?.status === 'downloading') {
     throw new Error('The model is downloading. Wait for the download to finish before deleting it')
   }
@@ -662,6 +682,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 
 /** Gracefully terminate the isolated embedding process during plugin teardown. */
 export async function disposeLocalModelWorker(): Promise<void> {
+  await localEmbeddingPool.dispose()
   clearIdleTimer()
   const worker = localWorker
   if (worker === null) return

@@ -22,8 +22,8 @@ def bootstrap(root):
             archive.extractall(destination)
         wheel.unlink()
     uv.chmod(0o755)
-    subprocess.run([str(uv),'python','install','3.12','--no-bin'],env=env,check=True)
+    subprocess.run([str(uv),'python','install','3.12.15','--no-bin'],env=env,check=True)
     venv=root/'venv'
-    if not venv.exists():subprocess.run([str(uv),'venv','--python','3.12',str(venv)],env=env,check=True)
+    if not venv.exists():subprocess.run([str(uv),'venv','--python','3.12.15',str(venv)],env=env,check=True)
     python=venv/('Scripts/python.exe' if os.name=='nt' else 'bin/python')
     return uv,python,env

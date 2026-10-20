@@ -56,5 +56,16 @@ export class StructureProcess {
       } catch (error) { this.stop(error instanceof Error ? error : new Error(String(error))) }
     })
   }
+  get pid(): number | undefined { return this.child?.pid }
+  async stopAndWait(): Promise<void> {
+    const child = this.child
+    if (!child) return
+    const closed = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Inference worker did not release its device')), 1000)
+      child.once('close', () => { clearTimeout(timer); resolve() })
+    })
+    this.stop(new Error('Background inference yielded to foreground work'))
+    await closed
+  }
   dispose(): void { this.stop(new Error('Knowledge plugin stopped')) }
 }
