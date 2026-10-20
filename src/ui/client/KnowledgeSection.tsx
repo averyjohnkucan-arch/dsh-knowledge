@@ -1156,6 +1156,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
   }, [])
 
   const selectedBase = bases.find(b => b.id === selectedBaseId) ?? null
+  const embeddingMigrationActive = processingSummary.some(row => row.id === `embedding:${selectedBaseId}` && row.active)
 
   // The selected base's effective local embedding model (per-base config wins).
   const selectedBaseLocalModel = useMemo<string | null>(() => {
@@ -1454,7 +1455,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                   </span>
                 </span>
                 <span style={style.actionsRow}>
-                  {stats?.staleEmbeddings === true ? (
+                  {stats?.staleEmbeddings === true && !embeddingMigrationActive ? (
                     <button
                       className="kb-row"
                       style={{
@@ -1490,6 +1491,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                 </span>
               </div>
 
+              {embeddingMigrationActive && <p style={{ fontSize: 12, color: C.muted }} role="status">Updating embedding vectors from existing chunks. No re-chunking or OCR is needed; lexical retrieval remains available.</p>}
               {processingSummary.filter(row => row.baseId === selectedBase.id).map(row => <div key={row.id} style={{ fontSize: 12, color: C.muted, margin: '8px 0 12px' }} role="status">
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                   <span>{row.completed.toLocaleString()} / {row.total.toLocaleString()} documents</span>
