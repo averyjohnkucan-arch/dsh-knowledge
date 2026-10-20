@@ -521,7 +521,7 @@ export class KnowledgeApi {
   }
 
   pickFolder(): Promise<{ path: string | null }> { return this.call('POST', '/folder-picker', {}, 310000) }
-  externalSettings(id: string, patch: { syncEnabled?: boolean; syncIntervalSeconds?: number }): Promise<unknown> {
+  externalSettings(id: string, patch: { syncEnabled?: boolean; syncIntervalSeconds?: number; reconcileNow?: boolean }): Promise<unknown> {
     return this.call('PATCH', `/bases/${encodeURIComponent(id)}/external-settings`, patch)
   }
 

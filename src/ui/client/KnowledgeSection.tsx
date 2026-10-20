@@ -1298,7 +1298,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
   }, [selectedBase?.id, selectedBase?.storageMode, refreshBases, reloadDocuments])
 
   const addSourceMenu: MenuEntry[] = selectedBase?.storageMode === 'external' ? [
-    { key: 'sync', label: t('syncNow'), onSelect: () => { void api.externalSettings(selectedBase.id, {}).then(refreshBases).catch(e => notify('error', String(e))) } },
+    { key: 'sync', label: t('reconcileNow'), onSelect: () => { void api.externalSettings(selectedBase.id, { reconcileNow: true }).then(refreshBases).catch(e => notify('error', String(e))) } },
   ] : [
     { key: 'file', label: t('tabFile'), onSelect: () => fileInputRef.current?.click() },
     { key: 'dir', label: t('tabDir'), onSelect: () => dirInputRef.current?.click() },
@@ -1491,6 +1491,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                 {selectedBase.syncStatus?.message && <div style={{ fontSize: 12, color: C.muted }}>{selectedBase.syncStatus.message}</div>}
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
                   <label><input type="checkbox" checked={selectedBase.syncEnabled !== false} onChange={e => { void api.externalSettings(selectedBase.id, { syncEnabled: e.target.checked }).then(refreshBases).catch(e => notify('error', String(e))) }} /> {t('syncEnabled')}</label>
+                  <button type="button" style={style.button} disabled={selectedBase.syncStatus?.state === 'syncing'} onClick={() => { void api.externalSettings(selectedBase.id, { reconcileNow: true }).then(refreshBases).catch(e => notify('error', String(e))) }}>{t('reconcileNow')}</button>
                   <label>{t('syncInterval')} <input aria-label={t('syncInterval')} type="number" min={5} max={86400} defaultValue={selectedBase.syncIntervalSeconds ?? 60} key={selectedBase.id} style={{ ...style.input, width: 90 }} onBlur={e => { void api.externalSettings(selectedBase.id, { syncIntervalSeconds: Number(e.target.value) }).then(refreshBases).catch(e => notify('error', String(e))) }} /></label>
                 </div>
               </div>}

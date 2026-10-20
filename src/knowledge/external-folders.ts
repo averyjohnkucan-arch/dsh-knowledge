@@ -23,6 +23,7 @@ export class ExternalFolders {
   readonly states = new Map<string, FolderState>()
   private watchers = new Map<string, { path: string; watcher: FSWatcher }>()
   private pending = new Set<string>()
+  private forced = new Set<string>()
   private next = new Map<string, number>()
   private stopped = false
   private busy = false
@@ -38,8 +39,9 @@ export class ExternalFolders {
       for (const id of this.states.keys()) if (!ids.has(id)) { this.states.delete(id); this.next.delete(id); this.pending.delete(id) }
       for (const source of sources) {
         if (this.stopped) break
-        if (!source.enabled) { this.watchers.get(source.id)?.watcher.close(); this.watchers.delete(source.id); this.states.set(source.id, { state: 'paused' }); continue }
-        if (!this.pending.delete(source.id) && Date.now() < (this.next.get(source.id) ?? 0)) continue
+        const force = this.forced.delete(source.id)
+        if (!source.enabled && !force) { this.watchers.get(source.id)?.watcher.close(); this.watchers.delete(source.id); this.states.set(source.id, { state: 'paused' }); continue }
+        if (!this.pending.delete(source.id) && !force && Date.now() < (this.next.get(source.id) ?? 0)) continue
         this.states.set(source.id, { state: 'checking' })
         try { await readableRoot(source.path) } catch {
           this.watchers.get(source.id)?.watcher.close(); this.watchers.delete(source.id)
@@ -47,7 +49,7 @@ export class ExternalFolders {
           this.next.set(source.id, Date.now() + Math.min(source.intervalMs, 10000)); continue
         }
         const previous = this.watchers.get(source.id)
-        if (previous?.path !== source.path) {
+        if (source.enabled && previous?.path !== source.path) {
           previous?.watcher.close(); this.watchers.delete(source.id)
           try {
             const watcher = watch(source.path, { recursive: true, persistent: false }, () => { this.pending.add(source.id) })
@@ -56,7 +58,7 @@ export class ExternalFolders {
           } catch { /* Polling remains available on filesystems without recursive watches. */ }
         }
         this.states.set(source.id, { state: 'syncing' })
-        try { await this.sync(source.id); this.states.set(source.id, { state: 'connected', checkedAt: Date.now() }) }
+        try { await this.sync(source.id); this.states.set(source.id, { state: source.enabled ? 'connected' : 'paused', checkedAt: Date.now() }) }
         catch (error) {
           let state: FolderState['state'] = 'error'
           try { await readableRoot(source.path) } catch { state = 'disconnected' }
@@ -66,7 +68,7 @@ export class ExternalFolders {
       }
     } finally { this.busy = false }
   }
-  request(id: string): void { this.pending.add(id) }
+  request(id: string, force = false): void { this.pending.add(id); if (force) this.forced.add(id) }
   stop(): void { this.stopped = true; if (this.timer) clearInterval(this.timer); for (const w of this.watchers.values()) w.watcher.close(); this.watchers.clear() }
 }
 

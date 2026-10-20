@@ -48,3 +48,15 @@ it('receives real filesystem notifications before the periodic scan is due', asy
     expect(calls).toBeGreaterThanOrEqual(2)
   } finally { coordinator.stop(); await rm(root, { recursive: true, force: true }) }
 })
+
+
+it('reconciles once on demand while automatic synchronization is paused', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kb-manual-')); let calls = 0
+  const monitor = new ExternalFolders(() => [{ id: 'paused', path: root, intervalMs: 60000, enabled: false }], async () => { calls++ })
+  try {
+    await monitor.tick(); expect(calls).toBe(0)
+    monitor.request('paused', true); await monitor.tick()
+    expect(calls).toBe(1); expect(monitor.states.get('paused')?.state).toBe('paused')
+    await monitor.tick(); expect(calls).toBe(1)
+  } finally { monitor.stop(); await rm(root, { recursive: true, force: true }) }
+})

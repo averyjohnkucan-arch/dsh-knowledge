@@ -1463,3 +1463,38 @@ describe('storage failure reporting', () => {
     }
   })
 })
+
+
+it('external folders store no original copy and reconcile again after reopening the durable index', async () => {
+  const dir = await tempDir(), source = join(dir, 'source'), domain = fakeDomain()
+  await mkdir(source)
+  await writeFile(join(source, 'a.txt'), 'External reference about lightweight indexing.')
+  const sessions: KnowledgeService[] = []
+  const mount = async () => {
+    const ctx = new Context()
+    ctx.provide('webServer', { register: () => () => {} })
+    ctx.provide('storageDomain', { open: async () => domain })
+    await ctx.plugin(KnowledgeService, { ...TEST_CONFIG, chunkStorePath: join(dir, 'chunks.sqlite') })
+    const service = ctx.get('knowledge') as KnowledgeService
+    ;(service as unknown as { externalFolders: { stop(): void } }).externalFolders.stop()
+    sessions.push(service); return service
+  }
+  try {
+    const first = await mount()
+    const base = await first.createBase({ name: 'external', storageMode: 'external', externalPath: source, syncEnabled: false })
+    await first.importDirectoryTree(base.id, source)
+    let store = (first as unknown as { store: Store }).store
+    expect(await store.raw!.listAll()).toEqual([])
+    await store.close()
+    const second = await mount()
+    expect(second.listBases().find(b => b.id === base.id)?.storageMode).toBe('external')
+    await writeFile(join(source, 'b.txt'), 'A new file created while the plugin was offline.')
+    await second.importDirectoryTree(base.id, source)
+    expect(second.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(2)
+    store = (second as unknown as { store: Store }).store
+    expect(await store.raw!.listAll()).toEqual([])
+    const doc = second.listDocuments(base.id).find(d => d.title === 'b.txt')!
+    expect(Buffer.from((await second.getRawFile(doc.id))!.bytes).toString()).toContain('offline')
+    await store.close()
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

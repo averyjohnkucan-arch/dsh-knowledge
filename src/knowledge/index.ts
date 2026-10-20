@@ -681,14 +681,14 @@ export class KnowledgeService extends Service {
 
   async pickSourceFolder(): Promise<{ path: string | null }> { return { path: await pickFolder() } }
 
-  async updateExternalSource(id: string, request: UpdateBaseRequest): Promise<KnowledgeBase> {
+  async updateExternalSource(id: string, request: UpdateBaseRequest & { reconcileNow?: boolean }): Promise<KnowledgeBase> {
     const store = this.requireStore(), base = store.getBase(id)
     if (!base || base.storageMode !== 'external') throw new Error('External knowledge base not found')
     if (request.externalPath !== undefined && request.externalPath !== base.externalPath) throw new Error('Create a new external base to select a different source folder')
     const seconds = request.syncIntervalSeconds ?? base.syncIntervalSeconds ?? 60
     if (!Number.isInteger(seconds) || seconds < 5 || seconds > 86400) throw new Error('Sync interval must be 5–86400 seconds')
     const next = { ...base, syncEnabled: request.syncEnabled ?? base.syncEnabled ?? true, syncIntervalSeconds: seconds, updatedAt: Date.now() }
-    await store.putBase(next); this.externalFolders?.request(id); return next
+    await store.putBase(next); this.externalFolders?.request(id, request.reconcileNow === true); return next
   }
 
   async createBase(request: CreateBaseRequest): Promise<KnowledgeBase> {

@@ -33,6 +33,7 @@ export type KnowledgeKey =
   | 'syncSyncing'
   | 'syncError'
   | 'syncNow'
+  | 'reconcileNow'
   | 'syncEnabled'
   | 'originalDocument'
   | 'showInDocument'
@@ -428,6 +429,7 @@ export const zh: Record<KnowledgeKey, string> = {
   syncSyncing: '同步中…',
   syncError: '同步需要检查',
   syncNow: '立即同步',
+  reconcileNow: '立即核对同步',
   syncEnabled: '自动同步此文件夹',
   originalDocument: '原始文件',
   showInDocument: '在文档中显示',
@@ -821,6 +823,7 @@ export const en: Record<KnowledgeKey, string> = {
   syncSyncing: 'Synchronizing…',
   syncError: 'Sync needs attention',
   syncNow: 'Sync now',
+  reconcileNow: 'Reconcile now',
   syncEnabled: 'Automatically sync this folder',
   originalDocument: 'Original',
   showInDocument: 'Show in document',
