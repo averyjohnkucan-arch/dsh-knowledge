@@ -49,7 +49,7 @@ export function chunkText(
   const safeOverlap = Math.min(Math.round(tokenOverlap * charsPerToken), safeSize - 1)
   const smartChunk = options?.smartChunk ?? true
   const blocks = smartChunk
-    ? splitBlocks(normalized)
+    ? packAdjacentParagraphs(splitBlocks(normalized), safeSize)
     : [{ text: normalized, heading: undefined }]
   const chunks: ChunkPiece[] = []
   for (const block of blocks) {
@@ -66,6 +66,25 @@ export function chunkText(
   }
   // A degenerate guard: always yield at least one chunk for non-empty input.
   return chunks.length > 0 ? chunks : [{ text: normalized.slice(0, safeSize) }]
+}
+
+/** Pack short paragraphs within a heading into useful, budget-sized passages.
+ * Paragraph boundaries remain in the text; headings and fenced blocks remain
+ * hard boundaries. A list item must not require its own model forward pass.
+ */
+function packAdjacentParagraphs(blocks: readonly Block[], size: number): Block[] {
+  const packed: Block[] = []
+  let pending: Block | undefined
+  const flush = () => { if (pending) packed.push(pending); pending = undefined }
+  for (const block of blocks) {
+    const fenced = /^\s*(`{3,}|~{3,})/.test(block.text)
+    if (fenced || block.text.length > size) { flush(); packed.push(block); continue }
+    if (pending && pending.heading === block.heading && pending.text.length + 2 + block.text.length <= size) {
+      pending = { ...pending, text: `${pending.text}\n\n${block.text}` }
+    } else { flush(); pending = block }
+  }
+  flush()
+  return packed
 }
 
 function windowOrKeep(blockText: string, size: number, overlap: number, heading: string | undefined): ChunkPiece[] {

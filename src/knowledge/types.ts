@@ -96,6 +96,7 @@ export interface BaseConfig {
 /** One knowledge base (a namespace of documents). */
 export interface KnowledgeBase {
   readonly embeddingBackfillPending?: boolean
+  readonly embeddingBackfillRevision?: string
   readonly storageMode?: 'internal' | 'external'
   readonly externalPath?: string
   readonly syncEnabled?: boolean
@@ -232,6 +233,8 @@ export interface KnowledgeDocument {
    * resume the interrupted embed instead of dropping the document.
    */
   readonly incomplete?: boolean
+  /** Last completed explicit re-vectorization pass. */
+  readonly vectorizationRevision?: string
   /** Reason embedding failed at import/reindex time, when it degraded to lexical-only. */
   readonly embeddingError?: string
   /**
@@ -507,6 +510,7 @@ export interface BaseStats {
   readonly tokenCount: number
   /** Whether the base's chunks carry embeddings. */
   readonly embedded: boolean
+  readonly embeddedChunkCount?: number
   readonly embeddingDimensions?: number
   /** True when some embedded chunks were produced by a different embedding model than the one now configured. */
   readonly staleEmbeddings?: boolean

@@ -1455,6 +1455,11 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                   </span>
                 </span>
                 <span style={style.actionsRow}>
+                  <button style={style.ghostButton} disabled={busy || embeddingMigrationActive}
+                    title="Recompute all embedding vectors from the existing chunks. No parsing, OCR or re-chunking."
+                    onClick={() => void run(async () => { await api.revectorizeBase(selectedBase.id); notify('success', 'Re-vectorization queued. Progress appears below.'); await refreshBases() })}>
+                    Re-vectorize all
+                  </button>
                   {stats?.staleEmbeddings === true && !embeddingMigrationActive ? (
                     <button
                       className="kb-row"
@@ -1494,12 +1499,13 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
               {embeddingMigrationActive && <p style={{ fontSize: 12, color: C.muted }} role="status">Updating embedding vectors from existing chunks. No re-chunking or OCR is needed; lexical retrieval remains available.</p>}
               {processingSummary.filter(row => row.baseId === selectedBase.id).map(row => <div key={row.id} style={{ fontSize: 12, color: C.muted, margin: '8px 0 12px' }} role="status">
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                  {row.id.startsWith('embedding:') && <strong>Vectorization</strong>}
                   <span>{row.completed.toLocaleString()} / {row.total.toLocaleString()} documents</span>
                   <span>{row.processed.toLocaleString()} processed · {row.skipped.toLocaleString()} unchanged · {row.failed.toLocaleString()} failed</span>
                   {row.active && <span>{row.queued.toLocaleString()} queued · {row.running} running</span>}
                   <span>{row.discovering ? 'Discovering files…' : !row.active ? (row.completed >= row.total ? 'Finished' : 'Stopped before completion') : row.etaSeconds === null ? 'Estimating time remaining…' : `About ${row.etaSeconds < 60 ? `${row.etaSeconds}s` : `${Math.ceil(row.etaSeconds / 60)} min`} remaining`}</span>
                 </div>
-                <progress aria-label="Document processing progress" max={Math.max(1, row.total)} value={row.discovering ? undefined : row.completed} title="ETA uses completions from the last two minutes" style={{ width: '100%', height: 5, marginTop: 6, accentColor: C.accent }} />
+                <progress aria-label={row.id.startsWith('embedding:') ? 'Vectorization progress' : 'Document processing progress'} max={Math.max(1, row.total)} value={row.discovering ? undefined : row.completed} title="ETA uses completions from the last two minutes" style={{ width: '100%', height: 5, marginTop: 6, accentColor: C.accent }} />
               </div>)}
 
               {selectedBase.storageMode === 'external' && <div style={{ ...style.card, marginBottom: 12 }}>
@@ -1563,7 +1569,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                       <StatChip value={stats.chunkCount} label={t('statsChunks')} />
                       <StatChip value={stats.tokenCount} label={t('statsTokens')} />
                       <StatChip value={formatSize(stats.charCount)} label={t('statsChars')} />
-                      <StatChip value={stats.embedded ? '✓' : '—'} label={stats.embedded ? t('embedded') : t('notEmbedded')} />
+                      <StatChip value={stats.embeddedChunkCount !== undefined ? `${stats.embeddedChunkCount.toLocaleString()} / ${stats.chunkCount.toLocaleString()}` : stats.embedded ? 'Partial' : '—'} label="chunks embedded" />
                       {stats.embeddingDimensions !== undefined && (
                         <StatChip value={`${stats.embeddingDimensions}d`} label={t('statsDims')} />
                       )}

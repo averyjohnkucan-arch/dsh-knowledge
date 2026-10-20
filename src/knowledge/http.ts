@@ -409,6 +409,7 @@ async function route(
           ...(typeof bodyRequest.parentDirectoryId === 'string' ? { parentDirectoryId: bodyRequest.parentDirectoryId } : {}),
         })
       }
+      if (segments[2] === 'revectorize' && method === 'POST') return service.revectorizeBase(baseId)
       if (segments[2] === 'restore' && method === 'POST') {
         const config = typeof body.config === 'object' && body.config !== null
           ? body.config as BaseConfig

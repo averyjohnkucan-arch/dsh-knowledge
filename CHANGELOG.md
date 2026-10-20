@@ -1,3 +1,10 @@
+# 0.5.4 — compact passages and explicit vectorization
+
+- Smart chunking packs adjacent short paragraphs within a heading, preserving paragraph and code boundaries instead of embedding every list item separately.
+- Dedicated Re-vectorize all action recomputes vectors without parsing, OCR, or re-chunking; durable pass IDs checkpoint completed documents and progress is labeled Vectorization.
+- Embedding coverage displays exact chunk counts instead of treating one vector as a completed base.
+- Short-context embedding models cover overlength inputs using normalized window pooling rather than silently discarding the document tail; vector formats remain isolated.
+
 # 0.5.3 — local embedding performance and device management
 
 - Parallel isolated CPU embedding processes with bounded thread and memory use; configurable threads, instance count, and micro-batch size.

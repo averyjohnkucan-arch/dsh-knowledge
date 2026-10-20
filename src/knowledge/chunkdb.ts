@@ -1012,6 +1012,7 @@ export class ChunkDatabase implements RetrievalLane {
   chunkStats(baseIds: readonly string[]): {
     count: number
     embedded: boolean
+    embeddedCount: number
     dimensions?: number
     embeddingModelCounts: Array<{ baseId: string; model: string; count: number }>
   } {
@@ -1020,8 +1021,9 @@ export class ChunkDatabase implements RetrievalLane {
     const count = scope.length > 0
       ? (this.db.prepare(`SELECT COUNT(*) AS c FROM chunk WHERE base_id IN (${placeholders})`).get(...scope) as { c: number }).c
       : 0
-    if (count === 0) return { count, embedded: false, embeddingModelCounts: [] }
-    const embedded = scope.length > 0 && (this.db.prepare(`SELECT 1 AS one FROM chunk WHERE base_id IN (${placeholders}) AND embedding IS NOT NULL LIMIT 1`).get(...scope)) !== undefined
+    if (count === 0) return { count, embedded: false, embeddedCount: 0, embeddingModelCounts: [] }
+    const embeddedCount = (this.db.prepare(`SELECT COUNT(*) AS c FROM chunk WHERE base_id IN (${placeholders}) AND embedding IS NOT NULL`).get(...scope) as { c: number }).c
+    const embedded = embeddedCount > 0
     let dimensions: number | undefined
     if (embedded && scope.length > 0) {
       const row = this.db.prepare(`SELECT embedding FROM chunk WHERE base_id IN (${placeholders}) AND embedding IS NOT NULL LIMIT 1`).get(...scope) as { embedding: Buffer } | undefined
@@ -1033,6 +1035,7 @@ export class ChunkDatabase implements RetrievalLane {
     return {
       count,
       embedded,
+      embeddedCount,
       ...(dimensions !== undefined ? { dimensions } : {}),
       embeddingModelCounts: modelRows.map(row => ({ baseId: row.base_id, model: row.embedding_model, count: row.c })),
     }

@@ -34,9 +34,9 @@ describe('chunkText', () => {
     expect(chunks.some(chunk => chunk.text.includes('b'))).toBe(true)
   })
 
-  it('splits on paragraph boundaries', () => {
+  it('packs small paragraphs without removing their boundaries', () => {
     const text = 'first paragraph\n\nsecond paragraph\n\nthird paragraph'
-    expect(chunkText(text, 800, 100).map(c => c.text)).toEqual(['first paragraph', 'second paragraph', 'third paragraph'])
+    expect(chunkText(text, 800, 100).map(c => c.text)).toEqual([text])
   })
 
   it('tracks markdown heading paths', () => {
@@ -180,5 +180,17 @@ describe('refineChunksByTokenLimit', () => {
     const refined = refineChunksByTokenLimit([chunk], 30, estimate)
     expect(refined.length).toBe(2)
     for (const piece of refined) expect(piece.heading).toBe('Top > Deep')
+  })
+})
+
+
+describe('compact smart chunking', () => {
+  it('packs list items but never crosses a heading', () => {
+    const section = Array.from({ length: 40 }, (_, i) => `Character ${i}: a brief description.`).join('\n\n')
+    const chunks = chunkText(`# Cast\n${section}\n\n# Plot\nA separate section.`, 400, 40)
+    expect(chunks.length).toBeLessThan(6)
+    expect(chunks.at(-1)?.heading).toBe('Plot')
+    expect(chunks.filter(c => c.heading === 'Cast').map(c => c.text).join('\n\n')).toBe(section)
+    expect(chunks.every(c => c.text.length <= 1600)).toBe(true)
   })
 })

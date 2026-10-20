@@ -68,6 +68,7 @@ export const baseConfigSchema = z.object({
 
 const baseSchema = z.object({
   embeddingBackfillPending: z.boolean().optional(),
+  embeddingBackfillRevision: z.string().optional(),
   storageMode: z.enum(['internal', 'external']).optional(),
   externalPath: z.string().optional(),
   syncEnabled: z.boolean().optional(),
@@ -118,6 +119,7 @@ export const documentSchema = z.object({
   tokenCount: z.number().int().gte(0).optional(),
   chunkCount: z.number().int().gte(0),
   incomplete: z.boolean().optional(),
+  vectorizationRevision: z.string().optional(),
   embeddingError: z.string().optional(),
   errorCode: z.enum(['interrupted', 'dimension_mismatch', 'parse_failed', 'embedding_provider']).optional(),
   createdAt: z.number(),

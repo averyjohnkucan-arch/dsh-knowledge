@@ -188,6 +188,25 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('explicitly re-vectorizes unchanged chunks instead of reusing their cached vectors', async () => {
+    const service = await mountService()
+    const base = await service.createBase({ name: 'force vectors', config: {
+      embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'm1', embeddingApiKey: 'k',
+    } })
+    const doc = await service.addTextDocument({ baseId: base.id, title: 'fixed', content: 'Important saved evidence.' })
+    await service.waitForIdle()
+    const original = service.listChunks(doc.id).map(({ id, text }) => ({ id, text }))
+    await service.renameBase(base.id, { config: { chunkSize: 64 } })
+    embedTextsMock.mockClear()
+    expect(service.revectorizeBase(base.id)).toEqual({ queued: true })
+    expect(() => service.revectorizeBase(base.id)).toThrow('already running')
+    await service.waitForIdle()
+    expect(embedTextsMock).toHaveBeenCalled()
+    expect(service.listChunks(doc.id).map(({ id, text }) => ({ id, text }))).toEqual(original)
+    const meter = service.processingSummary().find(row => row.id === `embedding:${base.id}`)!
+    expect(meter).toMatchObject({ completed: 1, processed: 1, failed: 0, active: false })
+  })
+
   it('reuses vectors across documents with identical chunk text', async () => {
     embedTextsMock.mockClear()
     const service = await mountService()
@@ -198,13 +217,13 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     // The shared paragraph is its own block, so it slices into identical
     // chunks in both documents (same title → same context → same search text).
     const shared = 'shared paragraph text '.repeat(60)
-    const docA = await service.addTextDocument({ baseId: base.id, title: 'A', content: `AAA\n\n${shared}` })
+    const docA = await service.addTextDocument({ baseId: base.id, title: 'A', content: `# Unique\nAAA\n\n# Shared\n${shared}` })
     expect(embedTextsMock).toHaveBeenCalled()
 
     // Doc B reuses A's vectors for the shared paragraph; only the 'BBB' block
     // is embedded.
     embedTextsMock.mockClear()
-    const docB = await service.addTextDocument({ baseId: base.id, title: 'A', content: `BBB\n\n${shared}` })
+    const docB = await service.addTextDocument({ baseId: base.id, title: 'A', content: `# Unique\nBBB\n\n# Shared\n${shared}` })
     expect(embedTextsMock).toHaveBeenCalled()
     const bTexts = embedTextsMock.mock.calls.flatMap(call => call[4])
     expect(bTexts.some(text => text.includes('shared paragraph'))).toBe(false)
@@ -241,7 +260,7 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
       config: { embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'm1', embeddingApiKey: 'k', embeddingBatchSize: 1 },
     })
     // Enough text for several chunks (batchSize 1 → one API call per chunk).
-    const content = 'alpha paragraph\n\nbeta paragraph\n\ngamma paragraph\n\ndelta paragraph'
+    const content = '# Alpha\nalpha paragraph\n\n# Beta\nbeta paragraph\n\n# Gamma\ngamma paragraph\n\n# Delta\ndelta paragraph'
     await service.addTextDocument({ baseId: base.id, title: 'doc', content })
     const firstEmbeddings = embedTextsMock.mock.calls.flatMap(call => call[4])
     expect(firstEmbeddings.length).toBeGreaterThan(2)

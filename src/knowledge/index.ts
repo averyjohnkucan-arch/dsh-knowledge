@@ -436,10 +436,10 @@ export class KnowledgeService extends Service {
     void resume.then(async () => {
       for (const base of store.listBases()) {
         const config = this.getConfigFor(base.id), key = embeddingKey(config)
-        const legacyQwen = key?.endsWith(':canonical-single-v1') === true
+        const legacyFormat = (key?.endsWith(':canonical-single-v1') === true || key?.endsWith(':full-context-v1') === true)
           && store.chunkStats([base.id]).embeddingModelCounts.some(entry => entry.model !== key)
-        if (legacyQwen && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
-        if ((base.embeddingBackfillPending || legacyQwen) && config.resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
+        if (legacyFormat && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
+        if ((base.embeddingBackfillPending || legacyFormat) && config.resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
       }
     }).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     this.armUrlRefreshTimer()
@@ -892,13 +892,25 @@ export class KnowledgeService extends Service {
 
   private readonly embeddingBackfills = new Set<string>()
 
+  /** Explicit full vector pass, separate from sync, parsing and chunking. */
+  revectorizeBase(baseId: string): { queued: true } {
+    const base = this.requireStore().getBase(baseId)
+    if (!base) throw new NotFoundError('knowledge base not found')
+    if (!embeddingKey(this.getConfigFor(baseId))) throw new Error('Select an embedding model before re-vectorizing')
+    if (this.embeddingBackfills.has(baseId)) throw new Error('Vectorization is already running for this base')
+    void this.backfillBaseEmbeddings(baseId, crypto.randomUUID()).catch(error => {
+      this.ctx.logger.warn(`knowledge: re-vectorization paused: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    return { queued: true }
+  }
+
   /** Enable vectors from saved canonical text; unchanged external files must not be skipped. */
-  private async backfillBaseEmbeddings(baseId: string): Promise<void> {
+  private async backfillBaseEmbeddings(baseId: string, forceRevision?: string): Promise<void> {
     if (this.embeddingBackfills.has(baseId)) return
     this.embeddingBackfills.add(baseId)
     try {
       const store = this.requireStore(), base = store.getBase(baseId)
-      if (base) await store.putBase({ ...base, embeddingBackfillPending: true })
+      if (base) await store.putBase({ ...base, embeddingBackfillPending: true, ...(forceRevision ? { embeddingBackfillRevision: forceRevision } : {}) })
       await this.runEmbeddingBackfill(baseId)
     } finally { this.embeddingBackfills.delete(baseId) }
   }
@@ -912,19 +924,21 @@ export class KnowledgeService extends Service {
     }
     if (this.shuttingDown || !store.getBase(baseId)) return
     const meterId = `embedding:${baseId}`
-    const missing = store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
+    const forceRevision = store.getBase(baseId)?.embeddingBackfillRevision
+    const missing = forceRevision ? undefined : store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
     const documents = store.listDocuments(baseId, { includeRawText: false })
-      .filter(doc => doc.sourceType !== 'directory' && missing.has(doc.id))
+      .filter(doc => doc.sourceType !== 'directory' && (forceRevision ? doc.vectorizationRevision !== forceRevision : missing!.has(doc.id)))
     this.processingMeter.start(meterId, baseId)
     this.processingMeter.add(meterId, documents.length)
     this.directoryWriteBatches.set(baseId, (this.directoryWriteBatches.get(baseId) ?? 0) + 1)
+    let completed = false
     try {
       await orderedEmbeddingLanes(documents, this.getConfigFor(baseId).embeddingProvider === 'local' ? 2 : 1, async doc => {
         if (this.shuttingDown || !store.getBase(baseId)) throw new Error('Embedding backfill stopped')
         await new Promise<void>(resolve => setImmediate(resolve))
         this.processingMeter.begin(meterId)
         try {
-          await this.embedExistingDocument(doc.id)
+          await this.embedExistingDocument(doc.id, forceRevision)
           this.processingMeter.settle(meterId, 'processed')
         } catch (error) {
           this.processingMeter.settle(meterId, 'failed')
@@ -932,10 +946,11 @@ export class KnowledgeService extends Service {
           throw error
         }
       })
+      completed = true
     } finally {
       this.processingMeter.finish(meterId)
-      if (!this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
-        await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false })
+      if (completed && !this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
+        await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false, embeddingBackfillRevision: undefined })
       }
       const remaining = (this.directoryWriteBatches.get(baseId) ?? 1) - 1
       if (remaining > 0) this.directoryWriteBatches.set(baseId, remaining)
@@ -944,7 +959,7 @@ export class KnowledgeService extends Service {
   }
 
   /** Fill vectors without applying newly saved parsing/chunking settings. */
-  private async embedExistingDocument(id: string): Promise<void> {
+  private async embedExistingDocument(id: string, forceRevision?: string): Promise<void> {
     const store = this.requireStore(), document = store.getDocument(id)
     if (!document || document.sourceType === 'directory') return
     if (this.indexing.has(id)) throw new Error('Document is already being indexed')
@@ -960,12 +975,12 @@ export class KnowledgeService extends Service {
       const hashes = chunks.map(chunk => hashEmbeddingText(chunkSearchText(chunk)))
       // Include durable candidate batches from an interrupted embedding pass
       // before replacing its stage; a restart must not repeat completed work.
-      const cached = store.listEmbeddingVectorsByHashes(hashes, key)
+      const cached = forceRevision ? new Map<string, number[]>() : store.listEmbeddingVectorsByHashes(hashes, key)
       await store.discardStagedDocumentGeneration(id)
       await store.stageDocumentGeneration(document, [])
       const missing: number[] = []
       for (let i = 0; i < chunks.length; i++) {
-        if (chunks[i].embeddingModel === key && chunks[i].embedding !== undefined) continue
+        if (!forceRevision && chunks[i].embeddingModel === key && chunks[i].embedding !== undefined) continue
         const vector = cached.get(hashes[i])
         if (vector) chunks[i] = { ...chunks[i], embedding: vector, embeddingModel: key }
         else missing.push(i)
@@ -988,7 +1003,7 @@ export class KnowledgeService extends Service {
       controller.signal.throwIfAborted()
       this.assertIndexTargetAlive(id, document.baseId)
       const { embeddingError: _error, errorCode: _code, incomplete: _incomplete, ...rest } = document
-      await store.commitDocumentGeneration({ ...rest, updatedAt: Date.now() }, chunks)
+      await store.commitDocumentGeneration({ ...rest, ...(forceRevision ? { vectorizationRevision: forceRevision } : {}), updatedAt: Date.now() }, chunks)
     } catch (error) {
       if ((error as { published?: boolean }).published !== true) await store.discardStagedDocumentGeneration(id)
       throw error
@@ -3454,6 +3469,7 @@ export class KnowledgeService extends Service {
       charCount,
       tokenCount,
       embedded: chunkStats.embedded,
+      embeddedChunkCount: chunkStats.embeddedCount,
       ...(chunkStats.dimensions !== undefined ? { embeddingDimensions: chunkStats.dimensions } : {}),
       ...(hasCurrentKey && staleChunkCount > 0 ? { staleEmbeddings: true, staleChunkCount } : {}),
     }
@@ -4441,7 +4457,7 @@ function embeddingKey(config: KnowledgeConfig): string | undefined {
   // Older padded Qwen batches are not numerically compatible with the
   // canonical single-text path, despite identical dimensions and weights.
   const format = config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
-    ? ':canonical-single-v1' : ''
+    ? ':canonical-single-v1' : config.embeddingProvider === 'local' && /(?:bge|gte|e5)/i.test(model) ? ':full-context-v1' : ''
   return `${config.embeddingProvider}:${model}${format}`
 }
 
