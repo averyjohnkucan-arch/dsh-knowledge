@@ -94,6 +94,8 @@ export declare class ChunkDatabase implements RetrievalLane {
     putDocumentMetadata(document: KnowledgeDocument): void;
     getDocumentMetadata(id: string): KnowledgeDocument | undefined;
     listDocumentMetadata(baseId?: string, includeRawText?: boolean): KnowledgeDocument[];
+    /** Check source availability in SQL without materializing the library's text. */
+    hasDocumentsWithoutSource(baseId: string): boolean;
     deleteDocumentMetadata(id: string): boolean;
     private readMeta;
     private writeMeta;

@@ -24,6 +24,22 @@ describe('incremental document metadata', () => {
     expect(db.getDocumentMetadata(doc.id)).toBeUndefined()
     db.close()
   })
+  it('checks missing sources without loading document bodies and isolates bases', () => {
+    const db = new ChunkDatabase(':memory:')
+    db.putDocumentMetadata({ ...doc, rawText: 'retained canonical text' })
+    db.putDocumentMetadata({ ...doc, id: 'folder', sourceType: 'directory', rawText: undefined })
+    db.putDocumentMetadata({ ...doc, id: 'file', sourceType: 'file', rawText: undefined, rawFilePath: 'base/file.pdf' })
+    expect(db.hasDocumentsWithoutSource('base')).toBe(false)
+    db.putDocumentMetadata({ ...doc, id: 'missing', baseId: 'other', rawText: undefined })
+    expect(db.hasDocumentsWithoutSource('base')).toBe(false)
+    expect(db.hasDocumentsWithoutSource('other')).toBe(true)
+    db.putDocumentMetadata({ ...doc, id: 'empty', rawText: '' })
+    expect(db.hasDocumentsWithoutSource('base')).toBe(false)
+    db.putDocumentMetadata({ ...doc, id: 'missing', rawText: undefined })
+    expect(db.hasDocumentsWithoutSource('base')).toBe(true)
+    expect(db.getDocumentMetadata('doc')?.rawText).toBe('retained canonical text')
+    db.close()
+  })
   it('rolls back a failed migration and permits a complete retry', () => {
     const db = new ChunkDatabase(':memory:')
     const invalid = { ...doc, id: 'bad', charCount: -1 }

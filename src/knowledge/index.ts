@@ -360,7 +360,7 @@ export class KnowledgeService extends Service {
       ? join(dirname(resolveChunkStorePath(this.baseConfig.chunkStorePath)), 'knowledge-artifacts')
       : undefined)
     for (const base of store.listBases()) {
-      for (const doc of store.listDocuments(base.id)) {
+      for (const doc of store.listDocuments(base.id, { includeRawText: false })) {
         const staged = store.getStagedDocumentGeneration(doc.id)
         const pinned = [doc.processing?.revision, staged?.document.processing?.revision].filter((value): value is string => value !== undefined)
         await this.artifacts.collectDocument(base.id, doc.id, pinned).catch(() => {
@@ -433,7 +433,7 @@ export class KnowledgeService extends Service {
       .map(base => ({ id: base.id, path: base.externalPath!, enabled: base.syncEnabled !== false,
         intervalMs: (base.syncIntervalSeconds ?? 60) * 1000 })), async id => {
       const base = this.requireStore().getBase(id)
-      if (!base?.externalPath || this.shuttingDown) return
+      if (!base?.externalPath || this.shuttingDown || this.embeddingBackfills.has(id)) return
       const result = await this.importDirectoryTree(id, base.externalPath)
       await readableRoot(base.externalPath)
       if (result.sync && result.sync.failed > 0) throw new Error(`${result.sync.failed} source item(s) could not be indexed; previous indexed data was retained where available`)
@@ -475,7 +475,7 @@ export class KnowledgeService extends Service {
     const cutoff = Date.now() - hours * 3600_000
     const stale: string[] = []
     for (const base of store.listBases()) {
-      for (const doc of store.listDocuments(base.id)) {
+      for (const doc of store.listDocuments(base.id, { includeRawText: false })) {
         if (doc.sourceType === 'url' && doc.url !== undefined && (doc.updatedAt ?? 0) < cutoff) stale.push(doc.id)
       }
     }
@@ -841,7 +841,7 @@ export class KnowledgeService extends Service {
       const newConfig = resolveConfigFor(this.baseConfig, store.getConfigOverrides(), next.config)
       const modelChanged = newConfig.embeddingProvider !== oldConfig.embeddingProvider
         || newConfig.embeddingModel !== oldConfig.embeddingModel
-      if (modelChanged && store.listDocuments(id).length > 0) {
+      if (modelChanged && store.listDocuments(id, { includeRawText: false }).length > 0) {
         const hadModel = oldConfig.embeddingProvider !== 'none' && oldConfig.embeddingModel.trim() !== ''
         if (hadModel) {
           throw new Error('Changing the embedding model invalidates existing vectors. Use Rebuild knowledge base to generate vectors with the new model')
@@ -851,25 +851,72 @@ export class KnowledgeService extends Service {
         // commit on the base being backfill-able: an in-flight import/reindex
         // would race the backfill, and a source-less document would leave a
         // model committed with nothing to back it — refuse both up front.
-        if (this.indexing.size > 0) {
-          throw new Error('Documents are being processed. Wait for importing or rebuilding to finish before enabling embeddings')
-        }
-        const documents = store.listDocuments(id)
-        const sourceLess = documents.some(doc => doc.sourceType !== 'directory'
-          && doc.rawText === undefined && doc.rawFilePath === undefined)
+        const sourceLess = store.hasDocumentsWithoutSource(id)
         if (sourceLess) {
           throw new Error('Some documents have no saved source text, so their embeddings cannot be generated. Re-add the affected documents from their originals')
         }
         await store.putBase(next)
         const baseId = id
-        void this.reindexBase(baseId).catch((error: unknown) => {
+        void this.backfillBaseEmbeddings(baseId).catch((error: unknown) => {
           this.ctx.logger.warn(`knowledge: in-place embedding backfill failed: ${error instanceof Error ? error.message : String(error)}`)
         })
         return next
       }
     }
     await store.putBase(next)
+    if (patch !== undefined && ('embeddingProvider' in patch || 'embeddingModel' in patch)) {
+      const effective = this.getConfigFor(id)
+      if (effective.embeddingProvider !== 'none' && effective.embeddingModel.trim() !== '') {
+        void this.backfillBaseEmbeddings(id).catch(error => this.ctx.logger.warn(`knowledge: embedding backfill failed: ${error instanceof Error ? error.message : String(error)}`))
+      }
+    }
     return next
+  }
+
+  private readonly embeddingBackfills = new Set<string>()
+
+  /** Enable vectors from saved canonical text; unchanged external files must not be skipped. */
+  private async backfillBaseEmbeddings(baseId: string): Promise<void> {
+    if (this.embeddingBackfills.has(baseId)) return
+    this.embeddingBackfills.add(baseId)
+    try { await this.runEmbeddingBackfill(baseId) } finally { this.embeddingBackfills.delete(baseId) }
+  }
+
+  private async runEmbeddingBackfill(baseId: string): Promise<void> {
+    // Return the config save before inventorying or starting model inference.
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const store = this.requireStore()
+    while (!this.shuttingDown && [...this.indexing.values()].some(entry => entry.baseId === baseId)) {
+      await new Promise<void>(resolve => setTimeout(resolve, 100))
+    }
+    if (this.shuttingDown || !store.getBase(baseId)) return
+    const meterId = `embedding:${baseId}`
+    const missing = store.docChunkStatus(baseId).missingEmbedding
+    const documents = store.listDocuments(baseId, { includeRawText: false })
+      .filter(doc => doc.sourceType !== 'directory' && missing.has(doc.id))
+    this.processingMeter.start(meterId, baseId)
+    this.processingMeter.add(meterId, documents.length)
+    this.directoryWriteBatches.set(baseId, (this.directoryWriteBatches.get(baseId) ?? 0) + 1)
+    try {
+      for (const doc of documents) {
+        if (this.shuttingDown || !store.getBase(baseId)) break
+        await new Promise<void>(resolve => setImmediate(resolve))
+        this.processingMeter.begin(meterId)
+        try {
+          await this.reindexDocument(doc.id, { mode: 'rechunk' })
+          this.processingMeter.settle(meterId, 'processed')
+        } catch (error) {
+          this.processingMeter.settle(meterId, 'failed')
+          this.ctx.logger.warn(`knowledge: embedding backfill paused after a document failure: ${error instanceof Error ? error.message : String(error)}`)
+          break
+        }
+      }
+    } finally {
+      this.processingMeter.finish(meterId)
+      const remaining = (this.directoryWriteBatches.get(baseId) ?? 1) - 1
+      if (remaining > 0) this.directoryWriteBatches.set(baseId, remaining)
+      else { this.directoryWriteBatches.delete(baseId); if (store.getBase(baseId)) await this.touchBase(baseId) }
+    }
   }
 
   listBases(): BaseSummary[] {
@@ -989,12 +1036,12 @@ export class KnowledgeService extends Service {
         // Cherry's "keep both" auto-renames; dsh's keep keeps the EXISTING
         // item and skips the incoming duplicate, reporting it via `skipped`
         // so the UI can tell the user instead of silently dropping the file.
-        const existing = store.listDocuments(request.baseId).find(doc => doc.fileName === request.fileName)
+        const existing = store.listDocuments(request.baseId, { includeRawText: false }).find(doc => doc.fileName === request.fileName)
         if (existing !== undefined) {
           return { skippedDoc: existing }
         }
       } else {
-        const existing = store.listDocuments(request.baseId).find(doc => doc.fileName === request.fileName)
+        const existing = store.listDocuments(request.baseId, { includeRawText: false }).find(doc => doc.fileName === request.fileName)
         if (existing !== undefined) {
           if (conflictStrategyNow === 'replace') {
             await store.deleteChunks(existing.id, request.baseId)
@@ -1008,7 +1055,7 @@ export class KnowledgeService extends Service {
       let resolvedFileName = request.fileName
       let resolvedTitle = request.title?.trim() || request.fileName
       if (conflictStrategyNow === 'rename') {
-        const taken = new Set(store.listDocuments(request.baseId).map(doc => doc.fileName))
+        const taken = new Set(store.listDocuments(request.baseId, { includeRawText: false }).map(doc => doc.fileName))
         let candidate = resolvedFileName
         let counter = 1
         while (taken.has(candidate)) {
@@ -1164,7 +1211,7 @@ export class KnowledgeService extends Service {
       }
     }
     const existingNames = new Set(
-      store.listDocuments(request.baseId)
+      store.listDocuments(request.baseId, { includeRawText: false })
         .filter(doc => doc.sourceType === 'file')
         .map(doc => doc.fileName),
     )
@@ -1596,7 +1643,7 @@ export class KnowledgeService extends Service {
     const root = store.getDocument(id)
     if (root === undefined) throw new Error(`document not found: ${id}`)
     const childrenByParent = new Map<string, KnowledgeDocument[]>()
-    for (const document of store.listDocuments(root.baseId)) {
+    for (const document of store.listDocuments(root.baseId, { includeRawText: false })) {
       if (document.parentDirectoryId === undefined) continue
       const children = childrenByParent.get(document.parentDirectoryId) ?? []
       children.push(document)
@@ -1686,7 +1733,7 @@ export class KnowledgeService extends Service {
     this.indexing.delete(id)
     // Deleting a directory container also removes its descendants.
     if (existing.sourceType === 'directory') {
-      for (const child of store.listDocuments(existing.baseId)) {
+      for (const child of store.listDocuments(existing.baseId, { includeRawText: false })) {
         if (child.parentDirectoryId === id) await this.deleteDocumentRecursive(child.id)
       }
     }
@@ -1741,7 +1788,7 @@ export class KnowledgeService extends Service {
       // sweep, so the user sees "N failed" instead of a silent partial run.
       let failed = 0
       let firstError = ''
-      for (const child of store.listDocuments(document.baseId)) {
+      for (const child of store.listDocuments(document.baseId, { includeRawText: false })) {
         if (child.parentDirectoryId !== document.id) continue
         if (this.indexing.has(child.id)) continue
         try {
@@ -2406,7 +2453,7 @@ export class KnowledgeService extends Service {
   private async deleteTrackedSyncSubtree(document: KnowledgeDocument, rootPath: string, items: DirectorySyncItem[]): Promise<void> {
     const store = this.requireStore()
     const byParent = new Map<string, KnowledgeDocument[]>()
-    for (const candidate of store.listDocuments(document.baseId)) {
+    for (const candidate of store.listDocuments(document.baseId, { includeRawText: false })) {
       if (candidate.parentDirectoryId === undefined) continue
       const children = byParent.get(candidate.parentDirectoryId) ?? []
       children.push(candidate)
@@ -2436,7 +2483,7 @@ export class KnowledgeService extends Service {
   async reindexBase(baseId: string): Promise<{ reindexed: number; skipped: number; failed: number; items: DirectorySyncItem[] }> {
     const store = this.requireStore()
     if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
-    const ids = store.listDocuments(baseId).map(doc => doc.id)
+    const ids = store.listDocuments(baseId, { includeRawText: false }).map(doc => doc.id)
     // Fold to outermost roots: a directory reindexes its subtree recursively,
     // so its descendants must not be reindexed a second time as siblings.
     let reindexed = 0
@@ -2483,7 +2530,7 @@ export class KnowledgeService extends Service {
   async startReindexBase(baseId: string): Promise<{ jobId: string; total: number; documentTotal: number }> {
     const store = this.requireStore()
     if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
-    const documents = store.listDocuments(baseId)
+    const documents = store.listDocuments(baseId, { includeRawText: false })
     const roots = this.outermostSelectedIds(documents.map(document => document.id))
     const jobId = crypto.randomUUID()
     this.pruneJobs()
@@ -2516,7 +2563,7 @@ export class KnowledgeService extends Service {
     const job = this.jobs.get(jobId)
     if (job === undefined) return
     const store = this.requireStore()
-    const roots = this.outermostSelectedIds(store.listDocuments(baseId).map(document => document.id))
+    const roots = this.outermostSelectedIds(store.listDocuments(baseId, { includeRawText: false }).map(document => document.id))
     for (const id of roots) {
       if (job.cancelled) break
       const doc = store.getDocument(id)
@@ -2649,7 +2696,7 @@ export class KnowledgeService extends Service {
     const included = hasDocIds ? new Set(docIds) : undefined
     const allowed = hasInclusion ? new Set<string>() : undefined
     for (const baseId of scope) {
-      for (const doc of store.listDocuments(baseId)) {
+      for (const doc of store.listDocuments(baseId, { includeRawText: false })) {
         const normalizedTitle = doc.title.toLowerCase()
         if (excludedTitles.some(term => normalizedTitle.includes(term))) excluded.add(doc.id)
         if (allowed === undefined || excluded.has(doc.id)) continue
@@ -2676,11 +2723,13 @@ export class KnowledgeService extends Service {
    */
   private outermostSelectedIds(ids: readonly string[]): string[] {
     const store = this.requireStore()
-    const selected = new Set(ids.filter(id => store.getDocument(id) !== undefined))
+    const selected = new Set(ids)
     if (selected.size === 0) return []
+    const known = new Set<string>()
     const childrenOf = new Map<string, string[]>()
     for (const base of store.listBases()) {
-      for (const doc of store.listDocuments(base.id)) {
+      for (const doc of store.listDocuments(base.id, { includeRawText: false })) {
+        known.add(doc.id)
         const parent = doc.parentDirectoryId
         if (parent === undefined) continue
         const list = childrenOf.get(parent) ?? []
@@ -2694,8 +2743,8 @@ export class KnowledgeService extends Service {
       if (depth > 0 && selected.has(docId)) inner.add(docId)
       for (const child of childrenOf.get(docId) ?? []) walk(child, depth + 1)
     }
-    for (const id of selected) walk(id, 0)
-    return [...selected].filter(id => !inner.has(id))
+    for (const id of selected) if (known.has(id)) walk(id, 0)
+    return [...selected].filter(id => known.has(id) && !inner.has(id))
   }
 
   listDocuments(baseId: string): DocumentSummary[] {
@@ -3914,6 +3963,7 @@ export class KnowledgeService extends Service {
     await new Promise(resolve => setTimeout(resolve, 25))
     const busy = (): boolean =>
       this.indexing.size > 0
+      || this.embeddingBackfills.size > 0
       || [...this.ingestQueues.values()].some(entry => entry.running > 0 || entry.pending.length > 0)
     while (busy()) {
       if (Date.now() > deadline) throw new Error('knowledge: ingest tasks did not settle in time')

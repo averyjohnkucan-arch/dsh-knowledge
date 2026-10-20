@@ -194,6 +194,10 @@ export declare class KnowledgeService extends Service {
     restoreBase(sourceBaseId: string, name: string, config?: BaseConfig): Promise<KnowledgeBase>;
     deleteBase(id: string): Promise<void>;
     renameBase(id: string, request: UpdateBaseRequest): Promise<KnowledgeBase>;
+    private readonly embeddingBackfills;
+    /** Enable vectors from saved canonical text; unchanged external files must not be skipped. */
+    private backfillBaseEmbeddings;
+    private runEmbeddingBackfill;
     listBases(): BaseSummary[];
     listGroups(): string[];
     createGroup(name: string): Promise<string[]>;

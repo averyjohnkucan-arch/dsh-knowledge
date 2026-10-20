@@ -1,3 +1,4 @@
+import { documentSubtreeIds } from './document-tree.js'
 import type { ProcessingSnapshot } from '../../knowledge/processing-meter.js'
 /**
  * Cherry Studio-style knowledge base UI: a sidebar-foot nav action plus a
@@ -929,17 +930,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
   // All descendants of a directory row (every nesting level), for the
   // optimistic processing marks — a reindex touches the whole subtree.
   const collectSubtreeIds = useCallback((rootId: string): string[] => {
-    const ids: string[] = []
-    const walk = (parentId: string): void => {
-      for (const doc of documents) {
-        if (doc.parentDirectoryId === parentId) {
-          ids.push(doc.id)
-          walk(doc.id)
-        }
-      }
-    }
-    walk(rootId)
-    return [rootId, ...ids]
+    return documentSubtreeIds(documents, rootId)
   }, [documents])
 
   // The host folds a delete selection to its outermost roots before writing, so
@@ -1296,9 +1287,22 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
 
   useEffect(() => {
     if (selectedBase?.storageMode !== 'external') return
-    const timer = window.setInterval(() => { void refreshBases(); void reloadDocuments() }, 3000)
-    return () => window.clearInterval(timer)
-  }, [selectedBase?.id, selectedBase?.storageMode, refreshBases, reloadDocuments])
+    let disposed = false
+    let timer: number | undefined
+    const poll = async (): Promise<void> => {
+      try {
+        // reloadDocuments also refreshes base summaries. Never overlap a slow
+        // large-library request or keep polling a background browser tab.
+        if (document.visibilityState !== 'hidden') await reloadDocuments()
+      } catch {
+        // Keep the last snapshot on a transient failure.
+      } finally {
+        if (!disposed) timer = window.setTimeout(() => { void poll() }, 3000)
+      }
+    }
+    timer = window.setTimeout(() => { void poll() }, 3000)
+    return () => { disposed = true; window.clearTimeout(timer) }
+  }, [selectedBase?.id, selectedBase?.storageMode, reloadDocuments])
 
   const addSourceMenu: MenuEntry[] = selectedBase?.storageMode === 'external' ? [
     { key: 'sync', label: t('reconcileNow'), onSelect: () => { void api.externalSettings(selectedBase.id, { reconcileNow: true }).then(refreshBases).catch(e => notify('error', String(e))) } },
@@ -1318,6 +1322,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
       return [
         { key: 'open', label: t('openFolder'), icon: <IconFolderOpen size={14} />, onSelect: () => drillIntoDirectory(doc.id) },
         { key: 'reindex', label: t('reindexButton'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc) },
+        { key: 'rechunk', label: t('rechunkDocument'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc, 'rechunk') },
         { key: 'sep' },
         { key: 'delete', label: t('delete'), danger: true, onSelect: () => setDialog({ kind: 'confirmDeleteDoc', doc }) },
       ]
@@ -1329,7 +1334,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
         ? [{ key: 'cancel-processing', label: t('cancel'), onSelect: () => void cancelProcessing(doc) }] : []),
       { key: 'reindex', label: t('reindexButton'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc) },
       { key: 'reparse', label: t('reparseDocument'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc, 'reparse') },
-      ...(doc.processing ? [{ key: 'rechunk', label: t('rechunkDocument'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc, 'rechunk') }] : []),
+      { key: 'rechunk', label: t('rechunkDocument'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc, 'rechunk') },
       ...(doc.sourceType === 'url'
         ? [{ key: 'refresh-url', label: t('refreshUrl'), icon: <IconRefresh size={14} />, onSelect: () => void refreshUrlDoc(doc) }]
         : []),

@@ -68,6 +68,7 @@ export interface Store {
         includeRawText?: boolean;
     }): KnowledgeDocument[];
     getDocument(id: string): KnowledgeDocument | undefined;
+    hasDocumentsWithoutSource(baseId: string): boolean;
     putDocument(doc: KnowledgeDocument): Promise<void>;
     deleteDocument(id: string): Promise<void>;
     /** Incremental candidate batches, invisible until commit; same revision upserts. */
