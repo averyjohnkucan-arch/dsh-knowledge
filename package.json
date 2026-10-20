@@ -94,8 +94,7 @@
     "smoke:local-rerank": "npm run build --silent && node scripts/smoke-local-rerank.mjs",
     "release:check": "node scripts/release-check.mjs",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
-    "prepack": "node build.mjs",
-    "prepare": "node build.mjs"
+    "prepack": "node build.mjs"
   },
   "keywords": [
     "dsh",
