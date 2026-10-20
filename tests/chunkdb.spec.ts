@@ -287,3 +287,20 @@ describe('embedding hash migration completion', () => {
     } finally {await rm(dir,{recursive:true,force:true})}
   })
 })
+
+describe('large-library status indexes', () => {
+  it('keeps passage text out of status scans and scopes embedding statistics', () => {
+    const db=openSeeded()
+    db.putChunks([{id:'c1',docId:'d1',baseId:'b1',index:0,text:'hello',embedding:[1,0],embeddingModel:'test'}])
+    const status=db.docChunkStatus('b1')
+    expect([...status.withChunks].sort()).toEqual(['d1','d2'])
+    expect([...status.missingEmbedding]).toEqual(['d2'])
+    expect(db.chunkStats(['b1'])).toMatchObject({count:2,embedded:true,dimensions:2,embeddingModelCounts:[{baseId:'b1',model:'test',count:1}]})
+    const raw=(db as unknown as {db:DatabaseSync}).db
+    const plan=raw.prepare('EXPLAIN QUERY PLAN SELECT doc_id, SUM(embedding IS NULL) AS missing FROM chunk WHERE base_id=? GROUP BY doc_id').all('b1') as Array<{detail:string}>
+    expect(plan.map(r=>r.detail).join(' ')).toContain('chunk_status_idx')
+    const embedded=raw.prepare('EXPLAIN QUERY PLAN SELECT 1 FROM chunk WHERE base_id=? AND embedding IS NOT NULL LIMIT 1').all('b1') as Array<{detail:string}>
+    expect(embedded.map(r=>r.detail).join(' ')).toContain('chunk_embedded_idx')
+    db.close()
+  })
+})

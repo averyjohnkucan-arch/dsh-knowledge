@@ -328,6 +328,10 @@ export class ChunkDatabase implements RetrievalLane {
       );
       CREATE INDEX IF NOT EXISTS chunk_doc_idx ON chunk(doc_id);
       CREATE INDEX IF NOT EXISTS chunk_base_idx ON chunk(base_id);
+      -- Keep recovery/count/status queries in a compact index rather than
+      -- fetching every passage's text and vector pages on each UI refresh.
+      CREATE INDEX IF NOT EXISTS chunk_status_idx ON chunk(base_id, doc_id, (embedding IS NULL), embedding_model);
+      CREATE INDEX IF NOT EXISTS chunk_embedded_idx ON chunk(base_id, embedding_model) WHERE embedding IS NOT NULL;
       CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
         search_text, content='chunk', content_rowid='fts_rowid', tokenize='trigram'
       );
@@ -975,7 +979,7 @@ export class ChunkDatabase implements RetrievalLane {
   /** Per-doc chunk presence + embedding coverage in one grouped pass (listDocuments). */
   docChunkStatus(baseId: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
     const rows = this.db.prepare(
-      'SELECT doc_id, SUM(CASE WHEN embedding IS NULL THEN 1 ELSE 0 END) AS missing FROM chunk WHERE base_id = ? GROUP BY doc_id',
+      'SELECT doc_id, SUM(embedding IS NULL) AS missing FROM chunk WHERE base_id = ? GROUP BY doc_id',
     ).all(baseId) as Array<{ doc_id: string; missing: number }>
     const withChunks = new Set<string>()
     const missingEmbedding = new Set<string>()
