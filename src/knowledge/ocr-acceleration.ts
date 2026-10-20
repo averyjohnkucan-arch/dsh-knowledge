@@ -1,3 +1,5 @@
+import { stopOwnedProcess } from './owned-process.js'
+import { ensurePrivatePython } from './private-python.js'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { readFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -74,11 +76,11 @@ export class OcrAcceleration {
   }
   private command(command: string, args: string[], timeout: number, env: NodeJS.ProcessEnv): Promise<void> {
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }); this.setupChild = child
+      const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32' }); this.setupChild = child
       let log = ''
       const append = (data: Buffer) => { log = (log + data.toString()).slice(-4000); this.state = { status: 'installing', message: log, devices: [] } }
       child.stdout.on('data', append); child.stderr.on('data', append)
-      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('OCR accelerator setup timed out')) }, timeout)
+      const timer = setTimeout(() => { stopOwnedProcess(child); reject(new Error('OCR accelerator setup timed out')) }, timeout)
       child.once('error', error => { clearTimeout(timer); reject(error) })
       child.once('close', code => { clearTimeout(timer); if (this.setupChild === child) this.setupChild = undefined; code === 0 ? resolve() : reject(new Error(`OCR accelerator setup failed: ${log}`)) })
     })
@@ -87,7 +89,8 @@ export class OcrAcceleration {
     if (this.preparation) return this.status()
     if (this.stopped) throw new Error('Knowledge plugin is disabled')
     this.releaseWorkers(); await mkdir(this.root(), { recursive: true }); this.state = { status: 'installing', message: 'Installing private OCR acceleration runtime…', devices: [] }
-    this.preparation = this.command(process.platform === 'win32' ? 'python' : 'python3', [script('setup-ocr-accelerators.py'), this.root()], 7_200_000, { ...process.env, CUDA_VISIBLE_DEVICES: '' })
+    this.preparation = ensurePrivatePython(this.root(),(command,args,env)=>this.command(command,args,7_200_000,env))
+      .then(python => this.command(python, [script('setup-ocr-accelerators.py'), this.root()], 7_200_000, { ...process.env, CUDA_VISIBLE_DEVICES: '' }))
       .then(() => this.command(this.python(), [script('ocr-accelerator-worker.py'), '--calibrate', '--models', join(localModelCacheDir(), 'ocr'), '--cache', join(this.root(), 'compiled'), '--output', join(this.root(), 'ready.json')], 900_000, acceleratorEnvironment(this.root())))
       .then(async () => { this.state = undefined; await this.status() })
       .catch(error => { this.state = { status: 'error', message: error instanceof Error ? error.message : String(error), devices: [] } })
@@ -95,5 +98,5 @@ export class OcrAcceleration {
     return this.state
   }
   releaseWorkers(): void { for (const lane of this.lanes) lane.process.dispose(); this.lanes = []; this.loadedRoot = undefined }
-  dispose(): void { this.stopped = true; this.setupChild?.kill('SIGKILL'); this.releaseWorkers() }
+  dispose(): void { this.stopped = true; this.setupChild && stopOwnedProcess(this.setupChild); this.releaseWorkers() }
 }

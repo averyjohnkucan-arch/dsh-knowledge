@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { glob, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -20,6 +20,10 @@ const REQUIRED_FILES = [
   'benchmarks/questions.json',
   'benchmarks/corpus/manifest.json',
   'scripts/verify-build-policy.mjs',
+  'scripts/setup-embedding-accelerators.py',
+  'scripts/embedding-accelerator-worker.py',
+  'scripts/openvino-embedding-manifest.json',
+  'scripts/accelerator-runtime-requirements.txt',
   'scripts/smoke-mineru-local.mjs',
   'docs/mineru-self-hosted.md',
   'lib/index.js',
@@ -37,7 +41,7 @@ const REQUIRED_FILES = [
 // reason to reach a consumer. Listing them here means a later change to the
 // `files` allowlist cannot publish them by accident.
 const FORBIDDEN_PREFIXES = ['src/', 'tests/', 'node_modules/', '.git/', '.github/', 'docs/superpowers/', 'docs/issues/', 'docs/images/']
-const FORBIDDEN_FILES = ['lib/knowledge/embed-worker.mjs', 'lib/knowledge/embed-worker.mjs.map', 'lib/knowledge/ocr-worker.mjs', 'lib/knowledge/ocr-worker.mjs.map']
+const FORBIDDEN_FILES = ['lib/knowledge/private-python-benchmark.mjs','lib/knowledge/embed-benchmark.mjs','lib/knowledge/embedding-benchmark.mjs','lib/knowledge/indexing-baseline.mjs','lib/knowledge/indexing-optimized.mjs','lib/knowledge/ocr-accelerated.mjs','lib/knowledge/ocr-baseline.mjs','lib/knowledge/ocr-optimized.mjs','lib/knowledge/ocr-process-baseline.mjs','lib/knowledge/release-validation.mjs','lib/knowledge/embed-worker.mjs', 'lib/knowledge/embed-worker.mjs.map', 'lib/knowledge/ocr-worker.mjs', 'lib/knowledge/ocr-worker.mjs.map']
 
 function executable(name) {
   return process.platform === 'win32' ? `${name}.cmd` : name
@@ -61,6 +65,7 @@ function exportedPaths(exportsValue) {
 
 async function exists(path) {
   try {
+    if (path.includes('*')) { for await (const _entry of glob(path)) return true; return false }
     await stat(path)
     return true
   } catch {

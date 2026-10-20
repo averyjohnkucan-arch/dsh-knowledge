@@ -46,6 +46,7 @@ export async function waitForKnowledge(port, child, logs, options = {}) {
   } = options
   const deadline = Date.now() + timeoutMs
   let lastError = ''
+  let cookie = ''
   let readySince
   let spawnError
   const onError = error => { spawnError = error }
@@ -61,7 +62,14 @@ export async function waitForKnowledge(port, child, logs, options = {}) {
       assertRunning()
       let ready = false
       try {
-        const response = await fetchImpl(`http://127.0.0.1:${port}/knowledge/bases`, { signal: AbortSignal.timeout(2_000) })
+        if (!cookie) {
+          const boot = logs().match(/http:\/\/(?:127\.0\.0\.1|localhost):[0-9]+\/\?token=[^\s]+/)?.[0]
+          if (boot && new URL(boot).port === String(port)) {
+            const auth = await fetchImpl(boot, { redirect: 'manual', signal: AbortSignal.timeout(2000) })
+            cookie = auth.headers?.get('set-cookie')?.split(';')[0] ?? ''
+          }
+        }
+        const response = await fetchImpl(`http://127.0.0.1:${port}/knowledge/bases`, { signal: AbortSignal.timeout(2_000), ...(cookie ? { headers: { Cookie: cookie } } : {}) })
         const body = await response.text()
         if (response.ok) {
           const parsed = JSON.parse(body)
@@ -202,7 +210,7 @@ async function main() {
     }
     console.log('official DSH remove round-trip passed')
   } catch (error) {
-    if (output !== '') console.error(`\n--- captured DSH output ---\n${output}`)
+    if (output !== '') console.error(`\n--- captured DSH output ---\n${output.replace(/token=[^\s&]+/g, 'token=[redacted]')}`)
     throw error
   } finally {
     if (child !== undefined && child.exitCode === null) {

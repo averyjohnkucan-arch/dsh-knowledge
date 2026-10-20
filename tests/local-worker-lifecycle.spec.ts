@@ -12,7 +12,8 @@ interface ProcessDouble {
 type ProcessMode = 'success' | 'crash_once' | 'mismatch' | 'invalid_vectors' | 'hang_download' | 'runtime_error_once'
 const processState = vi.hoisted(() => ({ instances: [] as ProcessDouble[], mode: 'success' as ProcessMode }))
 
-vi.mock('node:child_process', async () => {
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
   const { EventEmitter } = await import('node:events')
 
   class FakeProcess extends EventEmitter implements ProcessDouble {
@@ -84,6 +85,7 @@ vi.mock('node:child_process', async () => {
   }
 
   return {
+    ...actual,
     fork: () => {
       const child = new FakeProcess()
       processState.instances.push(child)

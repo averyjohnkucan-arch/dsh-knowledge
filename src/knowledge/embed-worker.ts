@@ -15,6 +15,8 @@
  * @module dsh-knowledge/knowledge/embed-process
  */
 
+import { availableParallelism, freemem } from 'node:os'
+import { orderedEmbeddingLanes, resolveEmbeddingCpuTuning, type EmbeddingCpuTuning } from './embedding-tuning.js'
 import { parentPort } from 'node:worker_threads'
 import { join } from 'node:path'
 import { readdir, stat } from 'node:fs/promises'
@@ -77,6 +79,7 @@ let transformers: TransformersModule | null = null
 /** Task-qualified runners: `${task}:${modelId}` → promise. */
 const runners = new Map<string, Promise<Runner>>()
 const cancelledModels = new Set<string>()
+let activeCpuTuning: EmbeddingCpuTuning = resolveEmbeddingCpuTuning({}, availableParallelism(), freemem())
 let operationChain: Promise<unknown> = Promise.resolve()
 
 /** Serialize model loads, inference, and disposal. In particular, a request
@@ -238,19 +241,26 @@ async function createRunner(
       dispose: async (): Promise<void> => { await model.dispose?.() },
     }
   }
-  const pipeline = await tf.pipeline(task, join(cacheDir, modelId), { device: 'cpu', dtype: 'q8' }) as
-    | (((text: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): unknown }>) & { dispose?(): Promise<void> })
-    | (((query: string, texts: string[], options?: Record<string, unknown>) => Promise<Array<{ score: number }>>) & { dispose?(): Promise<void> })
-  const embed = pipeline as (text: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): unknown }>
+  const tuning = { ...activeCpuTuning }
+  type EmbeddingPipeline = ((text: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): unknown }>) & { dispose?(): Promise<void> }
+  const make = async () => await tf.pipeline(task, join(cacheDir, modelId), { device: 'cpu', dtype: 'q8', session_options: { intraOpNumThreads: tuning.threads, interOpNumThreads: 1 } }) as EmbeddingPipeline
+  const pipelines: Array<Promise<EmbeddingPipeline>> = [make()]
+  await pipelines[0]
   post({ type: 'progress', modelId, status: 'ready', progress: 100, message: '' })
   return {
     embed: async (texts: string[], pooling: Pooling): Promise<number[][]> => {
-      const output = await embed(texts, { pooling, normalize: true })
-      return output.tolist() as number[][]
+      const batches: string[][] = []
+      for (let i = 0; i < texts.length; i += tuning.microBatch) batches.push(texts.slice(i, i + tuning.microBatch))
+      const count = Math.min(tuning.instances, batches.length)
+      while (pipelines.length < count) pipelines.push(make())
+      const models = await Promise.all(pipelines.slice(0, count))
+      const outputs = await orderedEmbeddingLanes(batches, count, async (batch, _index, lane) => {
+        const output = await models[lane](batch, { pooling, normalize: true })
+        return output.tolist() as number[][]
+      })
+      return outputs.flat()
     },
-    // Free the pipeline's ONNX sessions (~600MB native memory) immediately;
-    // the worker stays alive, so a later request just reloads from disk.
-    dispose: async (): Promise<void> => { await pipeline.dispose?.() },
+    dispose: async (): Promise<void> => { await Promise.all(pipelines.map(async pending => { const model = await pending; await model.dispose?.() })) },
   }
 }
 
@@ -316,6 +326,11 @@ function handleMessage(message: unknown): void {
     if (operation === 'release') {
       await disposeRunnersFor(modelId)
       return { protocolVersion: LOCAL_EMBED_PROTOCOL_VERSION, id, operation, ok: true as const }
+    }
+    const tuning = resolveEmbeddingCpuTuning(message.cpuTuning ?? {}, availableParallelism(), freemem())
+    if (JSON.stringify(tuning) !== JSON.stringify(activeCpuTuning)) {
+      await disposeAllRunners()
+      activeCpuTuning = tuning
     }
     // `download` intentionally follows the same load path: transformers.js
     // downloads missing artifacts and then verifies that the local pipeline

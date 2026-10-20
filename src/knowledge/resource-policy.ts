@@ -8,10 +8,10 @@ export function decideMainGpu(input: { enabled: boolean; foreground: boolean; id
   const base = { idleSeconds: input.idleSeconds }
   if (!input.enabled) return { ...base, allowed: false, reason: 'Main GPU acceleration is disabled' }
   if (input.foreground) return { ...base, allowed: false, reason: 'Foreground inference reserves the main GPU' }
-  if (input.idleSeconds === null) return { ...base, allowed: false, reason: 'Desktop idle state could not be verified' }
+  if (input.idleSeconds === null || !Number.isFinite(input.idleSeconds)) return { ...base, allowed: false, reason: 'Desktop idle state could not be verified' }
   if (input.idleSeconds < input.idleAfterSeconds) return { ...base, allowed: false, reason: 'Computer is in active use' }
   if (input.externalCompute) return { ...base, allowed: false, reason: 'Another process owns GPU compute resources' }
-  if (input.freeMiB < 6144) return { ...base, allowed: false, reason: 'Insufficient free VRAM for background visual models' }
+  if (!Number.isFinite(input.freeMiB) || input.freeMiB < 6144) return { ...base, allowed: false, reason: 'Insufficient free VRAM for background visual models' }
   return { ...base, allowed: true, reason: 'Desktop idle and main GPU available' }
 }
 export async function desktopIdle(): Promise<IdleEvidence> {

@@ -32,6 +32,7 @@ vi.mock('../src/knowledge/embed.js', () => ({
   setLocalModelCacheDir: vi.fn(),
   setHfEndpoint: vi.fn(),
   setLocalWorkerIdleTimeoutMs: vi.fn(),
+  setLocalEmbeddingTuning: vi.fn(),
   applyGlobalProxy: vi.fn(),
 }))
 

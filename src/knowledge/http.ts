@@ -55,7 +55,7 @@ async function handleRequest(service: KnowledgeService, req: IncomingMessage, re
     })
     const method = (req.method ?? 'GET').toUpperCase()
 
-    if (segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
+    if (segments[0] === 'embedding-acceleration' || segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
 
     const body = method === 'GET' ? undefined : await readJson(req)
     const value = await route(service, method, segments, body ?? {}, url.searchParams)
@@ -224,6 +224,12 @@ async function route(
   // /local-model-status?model=...
   if (segments[0] === 'local-model-status' && method === 'GET') {
     return service.getLocalModelStatus(query.get('model') ?? undefined)
+  }
+
+  if (segments[0] === 'embedding-acceleration') {
+    if (method === 'GET') return service.embeddingAccelerationStatus()
+    if (method === 'POST') return service.prepareEmbeddingAcceleration()
+    return undefined
   }
 
   // /probe-embedding-dimensions — embed one probe text and return the vector

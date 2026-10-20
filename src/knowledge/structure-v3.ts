@@ -1,3 +1,5 @@
+import { stopOwnedProcess } from './owned-process.js'
+import { ensurePrivatePython } from './private-python.js'
 import { StructureProcess } from './structure-process.js'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, writeFile, rm, access } from 'node:fs/promises'
@@ -30,12 +32,12 @@ export class StructureV3Manager {
       return { status: 'ready', progress: 100, message: 'PP-StructureV3: English OCR, layout, tables and charts · CPU', device: 'cpu' }
     } catch { return { status: 'not_downloaded', progress: 0, message: '', device: 'cpu' } }
   }
-  private run(command: string, args: string[], timeout: number, signal?: AbortSignal, onText?: (text: string) => void): Promise<void> {
+  private run(command: string, args: string[], timeout: number, signal?: AbortSignal, onText?: (text: string) => void, extraEnv: NodeJS.ProcessEnv = {}): Promise<void> {
     if (this.stopped) return Promise.reject(new Error('Knowledge plugin is disabled'))
     signal?.throwIfAborted()
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: {
-        ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '',
+      const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: {
+        ...process.env, ...extraEnv, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '',
         PADDLE_PDX_CACHE_HOME: join(this.root(), 'models'), HF_HOME: join(this.root(), 'hf-cache'),
         PYTHONUNBUFFERED: '1',
       } })
@@ -43,7 +45,7 @@ export class StructureV3Manager {
       let log = '', expired = false
       const append = (data: Buffer) => { log = (log + data.toString()).slice(-6000); onText?.(log) }
       child.stdout.on('data', append); child.stderr.on('data', append)
-      const stop = () => { child.kill('SIGTERM'); const kill = setTimeout(() => child.kill('SIGKILL'), 5000); kill.unref(); child.once('close', () => clearTimeout(kill)) }
+      const stop = () => { stopOwnedProcess(child, 'SIGTERM'); const kill = setTimeout(() => stopOwnedProcess(child), 5000); kill.unref(); child.once('close', () => clearTimeout(kill)) }
       const timer = setTimeout(() => { expired = true; stop() }, timeout)
       const abort = () => stop()
       signal?.addEventListener('abort', abort, { once: true })
@@ -56,9 +58,10 @@ export class StructureV3Manager {
     if (this.setup) return this.status()
     await mkdir(this.root(), { recursive: true })
     this.state = { status: 'installing', progress: 0, message: 'Preparing isolated CPU runtime…', device: 'cpu' }
-    this.setup = this.run(process.platform === 'win32' ? 'python' : 'python3', [script('setup-structure-v3.py'), this.root()], 7200000, undefined, log => {
+    this.setup = ensurePrivatePython(this.root(),(command,args,env)=>this.run(command,args,7200000,undefined,undefined,env))
+      .then(python => this.run(python, [script('setup-structure-v3.py'), this.root()], 7200000, undefined, log => {
       this.state = { ...this.state, message: log.slice(-2000), progress: log.includes('Downloading and loading') ? 80 : log.includes('Installing pinned') ? 30 : 5 }
-    }).then(() => { this.state = { status: 'ready', progress: 100, message: 'CPU pipeline ready', device: 'cpu' } }).catch(error => {
+    })).then(() => { this.state = { status: 'ready', progress: 100, message: 'CPU pipeline ready', device: 'cpu' } }).catch(error => {
       this.state = { status: 'error', progress: 0, message: error instanceof Error ? error.message : String(error), device: 'cpu' }
     }).finally(() => { this.setup = undefined })
     return { ...this.state }
@@ -97,6 +100,6 @@ export class StructureV3Manager {
     }
     const pending = this.queue.then(task, task); this.queue = pending.catch(() => {}); return pending
   }
-  dispose(): void { this.stopped = true; this.worker?.dispose(); for (const child of this.children) child.kill('SIGTERM') }
+  dispose(): void { this.stopped = true; this.worker?.dispose(); for (const child of this.children) stopOwnedProcess(child, 'SIGTERM') }
 }
 export const structureV3 = new StructureV3Manager()

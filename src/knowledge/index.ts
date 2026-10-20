@@ -1,3 +1,5 @@
+import { orderedEmbeddingLanes } from './embedding-tuning.js'
+import { embeddingAcceleration } from './embedding-acceleration.js'
 /**
  * The host knowledge service (`ctx.knowledge`): durable bases/documents/chunks
  * over `ctx.storageDomain`, heading-aware chunking with context injection,
@@ -44,6 +46,7 @@ import {
   setHfEndpoint,
   setLocalModelCacheDir,
   setLocalWorkerIdleTimeoutMs,
+  setLocalEmbeddingTuning,
 } from './embed.js'
 import type { LocalModelStatus } from './embed.js'
 import { cancelLocalModelDownload, deleteLocalModel, downloadLocalModel, hasActiveLocalRerankDownload, listLocalModels, LOCAL_MODELS, registerCustomLocalReranker, selfTestLocalModel } from './localModels.js'
@@ -353,6 +356,7 @@ export class KnowledgeService extends Service {
     this.ctx.effect(() => () => { void disposeLocalModelWorker() }, 'knowledge: dispose local model worker')
     this.ctx.effect(() => () => { void disposeLocalRerankProcess() }, 'knowledge: dispose local rerank process')
     this.ctx.effect(() => () => { void disposeOcrWorker() }, 'knowledge: dispose OCR worker')
+    this.ctx.effect(() => () => embeddingAcceleration.dispose(), 'knowledge: dispose embedding accelerators')
     this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
     this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
     if (store === undefined) { this.resolveStore(); return }
@@ -382,6 +386,8 @@ export class KnowledgeService extends Service {
     setLocalModelCacheDir(resolved.localModelCacheDir)
     await this.ocrAcceleration.status()
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    setLocalEmbeddingTuning(resolved)
+    embeddingAcceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     // One-time compatibility path for caches created before readiness markers:
     // validate only rerankers that are actually configured, in the background.
@@ -424,9 +430,14 @@ export class KnowledgeService extends Service {
         return
       }
       this.ctx.logger.info(`knowledge: resuming ${resumeIds.length} interrupted import(s)`)
-      void this.resumeInterruptedDocuments(resumeIds)
+      await this.resumeInterruptedDocuments(resumeIds)
     })
     void resume.catch(error => this.ctx.logger.warn(`knowledge: interrupted-import recovery failed: ${error instanceof Error ? error.message : String(error)}`))
+    void resume.then(async () => {
+      for (const base of store.listBases()) {
+        if (base.embeddingBackfillPending && this.getConfigFor(base.id).resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
+      }
+    }).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     this.armUrlRefreshTimer()
     this.externalFolders = new ExternalFolders(() => this.requireStore().listBases()
       .filter(base => base.storageMode === 'external' && base.externalPath)
@@ -639,6 +650,8 @@ export class KnowledgeService extends Service {
     setHfEndpoint(resolved.hfEndpoint)
     setLocalModelCacheDir(resolved.localModelCacheDir)
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    setLocalEmbeddingTuning(resolved)
+    embeddingAcceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     return resolved
   }
@@ -879,7 +892,11 @@ export class KnowledgeService extends Service {
   private async backfillBaseEmbeddings(baseId: string): Promise<void> {
     if (this.embeddingBackfills.has(baseId)) return
     this.embeddingBackfills.add(baseId)
-    try { await this.runEmbeddingBackfill(baseId) } finally { this.embeddingBackfills.delete(baseId) }
+    try {
+      const store = this.requireStore(), base = store.getBase(baseId)
+      if (base) await store.putBase({ ...base, embeddingBackfillPending: true })
+      await this.runEmbeddingBackfill(baseId)
+    } finally { this.embeddingBackfills.delete(baseId) }
   }
 
   private async runEmbeddingBackfill(baseId: string): Promise<void> {
@@ -898,8 +915,8 @@ export class KnowledgeService extends Service {
     this.processingMeter.add(meterId, documents.length)
     this.directoryWriteBatches.set(baseId, (this.directoryWriteBatches.get(baseId) ?? 0) + 1)
     try {
-      for (const doc of documents) {
-        if (this.shuttingDown || !store.getBase(baseId)) break
+      await orderedEmbeddingLanes(documents, this.getConfigFor(baseId).embeddingProvider === 'local' ? 2 : 1, async doc => {
+        if (this.shuttingDown || !store.getBase(baseId)) throw new Error('Embedding backfill stopped')
         await new Promise<void>(resolve => setImmediate(resolve))
         this.processingMeter.begin(meterId)
         try {
@@ -908,11 +925,14 @@ export class KnowledgeService extends Service {
         } catch (error) {
           this.processingMeter.settle(meterId, 'failed')
           this.ctx.logger.warn(`knowledge: embedding backfill paused after a document failure: ${error instanceof Error ? error.message : String(error)}`)
-          break
+          throw error
         }
-      }
+      })
     } finally {
       this.processingMeter.finish(meterId)
+      if (!this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId).missingEmbedding.size === 0) {
+        await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false })
+      }
       const remaining = (this.directoryWriteBatches.get(baseId) ?? 1) - 1
       if (remaining > 0) this.directoryWriteBatches.set(baseId, remaining)
       else { this.directoryWriteBatches.delete(baseId); if (store.getBase(baseId)) await this.touchBase(baseId) }
@@ -2958,6 +2978,10 @@ export class KnowledgeService extends Service {
 
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
+  enterEmbeddingForeground() { return embeddingAcceleration.enterForeground() }
+  embeddingAccelerationStatus() { return embeddingAcceleration.status() }
+  prepareEmbeddingAcceleration() { return embeddingAcceleration.prepare() }
+
   listLocalModels(): Promise<LocalModelSummary[]> {
     return listLocalModels()
   }
@@ -4292,6 +4316,7 @@ export class KnowledgeService extends Service {
       config.embeddingApiKey,
       texts,
       signal,
+      'index',
     )
   }
 

@@ -1,3 +1,4 @@
+import { EmbeddingPerformance } from './EmbeddingPerformance.js'
 import { useEffect, useState } from 'react'
 import type { KnowledgeApi } from './api.js'
 import { C, style } from './theme.js'
@@ -42,6 +43,7 @@ export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
       <button style={style.button} disabled={busy || status.status === 'installing'} onClick={() => void install(true)}>Download recommended models</button>
       <button style={style.button} disabled={busy} onClick={() => void apply()}>Use recommended defaults</button>
     </div>
+    <EmbeddingPerformance api={api}/>
     <h4 style={{ margin: '14px 0 6px' }}>OCR acceleration · CPU, Intel iGPU and NPU</h4>
     <p style={style.hint}>Installs private inference libraries and calibrates available devices against known text. Uses measured queue times to distribute pages. NVIDIA stays reserved. The standard CPU engine remains available as fallback.</p>
     <button style={style.button} disabled={busy || ocrAcceleration?.status === 'installing'} onClick={() => { void api.prepareOcrAcceleration().then(setOcrAcceleration).catch(e => setError(String(e))) }}>Download / calibrate OCR acceleration</button>

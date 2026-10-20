@@ -101,6 +101,11 @@ export interface Config {
    * self-register") cannot happen; the next request reloads from disk (~1s).
    * 0 keeps the models hot forever (fastest, at the cost of resident memory).
    */
+  localEmbeddingIgpuIdle?: boolean
+  localEmbeddingMainGpuIdle?: boolean
+  localEmbeddingThreads?: number
+  localEmbeddingInstances?: number
+  localEmbeddingMicroBatchSize?: number
   localWorkerIdleTimeoutMs: number
 }
 
@@ -151,6 +156,11 @@ export const Config: Schema<Config> = Schema.object({
   autoRetrieve: Schema.boolean().default(true),
   injectUsagePrompt: Schema.boolean().default(true),
   autoRetrieveWeight: Schema.number().default(3),
+  localEmbeddingIgpuIdle: Schema.boolean().default(true),
+  localEmbeddingMainGpuIdle: Schema.boolean().default(true),
+  localEmbeddingThreads: Schema.number().default(0),
+  localEmbeddingInstances: Schema.number().default(0),
+  localEmbeddingMicroBatchSize: Schema.number().default(1),
   localWorkerIdleTimeoutMs: Schema.number().default(60000),
 })
 
@@ -213,6 +223,11 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     autoRetrieve: overrides.autoRetrieve ?? config.autoRetrieve,
     injectUsagePrompt: overrides.injectUsagePrompt ?? config.injectUsagePrompt ?? true,
     autoRetrieveWeight: clampInt(overrides.autoRetrieveWeight ?? config.autoRetrieveWeight, 0, 5, 3),
+    localEmbeddingIgpuIdle: overrides.localEmbeddingIgpuIdle ?? config.localEmbeddingIgpuIdle ?? true,
+    localEmbeddingMainGpuIdle: overrides.localEmbeddingMainGpuIdle ?? config.localEmbeddingMainGpuIdle ?? true,
+    localEmbeddingThreads: clampInt(overrides.localEmbeddingThreads ?? config.localEmbeddingThreads ?? 0, 0, 64, 0),
+    localEmbeddingInstances: clampInt(overrides.localEmbeddingInstances ?? config.localEmbeddingInstances ?? 0, 0, 4, 0),
+    localEmbeddingMicroBatchSize: clampInt(overrides.localEmbeddingMicroBatchSize ?? config.localEmbeddingMicroBatchSize ?? 1, 1, 8, 1),
     localWorkerIdleTimeoutMs: clampInt(overrides.localWorkerIdleTimeoutMs ?? config.localWorkerIdleTimeoutMs, 0, 24 * 3600 * 1000, 60000),
     localModelCacheDir: overrides.localModelCacheDir ?? config.localModelCacheDir,
   }

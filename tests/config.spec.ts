@@ -61,6 +61,11 @@ describe('resolveConfig', () => {
       documentProcessingTimeoutMs: 1_800_000,
       structuredChunking: true,
       injectUsagePrompt: true,
+      localEmbeddingThreads: 0,
+      localEmbeddingInstances: 0,
+      localEmbeddingMicroBatchSize: 1,
+      localEmbeddingIgpuIdle: true,
+      localEmbeddingMainGpuIdle: true,
     })
   })
   it('applies runtime overrides', () => {

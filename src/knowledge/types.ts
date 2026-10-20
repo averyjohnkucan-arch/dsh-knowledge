@@ -95,6 +95,7 @@ export interface BaseConfig {
 
 /** One knowledge base (a namespace of documents). */
 export interface KnowledgeBase {
+  readonly embeddingBackfillPending?: boolean
   readonly storageMode?: 'internal' | 'external'
   readonly externalPath?: string
   readonly syncEnabled?: boolean
@@ -338,6 +339,11 @@ export interface KnowledgeConfig {
   /** Auto-retrieve seat cap per base (0–5, 0 = excluded; see BaseConfig). */
   readonly autoRetrieveWeight: number
   /** Local-model worker idle timeout in ms (0 = never release; see Config). */
+  localEmbeddingIgpuIdle?: boolean
+  localEmbeddingMainGpuIdle?: boolean
+  localEmbeddingThreads?: number
+  localEmbeddingInstances?: number
+  localEmbeddingMicroBatchSize?: number
   readonly localWorkerIdleTimeoutMs: number
 }
 
