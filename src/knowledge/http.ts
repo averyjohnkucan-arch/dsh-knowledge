@@ -55,7 +55,7 @@ async function handleRequest(service: KnowledgeService, req: IncomingMessage, re
     })
     const method = (req.method ?? 'GET').toUpperCase()
 
-    if (segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
+    if (segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
 
     const body = method === 'GET' ? undefined : await readJson(req)
     const value = await route(service, method, segments, body ?? {}, url.searchParams)
@@ -313,6 +313,8 @@ async function route(
     return service.modelSuggestions()
   }
 
+  if (segments[0] === 'folder-picker' && method === 'POST') return service.pickSourceFolder()
+
   // /indexing-status
   if (segments[0] === 'indexing-status' && method === 'GET') {
     return service.indexingStatus()
@@ -362,6 +364,7 @@ async function route(
       return undefined
     }
     if (segments.length === 3) {
+      if (segments[2] === 'external-settings' && method === 'PATCH') return service.updateExternalSource(baseId, body)
       if (segments[2] === 'stats' && method === 'GET') return service.stats(baseId)
       if (segments[2] === 'reindex' && method === 'POST') return service.startReindexBase(baseId)
       if (segments[2] === 'files-batch' && method === 'POST') {
@@ -410,6 +413,7 @@ async function route(
         )
       }
       if (segments[2] === 'directories' && method === 'POST') {
+        service.assertInternalImport(baseId)
         return service.createDirectory(
           baseId,
           typeof body.title === 'string' ? body.title : 'directory',

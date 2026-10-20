@@ -306,9 +306,21 @@ export function CreateBaseDialog(props: {
   groups: readonly string[]
   initialGroup?: string
   busy?: boolean
-  onCreate: (name: string, description: string, group?: string) => void
+  onCreate: (name: string, description: string, group: string | undefined, external: { storageMode: 'internal' | 'external'; externalPath?: string; syncIntervalSeconds?: number }) => void
+  onPickFolder: () => Promise<{ path: string | null }>
   onClose: () => void
 }): JSX.Element {
+  const [storageMode, setStorageMode] = useState<'internal' | 'external'>('internal')
+  const [externalPath, setExternalPath] = useState('')
+  const [interval, setInterval] = useState(60)
+  const [picking, setPicking] = useState(false)
+  const [error, setError] = useState('')
+  const browse = async (): Promise<void> => {
+    setPicking(true); setError('')
+    try { const picked = await props.onPickFolder(); if (picked.path) setExternalPath(picked.path) }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setPicking(false) }
+  }
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [group, setGroup] = useState(
@@ -331,12 +343,28 @@ export function CreateBaseDialog(props: {
           {props.groups.map(g => <option key={g} value={g}>{g}</option>)}
         </select>
       </div>
+      <div style={style.field}>
+        <label style={style.label} htmlFor="kb-storage-mode">{props.t('storageMode')}</label>
+        <select id="kb-storage-mode" style={style.input} value={storageMode} onChange={e => setStorageMode(e.target.value as 'internal' | 'external')}>
+          <option value="internal">{props.t('internalBase')}</option><option value="external">{props.t('externalBase')}</option>
+        </select>
+      </div>
+      {storageMode === 'external' && <>
+        <div style={style.field}>
+          <label style={style.label} htmlFor="kb-external-folder">{props.t('externalFolder')}</label>
+          <div style={{ display: 'flex', gap: 8 }}><input id="kb-external-folder" style={{ ...style.input, flex: 1 }} value={externalPath} onChange={e => setExternalPath(e.target.value)} />
+          <button type="button" style={style.button} disabled={picking} onClick={() => void browse()}>{props.t('browseFolder')}</button></div>
+        </div>
+        <div style={style.field}><label style={style.label} htmlFor="kb-sync-interval">{props.t('syncInterval')}</label><input id="kb-sync-interval" style={style.input} type="number" min={5} max={86400} value={interval} onChange={e => setInterval(Number(e.target.value))} /></div>
+        <p style={{ fontSize: 12, lineHeight: 1.5, color: C.muted }}>{props.t('externalHint')}</p>
+      </>}
+      {error && <p role="alert" style={{ color: C.danger }}>{error}</p>}
       <div style={{ ...style.actionsRow, justifyContent: 'flex-end' }}>
         <button style={style.button} onClick={props.onClose}>{props.t('cancel')}</button>
         <button
           className="kb-primary" style={style.primary}
-          disabled={props.busy === true || name.trim().length === 0}
-          onClick={() => props.onCreate(name.trim(), description.trim(), group.trim() === '' ? undefined : group.trim())}
+          disabled={props.busy === true || picking || name.trim().length === 0 || storageMode === 'external' && (!externalPath.trim() || interval < 5 || interval > 86400)}
+          onClick={() => props.onCreate(name.trim(), description.trim(), group.trim() === '' ? undefined : group.trim(), { storageMode, externalPath: externalPath.trim(), syncIntervalSeconds: interval })}
         >
           {props.t('create')}
         </button>

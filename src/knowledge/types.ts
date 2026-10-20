@@ -93,6 +93,11 @@ export interface BaseConfig {
 
 /** One knowledge base (a namespace of documents). */
 export interface KnowledgeBase {
+  readonly storageMode?: 'internal' | 'external'
+  readonly externalPath?: string
+  readonly syncEnabled?: boolean
+  readonly syncIntervalSeconds?: number
+
   readonly id: string
   readonly name: string
   readonly description: string
@@ -185,6 +190,7 @@ export interface DeleteImpact {
 
 /** One imported document inside a knowledge base. */
 export interface KnowledgeDocument {
+  readonly sourceSignature?: string
   readonly processing?: DocumentProcessingInfo
   readonly id: string
   readonly baseId: string
@@ -457,6 +463,12 @@ export interface BaseSourceInfo {
 
 /** Summary of one knowledge base, for listing UIs. */
 export interface BaseSummary {
+  readonly syncStatus?: { state: string; message?: string; checkedAt?: number }
+  readonly storageMode?: 'internal' | 'external'
+  readonly externalPath?: string
+  readonly syncEnabled?: boolean
+  readonly syncIntervalSeconds?: number
+
   readonly id: string
   readonly name: string
   readonly description: string
@@ -518,6 +530,11 @@ export interface DocumentDetail {
 
 /** Payload for creating a knowledge base. */
 export interface CreateBaseRequest {
+  readonly storageMode?: 'internal' | 'external'
+  readonly externalPath?: string
+  readonly syncEnabled?: boolean
+  readonly syncIntervalSeconds?: number
+
   readonly name: string
   readonly description?: string
   readonly group?: string
@@ -526,6 +543,11 @@ export interface CreateBaseRequest {
 
 /** Payload for updating a knowledge base (name, description, group, per-base config). */
 export interface UpdateBaseRequest {
+  readonly storageMode?: 'internal' | 'external'
+  readonly externalPath?: string
+  readonly syncEnabled?: boolean
+  readonly syncIntervalSeconds?: number
+
   readonly name?: string
   readonly description?: string
   readonly group?: string

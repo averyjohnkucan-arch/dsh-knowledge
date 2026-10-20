@@ -334,9 +334,7 @@ class DomainStore implements Store {
   deleteBase(id: string): Promise<void> {
     return this.writeDocuments(async () => {
       await this.bases.delete(id)
-      for (const [, doc] of this.documents.entries()) {
-        if (doc.baseId === id) this.chunkDb.discardDocumentGenerations(doc.id)
-      }
+      this.chunkDb.discardBaseGenerations(id)
     })
   }
 

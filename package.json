@@ -36,7 +36,9 @@
       "default": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "dsh": {
     "bundle": {
@@ -65,7 +67,9 @@
     "docs/mineru-self-hosted.md",
     "benchmarks",
     "scripts",
-    "pnpm-workspace.yaml"
+    "pnpm-workspace.yaml",
+    "locale",
+    "icon.svg"
   ],
   "scripts": {
     "build": "node build.mjs",
@@ -124,12 +128,12 @@
     "@napi-rs/canvas-win32-x64-msvc": "^1.0.6"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "link:../dsh/vendor/cordis",
-    "@deepseek-ai/dsh-host-webserver": "link:../dsh/packages/host/webserver",
-    "@deepseek-ai/dsh-storage": "link:../dsh/packages/storage/storage",
-    "@deepseek-ai/dsh-storage-domain": "link:../dsh/packages/storage/storage-domain",
-    "@deepseek-ai/dsh-tools": "link:../dsh/packages/core/tools",
-    "@deepseek-ai/schemastery": "link:../dsh/vendor/schemastery",
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-storage": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-storage-domain": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.5",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "@types/turndown": "^5.0.6",

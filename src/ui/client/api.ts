@@ -70,6 +70,12 @@ export interface BaseSourceInfo {
 }
 
 export interface BaseSummary {
+  storageMode?: 'internal' | 'external'
+  externalPath?: string
+  syncEnabled?: boolean
+  syncIntervalSeconds?: number
+  syncStatus?: { state: string; message?: string; checkedAt?: number }
+
   id: string
   name: string
   description: string
@@ -379,7 +385,7 @@ export class KnowledgeApi {
   private async call<T>(method: string, path: string, body?: unknown, timeoutMs = 60_000): Promise<T> {
     const response = await fetch(`/knowledge${path}`, {
       method,
-      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
+      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path === '/folder-picker' || path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       // A hung host must not pin the panel's busy state forever: fail the
       // call with a clear error instead of an indefinite spinner. Long-running
@@ -514,12 +520,17 @@ export class KnowledgeApi {
     return this.call('POST', '/probe-embedding-dimensions', options)
   }
 
+  pickFolder(): Promise<{ path: string | null }> { return this.call('POST', '/folder-picker', {}, 310000) }
+  externalSettings(id: string, patch: { syncEnabled?: boolean; syncIntervalSeconds?: number }): Promise<unknown> {
+    return this.call('PATCH', `/bases/${encodeURIComponent(id)}/external-settings`, patch)
+  }
+
   listBases(): Promise<BaseSummary[]> {
     return this.call('GET', '/bases')
   }
 
-  createBase(name: string, description: string, group: string, config?: BaseConfig): Promise<{ id: string; name: string }> {
-    return this.call('POST', '/bases', { name, description, group, config })
+  createBase(name: string, description: string, group: string, config?: BaseConfig, external?: { storageMode: 'internal' | 'external'; externalPath?: string; syncIntervalSeconds?: number }): Promise<{ id: string; name: string }> {
+    return this.call('POST', '/bases', { name, description, group, config, ...external })
   }
 
   updateBase(id: string, patch: { name?: string; description?: string; group?: string; config?: BaseConfig }): Promise<{ id: string; name: string }> {

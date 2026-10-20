@@ -591,3 +591,18 @@ Use [GitHub Issues](https://github.com/Soren-ABT/dsh-knowledge/issues) for ordin
 [AGPL-3.0](LICENSE). PDF page rendering depends on [mupdf](https://mupdf.com/) under AGPL-3.0, so the project uses AGPL-3.0 to keep distribution licensing consistent. It also matches the license of the design reference [Cherry Studio](https://github.com/CherryHQ/cherry-studio), but this is an independent implementation containing none of Cherry Studio's source.
 
 Thanks to [dsh-interconnect](https://github.com/deepseek-ai/deepseek-harness), [dsh-deeptutor](https://github.com/TecFancy/dsh-deeptutor), [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin), and the community contributors who submit code and issue reports.
+
+## Local rebuild: internal and external knowledge
+
+New base now has an **Internal / External** storage selector. Existing bases remain internal.
+
+- **Internal** keeps the existing upload/import behavior, including cached originals.
+- **External** selects one folder on the DSH host. The plugin stores parsed text, processing evidence, chunks and embeddings; it does not keep another copy of original source files. Supported document types are indexed; symbolic links are not followed by the folder scanner.
+- Recursive filesystem notifications trigger reconciliation. A periodic scan (60 seconds by default, configurable from 5 seconds to one day) catches missed notifications and reconnects after restarts. Use the per-base switch to pause synchronization, or **Sync now** to request a scan while enabled.
+- A missing or unreadable top-level folder is shown as disconnected. Its indexed content remains searchable. Individual missing files/subfolders are removed from the index only after the top-level source is readable. Reconnecting synchronizes again.
+- **Original** reads the current original from its selected folder. It can differ from the indexed snapshot until the next sync. Offline indexed previews remain available, while original-file access requires the source to be online. **Show in document** highlights a loaded chunk within the indexed text preview.
+- Deleting the knowledge base removes the plugin's index/cache, never the source directory. Removing an individual external KB entry does not delete its source file; reconciliation can index it again while that file remains in the selected folder.
+
+Native selection uses Windows Forms through Windows PowerShell on Windows, or Zenity/KDialog on Linux. The dialog opens on the DSH host's desktop. A remote/headless host may require entering its absolute folder path instead. Linux integration is tested; Windows dialog execution still requires qualification on a Windows machine.
+
+The entire implementation is in this plugin. No DSH core files are patched. Accelerator embedding/OCR scheduling and the earlier requested model benchmarks are separate work and are not enabled by this folder-sync feature.

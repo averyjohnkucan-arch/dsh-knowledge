@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createServer } from 'node:http'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile, rename, readFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join, relative, resolve } from 'node:path'
 import { clampRawTextLimit, KnowledgeService, MAX_RAW_TEXT_LIMIT, NotFoundError } from '../src/knowledge/index.js'
@@ -1703,5 +1703,92 @@ describe('KnowledgeService', () => {
     } finally {
       await rm(tmp, { recursive: true, force: true })
     }
+  })
+})
+
+
+it('cancels KB jobs and bulk deletes without per-file deletion or global maintenance', async () => {
+  const service = await mountService()
+  const base = await service.createBase({ name: 'bulk-delete' })
+  await service.addTextDocument({ baseId: base.id, title: 'sample', content: 'retained source fixture content' })
+  const internal = service as unknown as { requireStore(): Store; jobs: Map<string, { baseId: string; done: boolean; cancelled: boolean }> }
+  const store = internal.requireStore()
+  const perFile = vi.spyOn(store, 'deleteDocument')
+  const reconcile = vi.spyOn(store, 'reconcileOrphanChunks')
+  const job = { baseId: base.id, done: false, cancelled: false }
+  internal.jobs.set('fixture', job)
+  await service.deleteBase(base.id)
+  expect(job.cancelled).toBe(true)
+  expect(perFile).not.toHaveBeenCalled()
+  expect(reconcile).not.toHaveBeenCalled()
+  expect(service.listBases()).toHaveLength(0)
+})
+
+
+describe('external folder knowledge', () => {
+  it('indexes references without raw copies, tracks edits/additions/deletions, retains offline knowledge and reconnects', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'knowledge-external-'))
+    const service = await mountService()
+    const monitor = (service as unknown as { externalFolders: { stop(): void } }).externalFolders
+    monitor.stop()
+    try {
+      await writeFile(join(root, 'a.txt'), 'First external article about orbital research.')
+      await writeFile(join(root, 'duplicate.txt'), 'First external article about orbital research.')
+      await mkdir(join(root, 'nested'))
+      await writeFile(join(root, 'nested', 'b.txt'), 'A second independent reference about climate.')
+      const base = await service.createBase({ name: 'External', storageMode: 'external', externalPath: root, syncEnabled: false })
+      const first = await service.importDirectoryTree(base.id, root)
+      expect(first.errors).toHaveLength(0)
+      const files = () => service.listDocuments(base.id).filter(d => d.sourceType === 'file')
+      expect(files()).toHaveLength(3)
+      const a = files().find(d => d.title === 'a.txt')!
+      expect(service.getDocument(a.id).rawFilePath).toBeUndefined()
+      expect(Buffer.from((await service.getRawFile(a.id))!.bytes).toString()).toContain('orbital research')
+      const unchanged = await service.importDirectoryTree(base.id, root)
+      expect(unchanged.sync?.created).toBe(0)
+      expect(unchanged.sync?.updated).toBe(0)
+      await writeFile(join(root, 'a.txt'), 'Changed article about orbital navigation.')
+      await writeFile(join(root, 'new.txt'), 'New reference about satellite telemetry.')
+      await rm(join(root, 'nested'), { recursive: true })
+      await service.importDirectoryTree(base.id, root)
+      expect(files()).toHaveLength(3)
+      expect(service.getDocument(a.id).rawText).toContain('navigation')
+      expect(Buffer.from((await service.getRawFile(a.id))!.bytes).toString()).toContain('navigation')
+      const count = files().length
+      await rename(root, root + '-offline')
+      await expect(service.importDirectoryTree(base.id, root)).rejects.toThrow(/not found/)
+      expect(files()).toHaveLength(count)
+      expect(service.getDocument(a.id).rawText).toContain('navigation')
+      await expect(service.getRawFile(a.id)).rejects.toThrow()
+      await rename(root + '-offline', root)
+      await service.importDirectoryTree(base.id, root)
+      expect(files()).toHaveLength(count)
+      await service.deleteBase(base.id)
+      expect(await readFile(join(root, 'a.txt'), 'utf8')).toContain('navigation')
+    } finally { monitor.stop(); await rm(root, { recursive: true, force: true }); await rm(root + '-offline', { recursive: true, force: true }) }
+  })
+
+  it('resumes persisted external sources and reports disconnected/connected states through the watcher', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'knowledge-watched-'))
+    const service = await mountService()
+    const monitor = (service as unknown as { externalFolders: { stop(): void; request(id: string): void; tick(): Promise<void>; states: Map<string, { state: string }> } }).externalFolders
+    try {
+      await writeFile(join(root, 'a.txt'), 'Watched document with stable evidence.')
+      const base = await service.createBase({ name: 'Watched', storageMode: 'external', externalPath: root, syncIntervalSeconds: 5 })
+      monitor.request(base.id); await monitor.tick()
+      expect(service.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(1)
+      await rename(root, root + '-offline')
+      monitor.request(base.id); await monitor.tick()
+      expect(monitor.states.get(base.id)?.state).toBe('disconnected')
+      expect(service.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(1)
+      await rename(root + '-offline', root)
+      await writeFile(join(root, 'b.txt'), 'Another watched item newly added.')
+      monitor.request(base.id); await monitor.tick()
+      expect(monitor.states.get(base.id)?.state).toBe('connected')
+      expect(service.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(2)
+      await service.updateExternalSource(base.id, { syncEnabled: false, syncIntervalSeconds: 30 })
+      monitor.request(base.id); await monitor.tick()
+      expect(monitor.states.get(base.id)?.state).toBe('paused')
+    } finally { monitor.stop(); await rm(root, { recursive: true, force: true }); await rm(root + '-offline', { recursive: true, force: true }) }
   })
 })

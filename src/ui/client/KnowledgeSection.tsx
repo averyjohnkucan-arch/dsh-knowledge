@@ -355,7 +355,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
     const pdfPreview = known?.sourceType === 'file' && (known.fileName ?? '').toLowerCase().endsWith('.pdf')
     await run(async () => {
       const [doc, chunkList] = await Promise.all([
-        api.getDocument(id, { rawTextLimit: pdfPreview ? 0 : PREVIEW_RAW_TEXT_LIMIT }),
+        api.getDocument(id, { rawTextLimit: PREVIEW_RAW_TEXT_LIMIT }),
         api.listChunks(id, PREVIEW_CHUNK_LIMIT),
       ])
       if (seq !== navSeq.current) return
@@ -450,9 +450,9 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
 
   // ── base actions ────────────────────────────────────────────────────────
 
-  const createBase = useCallback(async (name: string, description: string, group?: string): Promise<void> => {
+  const createBase = useCallback(async (name: string, description: string, group?: string, external?: { storageMode: 'internal' | 'external'; externalPath?: string; syncIntervalSeconds?: number }): Promise<void> => {
     await run(async () => {
-      const created = await api.createBase(name, description, group ?? '')
+      const created = await api.createBase(name, description, group ?? '', undefined, external)
       notify('success', `${t('newBase')}: ${name}`)
       setDialog(null)
       await refreshBases()
@@ -1291,7 +1291,15 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
     </div>
   )
 
-  const addSourceMenu: MenuEntry[] = [
+  useEffect(() => {
+    if (selectedBase?.storageMode !== 'external') return
+    const timer = window.setInterval(() => { void refreshBases(); void reloadDocuments() }, 3000)
+    return () => window.clearInterval(timer)
+  }, [selectedBase?.id, selectedBase?.storageMode, refreshBases, reloadDocuments])
+
+  const addSourceMenu: MenuEntry[] = selectedBase?.storageMode === 'external' ? [
+    { key: 'sync', label: t('syncNow'), onSelect: () => { void api.externalSettings(selectedBase.id, {}).then(refreshBases).catch(e => notify('error', String(e))) } },
+  ] : [
     { key: 'file', label: t('tabFile'), onSelect: () => fileInputRef.current?.click() },
     { key: 'dir', label: t('tabDir'), onSelect: () => dirInputRef.current?.click() },
     { key: 'path', label: t('tabPath'), onSelect: () => promptForPath() },
@@ -1474,6 +1482,19 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                 </span>
               </div>
 
+              {selectedBase.storageMode === 'external' && <div style={{ ...style.card, marginBottom: 12 }}>
+                <div style={{ fontSize: 13, color: ['disconnected', 'error'].includes(selectedBase.syncStatus?.state ?? '') ? C.warn : C.muted }} role="status">
+                  {['disconnected', 'error'].includes(selectedBase.syncStatus?.state ?? '') ? '⚠ ' : ''}
+                  {t('externalBase')} · {t(({ paused: 'syncPaused', connected: 'syncConnected', disconnected: 'syncDisconnected', checking: 'syncChecking', syncing: 'syncSyncing', error: 'syncError' } as const)[selectedBase.syncStatus?.state as 'connected'] ?? 'syncChecking')}
+                </div>
+                <div style={{ fontSize: 12, margin: '6px 0', overflowWrap: 'anywhere' }}>{selectedBase.externalPath}</div>
+                {selectedBase.syncStatus?.message && <div style={{ fontSize: 12, color: C.muted }}>{selectedBase.syncStatus.message}</div>}
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+                  <label><input type="checkbox" checked={selectedBase.syncEnabled !== false} onChange={e => { void api.externalSettings(selectedBase.id, { syncEnabled: e.target.checked }).then(refreshBases).catch(e => notify('error', String(e))) }} /> {t('syncEnabled')}</label>
+                  <label>{t('syncInterval')} <input aria-label={t('syncInterval')} type="number" min={5} max={86400} defaultValue={selectedBase.syncIntervalSeconds ?? 60} key={selectedBase.id} style={{ ...style.input, width: 90 }} onBlur={e => { void api.externalSettings(selectedBase.id, { syncIntervalSeconds: Number(e.target.value) }).then(refreshBases).catch(e => notify('error', String(e))) }} /></label>
+                </div>
+              </div>}
+
               {/* Base origin(s), between the name and the stats: directory
                   path / file / URL / node for manually added text. The pencil
                   repoints the base's source path (validated server-side). */}
@@ -1483,7 +1504,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                     <span key={source.sourceId} style={style.baseSourceItem}>
                       <span style={style.baseSourceGlyph}>{baseSourceGlyph(source.kind)}</span>
                       <span style={style.baseSourceText} title={source.text}>{source.text}</span>
-                      {source.sourcePath !== undefined && (
+                      {source.sourcePath !== undefined && selectedBase.storageMode !== 'external' && (
                         <button
                           className="kb-iconbtn"
                           style={{ ...style.baseSourceEdit, ...style.iconOnlyButton }}
@@ -1885,7 +1906,8 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
           groups={groups}
           initialGroup={dialog.initialGroup}
           busy={busy}
-          onCreate={(name, description, group) => void createBase(name, description, group)}
+          onPickFolder={() => api.pickFolder()}
+          onCreate={(name, description, group, external) => void createBase(name, description, group, external)}
           onClose={() => setDialog(null)}
         />
       )}
@@ -2464,7 +2486,9 @@ function DocumentDetailPanel(props: {
   onLoadMoreChunks: () => void
 }): JSX.Element {
   const { doc, t } = props
-  const [mode, setMode] = useState<'preview' | 'chunks' | 'evidence'>(props.initialMode)
+  const [mode, setMode] = useState<'preview' | 'chunks' | 'evidence' | 'original'>(props.initialMode)
+  const [highlight, setHighlight] = useState('')
+  const highlightAt = highlight && props.rawText ? props.rawText.indexOf(highlight) : -1
   const [pageIndex, setPageIndex] = useState(0)
   const showPage = (index: number): void => { setPageIndex(index); setMode('preview') }
   const [chunkExpansion, setChunkExpansion] = useState(collapsedChunkExpansion)
@@ -2484,7 +2508,7 @@ function DocumentDetailPanel(props: {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null)
   const [pdfPreviewError, setPdfPreviewError] = useState<string | null>(null)
   useEffect(() => {
-    if (!isPdfPreview || mode !== 'preview') return
+    if (!isPdfPreview || mode !== 'original') return
     let disposed = false
     let objectUrl: string | null = null
     setPdfUrl(null)
@@ -2534,6 +2558,7 @@ function DocumentDetailPanel(props: {
         </span>
         <span style={{ display: 'flex', gap: 2, background: C.surface2, borderRadius: 8, padding: 2, flexShrink: 0 }}>
           <button className="kb-row" style={tabStyle(mode === 'preview')} onClick={() => setMode('preview')}>{t('preview')}</button>
+          {doc.sourceType === 'file' && <a style={{ ...tabStyle(mode === 'original'), textDecoration: 'none' }} href={`/knowledge/documents/${doc.id}/raw?inline=1`} target="_blank" rel="noreferrer">{t('originalDocument')}</a>}
           <button className="kb-row" style={tabStyle(mode === 'chunks')} onClick={() => setMode('chunks')}>{t('chunks')} ({doc.chunkCount})</button>
           {doc.processing ? <button className="kb-row" style={tabStyle(mode === 'evidence')} onClick={() => setMode('evidence')}>{t('evidence')}</button> : null}
         </span>
@@ -2541,8 +2566,8 @@ function DocumentDetailPanel(props: {
 
       <ProcessingSummary processing={doc.processing} t={t} />
       <div className="kb-scroll" style={{ maxHeight: 'calc(100vh - 250px)', overflowY: 'auto' }}>
-        {mode === 'evidence' ? <EvidenceInspector key={`${doc.id}-${doc.processing?.revision}`} api={props.api} documentId={doc.id} revision={doc.processing?.revision} t={t} onPage={showPage} /> : mode === 'preview' ? (
-          isPdfPreview ? (
+        {mode === 'evidence' ? <EvidenceInspector key={`${doc.id}-${doc.processing?.revision}`} api={props.api} documentId={doc.id} revision={doc.processing?.revision} t={t} onPage={showPage} /> : mode === 'preview' || mode === 'original' ? (
+          isPdfPreview && mode === 'original' ? (
             pdfPreviewError !== null ? (
               <div style={style.empty}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: C.danger, marginBottom: 6 }}>{t('pdfPreviewFailed')}</div>
@@ -2576,7 +2601,7 @@ function DocumentDetailPanel(props: {
             {props.rawText === null || props.rawText === '' ? (
               <div style={style.empty}>{t('noDocsHint')}</div>
             ) : (
-              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, margin: 0, color: C.text, lineHeight: 1.6, wordBreak: 'break-word', fontFamily: 'inherit' }}>{props.rawText}</pre>
+              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, margin: 0, color: C.text, lineHeight: 1.6, wordBreak: 'break-word', fontFamily: 'inherit' }}>{highlightAt >= 0 && props.rawText ? <>{props.rawText.slice(0, highlightAt)}<mark ref={node => node?.scrollIntoView({ block: 'center' })} style={{ ...style.mark, color: 'inherit' }}>{props.rawText.slice(highlightAt, highlightAt + highlight.length)}</mark>{props.rawText.slice(highlightAt + highlight.length)}</> : props.rawText}</pre>
             )}
           </>
           )
@@ -2624,6 +2649,7 @@ function DocumentDetailPanel(props: {
                         {chunk.heading !== undefined ? chunk.heading : ''}
                       </span>
                       <span style={{ fontSize: 11, color: C.muted, flexShrink: 0 }}>{estimateTokens(chunk.text)} tokens</span>
+                      <button style={style.button} disabled={!props.rawText?.includes(chunk.text)} onClick={() => { setHighlight(chunk.text); setMode('preview') }}>{t('showInDocument')}</button>
                       <button
                         type="button"
                         className="kb-iconbtn"

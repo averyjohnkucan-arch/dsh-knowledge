@@ -65,6 +65,10 @@ export const baseConfigSchema = z.object({
 })
 
 const baseSchema = z.object({
+  storageMode: z.enum(['internal', 'external']).optional(),
+  externalPath: z.string().optional(),
+  syncEnabled: z.boolean().optional(),
+  syncIntervalSeconds: z.number().int().gte(5).lte(86400).optional(),
   id: z.string(),
   name: z.string(),
   description: z.string(),
@@ -102,6 +106,7 @@ const documentSchema = z.object({
    *  (Cherry's pathStorage): reindexing the container rescans the path and
    *  picks up new/removed files. Absent on legacy/created containers. */
   sourcePath: z.string().optional(),
+  sourceSignature: z.string().optional(),
   contentHash: z.string().optional(),
   rawFilePath: z.string().optional(),
   rawText: z.string().optional(),

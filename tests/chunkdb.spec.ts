@@ -236,3 +236,18 @@ describe('ChunkDatabase FTS migration recovery', () => {
     }
   })
 })
+
+
+describe('bulk KB generation removal', () => {
+  it('purges only the selected KB and preserves another KB candidate', () => {
+    const db = open()
+    for (const baseId of ['deleted', 'retained']) {
+      const doc = { id: baseId + '-doc', baseId, title: 'test', sourceType: 'text' as const, charCount: 5, chunkCount: 1, createdAt: 1, updatedAt: 2 }
+      db.stageDocumentGeneration(doc, [{ id: baseId + '-chunk', docId: doc.id, baseId, index: 0, text: 'hello' }])
+    }
+    db.discardBaseGenerations('deleted')
+    expect(db.stagedDocumentHeaders().map(x => x.id)).toEqual(['retained-doc'])
+    db.discardBaseGenerations('deleted')
+    db.close()
+  })
+})

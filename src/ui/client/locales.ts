@@ -19,6 +19,23 @@ export type KnowledgeKey =
   | 'stageNormalizing' | 'stageIndexing' | 'stageCompleted' | 'stageFailed' | 'stageCanceled'
   | 'nav'
   | 'newBase'
+  | 'storageMode'
+  | 'internalBase'
+  | 'externalBase'
+  | 'externalFolder'
+  | 'browseFolder'
+  | 'externalHint'
+  | 'syncInterval'
+  | 'syncPaused'
+  | 'syncConnected'
+  | 'syncDisconnected'
+  | 'syncChecking'
+  | 'syncSyncing'
+  | 'syncError'
+  | 'syncNow'
+  | 'syncEnabled'
+  | 'originalDocument'
+  | 'showInDocument'
   | 'baseName'
   | 'baseDescription'
   | 'create'
@@ -397,6 +414,23 @@ export const zh: Record<KnowledgeKey, string> = {
   stageDownloading: '下载解析结果', stageNormalizing: '整理结构证据', stageIndexing: '建立索引', stageCompleted: '处理完成', stageFailed: '处理失败', stageCanceled: '已取消',
   nav: '知识库',
   newBase: '新建知识库',
+  storageMode: '存储方式',
+  internalBase: '内部 — 导入副本',
+  externalBase: '外部 — 同步文件夹',
+  externalFolder: 'DSH 主机上的源文件夹',
+  browseFolder: '浏览…',
+  externalHint: '原文件保留在此文件夹中。DSH 仅保存解析文本、索引和嵌入。顶级文件夹断开时保留索引。',
+  syncInterval: '同步检查间隔（秒）',
+  syncPaused: '已暂停',
+  syncConnected: '已连接',
+  syncDisconnected: '已断开 — 保留索引',
+  syncChecking: '正在检查源文件夹…',
+  syncSyncing: '同步中…',
+  syncError: '同步需要检查',
+  syncNow: '立即同步',
+  syncEnabled: '自动同步此文件夹',
+  originalDocument: '原始文件',
+  showInDocument: '在文档中显示',
   baseName: '名称',
   baseDescription: '描述',
   create: '创建',
@@ -773,6 +807,23 @@ export const en: Record<KnowledgeKey, string> = {
   stageDownloading: 'Downloading results', stageNormalizing: 'Normalizing evidence', stageIndexing: 'Indexing', stageCompleted: 'Completed', stageFailed: 'Failed', stageCanceled: 'Canceled',
   nav: 'Knowledge',
   newBase: 'New base',
+  storageMode: 'Storage',
+  internalBase: 'Internal — imported copies',
+  externalBase: 'External — synced folder',
+  externalFolder: 'Source folder on the DSH host',
+  browseFolder: 'Browse…',
+  externalHint: 'Original files stay in this folder. Only parsed text, search indexes and embeddings are stored in DSH. An unavailable top-level folder retains its index.',
+  syncInterval: 'Reconciliation interval (seconds)',
+  syncPaused: 'Paused',
+  syncConnected: 'Connected',
+  syncDisconnected: 'Disconnected — indexed knowledge retained',
+  syncChecking: 'Checking source folder…',
+  syncSyncing: 'Synchronizing…',
+  syncError: 'Sync needs attention',
+  syncNow: 'Sync now',
+  syncEnabled: 'Automatically sync this folder',
+  originalDocument: 'Original',
+  showInDocument: 'Show in document',
   baseName: 'Name',
   baseDescription: 'Description',
   create: 'Create',

@@ -756,6 +756,19 @@ export class ChunkDatabase implements RetrievalLane {
     this.db.prepare('DELETE FROM document_generation_commit WHERE doc_id = ?').run(docId)
   }
 
+  /** Purge a KB's pending/committed generations with three scoped SQL deletes. */
+  discardBaseGenerations(baseId: string): void {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`DELETE FROM document_generation_chunk WHERE doc_id IN
+        (SELECT doc_id FROM document_generation_stage WHERE base_id = ?
+         UNION SELECT doc_id FROM document_generation_commit WHERE base_id = ?)`).run(baseId, baseId)
+      this.db.prepare('DELETE FROM document_generation_stage WHERE base_id = ?').run(baseId)
+      this.db.prepare('DELETE FROM document_generation_commit WHERE base_id = ?').run(baseId)
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
   discardDocumentGenerations(docId: string): void {
     this.db.exec('BEGIN IMMEDIATE')
     try {

@@ -20,6 +20,7 @@ import { probeMineruLocal } from './mineru-local.js'
 import { MineruDeployment } from './mineru-deployment.js'
 import type { DocumentEvidence, ProcessingProgress } from './processing-types.js'
 import { composeDocumentEvidence } from './evidence.js'
+import { ExternalFolders, externalFile, readableRoot, pickFolder } from './external-folders.js'
 import { ProcessingQueue } from './processing-queue.js'
 import { processingBudget } from './processor-transport.js'
 import { composeContextWindow, estimateContextTokens, serializeContextWindow } from './context.js'
@@ -305,6 +306,9 @@ export class KnowledgeService extends Service {
   /** Last rerank failure code per model; only state transitions are logged. */
   private readonly rerankLogState = new Map<string, string>()
   private artifacts = new ArtifactRepository()
+  private externalFolders?: ExternalFolders
+  private syncingRoots = new Set<string>()
+  private shuttingDown = false
   private readonly processingQueue = new ProcessingQueue()
   private readonly processingProgress = new Map<string, ProcessingProgress>()
   private readonly processingControllers = new Map<string, AbortController>()
@@ -413,6 +417,18 @@ export class KnowledgeService extends Service {
     })
     void resume.catch(error => this.ctx.logger.warn(`knowledge: interrupted-import recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     this.armUrlRefreshTimer()
+    this.externalFolders = new ExternalFolders(() => this.requireStore().listBases()
+      .filter(base => base.storageMode === 'external' && base.externalPath)
+      .map(base => ({ id: base.id, path: base.externalPath!, enabled: base.syncEnabled !== false,
+        intervalMs: (base.syncIntervalSeconds ?? 60) * 1000 })), async id => {
+      const base = this.requireStore().getBase(id)
+      if (!base?.externalPath || this.shuttingDown) return
+      const result = await this.importDirectoryTree(id, base.externalPath)
+      await readableRoot(base.externalPath)
+      if (result.sync && result.sync.failed > 0) throw new Error(`${result.sync.failed} source item(s) could not be indexed; previous indexed data was retained where available`)
+    })
+    this.ctx.effect(() => () => { this.shuttingDown = true; this.externalFolders?.stop() }, 'knowledge: external folder listeners')
+    this.externalFolders.start()
   }
 
   // ── scheduled URL refresh (Cherry's snapshot + manual refresh, automated) ──
@@ -659,7 +675,28 @@ export class KnowledgeService extends Service {
 
   // ── bases ─────────────────────────────────────────────────────────────────
 
+  assertInternalImport(baseId: string): void {
+    if (this.requireStore().getBase(baseId)?.storageMode === 'external') throw new Error('External knowledge mirrors its selected folder. Add or remove files in that folder instead.')
+  }
+
+  async pickSourceFolder(): Promise<{ path: string | null }> { return { path: await pickFolder() } }
+
+  async updateExternalSource(id: string, request: UpdateBaseRequest): Promise<KnowledgeBase> {
+    const store = this.requireStore(), base = store.getBase(id)
+    if (!base || base.storageMode !== 'external') throw new Error('External knowledge base not found')
+    if (request.externalPath !== undefined && request.externalPath !== base.externalPath) throw new Error('Create a new external base to select a different source folder')
+    const seconds = request.syncIntervalSeconds ?? base.syncIntervalSeconds ?? 60
+    if (!Number.isInteger(seconds) || seconds < 5 || seconds > 86400) throw new Error('Sync interval must be 5–86400 seconds')
+    const next = { ...base, syncEnabled: request.syncEnabled ?? base.syncEnabled ?? true, syncIntervalSeconds: seconds, updatedAt: Date.now() }
+    await store.putBase(next); this.externalFolders?.request(id); return next
+  }
+
   async createBase(request: CreateBaseRequest): Promise<KnowledgeBase> {
+    const mode = request.storageMode ?? 'internal'
+    if (!['internal', 'external'].includes(mode)) throw new Error('Invalid storage mode')
+    const externalPath = mode === 'external' ? await this.canonicalDirectoryPath(request.externalPath ?? '') : undefined
+    const interval = request.syncIntervalSeconds ?? 60
+    if (!Number.isInteger(interval) || interval < 5 || interval > 86400) throw new Error('Sync interval must be 5–86400 seconds')
     const name = request.name.trim()
     if (name.length === 0) throw new Error('base name is required')
     const now = Date.now()
@@ -672,12 +709,14 @@ export class KnowledgeService extends Service {
       id: crypto.randomUUID(),
       name,
       description: request.description?.trim() ?? '',
+      storageMode: mode, ...(externalPath ? { externalPath, syncEnabled: request.syncEnabled ?? true, syncIntervalSeconds: interval } : {}),
       ...(group !== undefined && group.length > 0 ? { group } : {}),
       ...(request.config !== undefined ? { config: compactBaseConfig(request.config) } : {}),
       createdAt: now,
       updatedAt: now,
     }
     await store.putBase(base)
+    if (mode === 'external') this.externalFolders?.request(base.id)
     return base
   }
 
@@ -741,14 +780,18 @@ export class KnowledgeService extends Service {
         this.indexing.delete(docId)
       }
     }
-    // Two statements: the base record plus one chunk sweep by base id.
-    await store.deleteChunksByBase(id)
-    await store.raw?.deleteBase(id)
+    for (const job of this.jobs.values()) if (job.baseId === id && !job.done) job.cancelled = true
+    // Remove the durable base first: pending writers fail closed immediately.
+    // Child metadata remains unreachable; DomainKV has no supported bulk
+    // delete API, and per-document deletes rewrite its whole backing unit.
     await store.deleteBase(id)
-    await this.artifacts.deleteBase(id)
-    // A whole-base delete frees a large chunk of pages; hand them back to the
-    // OS (threshold-gated, so a small base never pays for a VACUUM).
-    await this.reconcileAfterDelete()
+    await Promise.all([
+      store.deleteChunksByBase(id),
+      store.raw?.deleteBase(id),
+      this.artifacts.deleteBase(id),
+    ])
+    // Do not scan other KBs or VACUUM the shared SQLite database in this
+    // request. Its reusable free pages are reclaimed by normal maintenance.
     // Keep a selected id as a stale marker. If it was the last selected base,
     // enabledScope() must resolve to [] (fail closed), never broaden to all.
   }
@@ -825,12 +868,15 @@ export class KnowledgeService extends Service {
       const chunkCount = documents.reduce((sum, doc) => sum + doc.chunkCount, 0)
       const charCount = documents.reduce((sum, doc) => sum + doc.charCount, 0)
       const tokenCount = documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
-      const storedDocCount = documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined ? 1 : 0), 0)
+      const storedDocCount = documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined || base.storageMode === 'external' && doc.processing !== undefined ? 1 : 0), 0)
       const sourceInfo = baseSourceLines(documents)
       return {
         id: base.id,
         name: base.name,
         description: base.description,
+        storageMode: base.storageMode ?? 'internal', externalPath: base.externalPath,
+        syncEnabled: base.syncEnabled, syncIntervalSeconds: base.syncIntervalSeconds,
+        syncStatus: this.externalFolders?.states.get(base.id),
         ...(base.group !== undefined ? { group: base.group } : {}),
         documentCount: documents.length,
         storedDocCount,
@@ -890,6 +936,7 @@ export class KnowledgeService extends Service {
   // ── documents ─────────────────────────────────────────────────────────────
 
   async addTextDocument(request: AddTextDocumentRequest): Promise<KnowledgeDocument> {
+    this.assertInternalImport(request.baseId)
     const store = this.requireStore()
     if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
     if (request.content.trim().length === 0) throw new Error('document content is empty')
@@ -903,6 +950,7 @@ export class KnowledgeService extends Service {
   }
 
   async addFileDocument(request: AddFileDocumentRequest): Promise<KnowledgeDocument & { skipped?: boolean }> {
+    this.assertInternalImport(request.baseId)
     const store = this.requireStore()
     if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
     // Reject unsupported formats before the row is created (Cherry's
@@ -1094,6 +1142,7 @@ export class KnowledgeService extends Service {
    * caller re-submits with contents under the rename strategy.
    */
   async addFiles(request: AddFilesRequest): Promise<AddFilesResult> {
+    this.assertInternalImport(request.baseId)
     const store = this.requireStore()
     if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
     for (const file of request.files) {
@@ -1142,6 +1191,7 @@ export class KnowledgeService extends Service {
 
   /** Start importing a local directory as a cancellable background job. */
   async importDirectory(request: ImportDirectoryRequest): Promise<{ jobId: string; total: number }> {
+    this.assertInternalImport(request.baseId)
     const store = this.requireStore()
     if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
     const files = await scanDirectory(request.path)
@@ -1199,6 +1249,7 @@ export class KnowledgeService extends Service {
   /** Create a directory container item (no chunks) under an optional parent. */
   async createDirectory(baseId: string, title: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
     const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
     const document: KnowledgeDocument = {
       id: crypto.randomUUID(),
       baseId,
@@ -1306,6 +1357,8 @@ export class KnowledgeService extends Service {
     const store = this.requireStore()
     if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
     const sourcePath = await this.canonicalDirectoryPath(path)
+    const base = store.getBase(baseId)
+    if (base?.storageMode === 'external' && (base.externalPath !== sourcePath || parentDirectoryId !== undefined)) throw new Error('External bases can only synchronize their selected top-level source folder')
     if (parentDirectoryId !== undefined) {
       const parent = store.getDocument(parentDirectoryId)
       if (parent === undefined || parent.baseId !== baseId || parent.sourceType !== 'directory') {
@@ -1397,6 +1450,7 @@ export class KnowledgeService extends Service {
    * and editing one must never redirect its siblings.
    */
   async setBaseSourcePath(baseId: string, sourceId: string, path: string): Promise<{ set: number }> {
+    this.assertInternalImport(baseId)
     const store = this.requireStore()
     if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
     const source = store.getDocument(sourceId)
@@ -1459,6 +1513,7 @@ export class KnowledgeService extends Service {
   }
 
   async addUrlDocument(request: ImportUrlRequest): Promise<KnowledgeDocument> {
+    this.assertInternalImport(request.baseId)
     const store = this.requireStore()
     if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
     const html = await fetchHtml(request.url)
@@ -1882,7 +1937,7 @@ export class KnowledgeService extends Service {
             failedLiveSourceWasPdf = extensionOf(fileName) === 'pdf'
             throw error
           }
-          if (store.raw !== undefined) {
+          if (store.raw !== undefined && store.getBase(document.baseId)?.storageMode !== 'external') {
             // Always stage to a fresh path. The caller switches the document
             // reference only after chunks and metadata commit successfully.
             const nextRaw = await store.raw.write(document.baseId, crypto.randomUUID(), safeRawExtension(fileName), buffer)
@@ -1975,6 +2030,13 @@ export class KnowledgeService extends Service {
     sourcePath: string,
     mode: 'created' | 'synced',
   ): Promise<DirectorySyncResult> {
+    if (this.syncingRoots.has(root.id)) throw new Error('Source folder is already synchronizing')
+    this.syncingRoots.add(root.id)
+    try { return await this.performDirectorySync(root, sourcePath, mode) }
+    finally { this.syncingRoots.delete(root.id) }
+  }
+
+  private async performDirectorySync(root: KnowledgeDocument, sourcePath: string, mode: 'created' | 'synced'): Promise<DirectorySyncResult> {
     const store = this.requireStore()
     if (root.sourceType !== 'directory') throw new Error('directory sync requires a directory source')
     const canonicalSource = await this.canonicalDirectoryPath(sourcePath)
@@ -2082,6 +2144,9 @@ export class KnowledgeService extends Service {
     items: DirectorySyncItem[]
   }): Promise<void> {
     const { rootPath, diskPath, directory, depth, childrenByParent, items } = args
+    const store = this.requireStore()
+    if (this.shuttingDown || !store.getBase(directory.baseId)) throw new Error('Folder synchronization stopped')
+    if (store.getBase(directory.baseId)?.storageMode === 'external') await readableRoot(rootPath)
     if (depth > DIRECTORY_MAX_DEPTH) {
       items.push({
         relativePath: this.relativeSourcePath(rootPath, diskPath),
@@ -2119,6 +2184,8 @@ export class KnowledgeService extends Service {
       const expectedKind = child.sourceType === 'directory' ? 'directory' : child.sourceType === 'file' ? 'file' : undefined
       if (expectedKind === undefined || (actualKind === expectedKind) || actualKind === undefined && entry !== undefined) continue
       try {
+        // Root loss is a disconnection, never evidence of mass deletion.
+        await readableRoot(rootPath)
         await this.deleteTrackedSyncSubtree(child, rootPath, items)
         children = children.filter(candidate => candidate.id !== child.id)
         childrenByParent.set(directory.id, children)
@@ -2134,6 +2201,9 @@ export class KnowledgeService extends Service {
     }
 
     for (const entry of entries) {
+      if (this.shuttingDown || store.getBase(directory.baseId) === undefined || store.getDocument(directory.id) === undefined) {
+        throw new Error('directory sync canceled: source or knowledge base was deleted')
+      }
       const fullPath = join(diskPath, entry.name)
       const relativePath = this.relativeSourcePath(rootPath, fullPath)
       if (entry.isDirectory()) {
@@ -2182,6 +2252,8 @@ export class KnowledgeService extends Service {
         continue
       }
       try {
+        const before = await stat(fullPath)
+        const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
         let document = resolved.document
         let action: DirectorySyncItem['action']
         if (document === undefined) {
@@ -2198,6 +2270,12 @@ export class KnowledgeService extends Service {
             document = refreshed
           }
         }
+        if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
+          const fileStat = await stat(fullPath)
+          const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+          const fresh = store.getDocument(document.id)
+          if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
+        }
         items.push({ relativePath, kind: 'file', documentId: document.id, action })
       } catch (error) {
         items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: this.directoryItemError(error) })
@@ -2213,9 +2291,14 @@ export class KnowledgeService extends Service {
    * like uploads if the host stops during a long-running processor call. */
   private async ingestPathFile(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
     const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
+    const externalRoot = store.getBase(baseId)?.storageMode === 'external' ? store.getBase(baseId)?.externalPath : undefined
+    if (externalRoot) await externalFile(externalRoot, sourcePath)
     const buffer = await readFile(sourcePath)
+    if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
     const documentId = crypto.randomUUID()
-    const rawFilePath = await store.raw?.write(baseId, documentId, safeRawExtension(fileName), buffer)
+    const isExternal = store.getBase(baseId)?.storageMode === 'external'
+    const rawFilePath = isExternal ? undefined : await store.raw?.write(baseId, documentId, safeRawExtension(fileName), buffer)
     const controller = new AbortController()
     try {
       if (store.getBase(baseId) === undefined) throw new NotFoundError('knowledge base no longer exists')
@@ -2253,6 +2336,10 @@ export class KnowledgeService extends Service {
   private async syncDirectoryFile(document: KnowledgeDocument, sourcePath: string, fileName: string): Promise<'updated' | 'unchanged'> {
     if (this.indexing.has(document.id)) throw new Error(`"${document.title}" is still being indexed — try again when it finishes`)
     const store = this.requireStore()
+    const fileStat = await stat(sourcePath)
+    const signature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+    const isExternal = store.getBase(document.baseId)?.storageMode === 'external'
+    if (isExternal && document.sourceSignature === signature && !document.incomplete && !document.embeddingError) return 'unchanged'
     const buffer = await readFile(sourcePath)
     const bound = await this.bindDocumentSourcePath(document, sourcePath)
     const stored = bound.rawFilePath !== undefined ? await store.raw?.read(bound.rawFilePath) : undefined
@@ -3037,7 +3124,17 @@ export class KnowledgeService extends Service {
   async getRawFile(id: string): Promise<{ bytes: Uint8Array; fileName: string; mimeType?: string } | undefined> {
     const store = this.requireStore()
     const doc = store.getDocument(id)
-    if (doc === undefined || doc.rawFilePath === undefined) return undefined
+    if (doc === undefined) return undefined
+    const base = store.getBase(doc.baseId)
+    if (base?.storageMode === 'external') {
+      if (!base.externalPath || !doc.sourcePath) return undefined
+      const path = await externalFile(base.externalPath, doc.sourcePath)
+      if ((await stat(path)).size > 100 * 1024 * 1024) throw new Error('Original exceeds 100 MiB download limit')
+      const bytes = await readFile(path)
+      if (store.getBase(doc.baseId)?.externalPath !== base.externalPath || !store.getDocument(id)) throw new Error('Original source is no longer selected')
+      return { bytes, fileName: doc.fileName ?? basename(path), mimeType: doc.mimeType ?? (path.toLowerCase().endsWith('.pdf') ? 'application/pdf' : /\.(txt|md|markdown|log|csv)$/i.test(path) ? 'text/plain; charset=utf-8' : undefined) }
+    }
+    if (doc.rawFilePath === undefined) return undefined
     const bytes = await store.raw?.read(doc.rawFilePath)
     if (bytes === null || bytes === undefined) return undefined
     return { bytes, fileName: doc.fileName ?? doc.title, mimeType: doc.mimeType }
@@ -3782,6 +3879,7 @@ export class KnowledgeService extends Service {
   }, signal?: AbortSignal): Promise<KnowledgeDocument> {
     const store = this.requireStore()
     const config = this.getConfigFor(input.baseId)
+    if (store.getBase(input.baseId)?.storageMode === 'external' && (!input.sourcePath || input.sourceType !== 'file')) throw new Error('External bases only accept files from their selected source folder')
     const contentHash = sha256(input.text)
     // Dedup check + first persist run under the per-base write lock: concurrent
     // imports of identical content must not both pass the check (Cherry guards
@@ -3796,7 +3894,7 @@ export class KnowledgeService extends Service {
       if (input.placeholderId !== undefined && store.getDocument(input.placeholderId) === undefined) {
         throw new Error('document no longer exists (deleted while indexing)')
       }
-      for (const doc of store.listDocuments(input.baseId)) {
+      for (const doc of store.getBase(input.baseId)?.storageMode === 'external' ? [] : store.listDocuments(input.baseId)) {
         if (doc.id === input.placeholderId) continue
         if (doc.contentHash === contentHash) {
           throw new Error(`duplicate document: "${doc.title}" already contains identical content`)
