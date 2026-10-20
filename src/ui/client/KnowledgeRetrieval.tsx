@@ -48,8 +48,9 @@ export function KnowledgeRetrieval({ node }: { node: { data: ReturnType<typeof r
   const passages = parseRetrievalPassages(text)
   const linkStyle = { color: 'var(--dsw-alias-brand-primary, #80b6ff)' }
   return <details data-knowledge-retrieval style={{ color: 'var(--dsw-alias-label-secondary, #aaa)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)', margin: '4px 0 8px' }}>
-    <summary style={{ cursor: 'pointer', lineHeight: '24px' }}>Knowledge retrieved — {count} {count === 1 ? 'passage' : 'passages'}</summary>
+    <summary style={{ cursor: 'pointer', lineHeight: '24px' }}>Automatic knowledge retrieval — {count} {count === 1 ? 'passage' : 'passages'}</summary>
     <div style={{ marginLeft: 20 }}>
+      <p style={{ margin: '6px 0 10px', lineHeight: 1.6 }}>These passages were found automatically and may or may not be relevant to your message.</p>
       {passages.length > 0 && <nav aria-label="Retrieved sources" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, margin: '6px 0 12px' }}>
         {passages.filter(p => p.documentId).map((p, index) => <a key={`${p.documentId}:${p.chunkId}:${index}`} title={p.title} href={`/knowledge/documents/${encodeURIComponent(p.documentId)}/raw?inline=1`} target="_blank" rel="noreferrer" style={linkStyle}>Original {index + 1}</a>)}
       </nav>}
