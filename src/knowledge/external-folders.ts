@@ -26,47 +26,58 @@ export class ExternalFolders {
   private forced = new Set<string>()
   private next = new Map<string, number>()
   private stopped = false
-  private busy = false
+  private running = new Set<string>()
   private timer?: ReturnType<typeof setInterval>
   constructor(private sources: () => FolderSource[], private sync: (id: string) => Promise<void>) {}
   start(): void { this.timer = setInterval(() => { void this.tick() }, 1000); this.timer.unref?.(); void this.tick() }
   async tick(): Promise<void> {
-    if (this.stopped || this.busy) return
-    this.busy = true
+    if (this.stopped) return
+    const sources = this.sources(), ids = new Set(sources.map(s => s.id))
+    for (const [id, entry] of this.watchers) if (!ids.has(id)) { entry.watcher.close(); this.watchers.delete(id) }
+    for (const id of this.states.keys()) if (!ids.has(id)) { this.states.delete(id); this.next.delete(id); this.pending.delete(id); this.forced.delete(id) }
+    const tasks: Promise<void>[] = []
+    for (const source of sources) {
+      if (this.running.has(source.id)) continue
+      const force = this.forced.has(source.id)
+      if (!source.enabled && !force) { this.watchers.get(source.id)?.watcher.close(); this.watchers.delete(source.id); this.states.set(source.id, { state: 'paused' }); continue }
+      // One large library must not starve another source's state or manual scan.
+      if (this.running.size >= 2) continue
+      if (!this.pending.has(source.id) && !force && Date.now() < (this.next.get(source.id) ?? 0)) continue
+      this.pending.delete(source.id); this.forced.delete(source.id)
+      this.running.add(source.id)
+      tasks.push(this.reconcile(source).finally(() => { this.running.delete(source.id) }))
+    }
+    await Promise.all(tasks)
+  }
+  private async reconcile(source: FolderSource): Promise<void> {
+    const current = () => !this.stopped && this.sources().some(s => s.id === source.id && s.path === source.path)
+    this.states.set(source.id, { state: 'checking' })
+    try { await readableRoot(source.path) } catch {
+      if (!current()) return
+      this.watchers.get(source.id)?.watcher.close(); this.watchers.delete(source.id)
+      this.states.set(source.id, { state: 'disconnected', message: 'Top-level folder is unavailable. Indexed knowledge is retained.', checkedAt: Date.now() })
+      this.next.set(source.id, Date.now() + Math.min(source.intervalMs, 10000)); return
+    }
+    if (!current()) return
+    const previous = this.watchers.get(source.id)
+    if (source.enabled && previous?.path !== source.path) {
+      previous?.watcher.close(); this.watchers.delete(source.id)
+      try {
+        const watcher = watch(source.path, { recursive: true, persistent: false }, () => { this.pending.add(source.id) })
+        watcher.on('error', () => { watcher.close(); this.watchers.delete(source.id); this.pending.add(source.id) })
+        this.watchers.set(source.id, { path: source.path, watcher })
+      } catch { /* Polling remains available on filesystems without recursive watches. */ }
+    }
+    this.states.set(source.id, { state: 'syncing' })
     try {
-      const sources = this.sources(), ids = new Set(sources.map(s => s.id))
-      for (const [id, entry] of this.watchers) if (!ids.has(id)) { entry.watcher.close(); this.watchers.delete(id) }
-      for (const id of this.states.keys()) if (!ids.has(id)) { this.states.delete(id); this.next.delete(id); this.pending.delete(id) }
-      for (const source of sources) {
-        if (this.stopped) break
-        const force = this.forced.delete(source.id)
-        if (!source.enabled && !force) { this.watchers.get(source.id)?.watcher.close(); this.watchers.delete(source.id); this.states.set(source.id, { state: 'paused' }); continue }
-        if (!this.pending.delete(source.id) && !force && Date.now() < (this.next.get(source.id) ?? 0)) continue
-        this.states.set(source.id, { state: 'checking' })
-        try { await readableRoot(source.path) } catch {
-          this.watchers.get(source.id)?.watcher.close(); this.watchers.delete(source.id)
-          this.states.set(source.id, { state: 'disconnected', message: 'Top-level folder is unavailable. Indexed knowledge is retained.', checkedAt: Date.now() })
-          this.next.set(source.id, Date.now() + Math.min(source.intervalMs, 10000)); continue
-        }
-        const previous = this.watchers.get(source.id)
-        if (source.enabled && previous?.path !== source.path) {
-          previous?.watcher.close(); this.watchers.delete(source.id)
-          try {
-            const watcher = watch(source.path, { recursive: true, persistent: false }, () => { this.pending.add(source.id) })
-            watcher.on('error', () => { watcher.close(); this.watchers.delete(source.id); this.pending.add(source.id) })
-            this.watchers.set(source.id, { path: source.path, watcher })
-          } catch { /* Polling remains available on filesystems without recursive watches. */ }
-        }
-        this.states.set(source.id, { state: 'syncing' })
-        try { await this.sync(source.id); this.states.set(source.id, { state: source.enabled ? 'connected' : 'paused', checkedAt: Date.now() }) }
-        catch (error) {
-          let state: FolderState['state'] = 'error'
-          try { await readableRoot(source.path) } catch { state = 'disconnected' }
-          this.states.set(source.id, { state, message: error instanceof Error ? error.message : String(error), checkedAt: Date.now() })
-        }
-        this.next.set(source.id, Date.now() + source.intervalMs)
-      }
-    } finally { this.busy = false }
+      await this.sync(source.id)
+      if (current()) this.states.set(source.id, { state: this.sources().find(s => s.id === source.id)?.enabled ? 'connected' : 'paused', checkedAt: Date.now() })
+    } catch (error) {
+      let state: FolderState['state'] = 'error'
+      try { await readableRoot(source.path) } catch { state = 'disconnected' }
+      if (current()) this.states.set(source.id, { state, message: error instanceof Error ? error.message : String(error), checkedAt: Date.now() })
+    }
+    if (current()) this.next.set(source.id, Date.now() + source.intervalMs)
   }
   request(id: string, force = false): void { this.pending.add(id); if (force) this.forced.add(id) }
   stop(): void { this.stopped = true; if (this.timer) clearInterval(this.timer); for (const w of this.watchers.values()) w.watcher.close(); this.watchers.clear() }

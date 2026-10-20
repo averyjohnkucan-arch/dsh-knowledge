@@ -36,6 +36,7 @@ function load(file: string, modules: Record<string, unknown>, globals: Record<st
 
 function clientEntry(globals: Record<string, unknown> = {}) {
   return load('index.tsx', {
+    './KnowledgeRetrieval.js': { KnowledgeRetrieval: () => null, retrievalDefinition: {} },
     './api.js': { KnowledgeApi: class {} },
     './KnowledgeSection.js': { KnowledgePanel: () => null, SidebarKnowledgeAction: () => null },
     './LocalModelsSection.js': { LocalModelsSection: mineruPlaceholder },
@@ -77,6 +78,7 @@ async function cordisClientFixture(globals: Record<string, unknown> = {}, prepar
     inject: (_name: string, callback: () => void) => callback(),
     register: (options: Record<string, unknown>, component: unknown) => { registrations.push({ options, component }) },
   })
+  ctx.provide('uiConversation', { events: { register: () => () => {} } })
   ctx.provide('locale', { register: () => () => {}, bind: () => translate })
   new RemoteRoot(ctx)
   await prepare?.(ctx)
@@ -337,6 +339,7 @@ describe('directory action injection (#42)', () => {
     }
     const get = vi.fn((name: string) => services[name])
     const entry = load('index.tsx', {
+      './KnowledgeRetrieval.js': { KnowledgeRetrieval: () => null, retrievalDefinition: {} },
       './api.js': { KnowledgeApi: class {} },
       './KnowledgeSection.js': { KnowledgePanel: () => null, SidebarKnowledgeAction: () => null },
       './LocalModelsSection.js': { LocalModelsSection: mineruPlaceholder },
@@ -419,7 +422,7 @@ describe('Cordis directory service integration (#47)', () => {
     fixture.ctx.provide('uiWorkspace', uiWorkspace)
     await expect(directoryActions.pickDirectory?.()).resolves.toBe('C:\\ui')
     expect(uiWorkspace.pickDirectory).toHaveBeenCalledOnce()
-    expect(fixture.registrations.map(item => item.options.id)).toEqual(['knowledge', 'knowledge', 'local-models'])
+    expect(fixture.registrations.map(item => item.options.id).filter(Boolean)).toEqual(['knowledge', 'knowledge', 'local-models'])
   })
 
   it('keeps the native picker usable on a host without a session namespace or workspace picker', async () => {
@@ -478,6 +481,6 @@ describe('Cordis directory service integration (#47)', () => {
     await retainedOpen('C:\\replacement-cache')
     expect(replacement.requests).toEqual([{ path: 'C:\\replacement-cache' }])
     expect(first.requests).toHaveLength(1)
-    expect(fixture.registrations).toHaveLength(3)
+    expect(fixture.registrations).toHaveLength(4)
   })
 })

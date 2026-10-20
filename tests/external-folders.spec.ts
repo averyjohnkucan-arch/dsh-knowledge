@@ -60,3 +60,26 @@ it('reconciles once on demand while automatic synchronization is paused', async 
     await monitor.tick(); expect(calls).toBe(1)
   } finally { monitor.stop(); await rm(root, { recursive: true, force: true }) }
 })
+
+it('services other folders while a large source is still indexing and never overlaps one source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kb-parallel-'))
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  const calls: string[] = []
+  const sources = [
+    { id: 'large', path: root, intervalMs: 60000, enabled: true },
+    { id: 'small', path: root, intervalMs: 60000, enabled: true },
+    { id: 'paused', path: root, intervalMs: 60000, enabled: false },
+  ]
+  const monitor = new ExternalFolders(() => sources, async id => { calls.push(id); if (id === 'large') await blocked })
+  const pending = monitor.tick()
+  try {
+    const deadline = Date.now() + 1000
+    while (!calls.includes('small') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+    expect(calls).toEqual(['large', 'small'])
+    expect(monitor.states.get('paused')?.state).toBe('paused')
+    monitor.request('large', true)
+    await monitor.tick()
+    expect(calls.filter(id => id === 'large')).toHaveLength(1)
+  } finally { release(); await pending; monitor.stop(); await rm(root, { recursive: true, force: true }) }
+})

@@ -1091,7 +1091,9 @@ export function apply(ctx: Context): void {
     const prior = recentUserTexts.get(agent.id) ?? []
     const remembered = cleanRetrieveQuery(text)
     const nextRecent = [...prior, remembered].filter(query => query.length > 0).slice(-AUTO_RETRIEVE_CONTEXT_TURNS)
-    const background = await buildAutoRetrieveMessage(knowledge, agent, text, signal, prior)
+    let searched = false
+    const retrieved = await buildAutoRetrieveMessage(knowledge, agent, text, signal, prior, () => { searched = true })
+    const background = retrieved ?? (searched ? emptyRetrievalBackground() : undefined)
     if (signal.aborted) return decision
     if (background === undefined) {
       recentUserTexts.set(agent.id, nextRecent)
@@ -1104,7 +1106,7 @@ export function apply(ctx: Context): void {
     if (signal.aborted) return decision
     recentUserTexts.set(agent.id, nextRecent)
     background.commit()
-    return { kind: 'enter', messages: folded }
+    return { ...decision, messages: folded }
   })
   // Forget this agent's throttle + context when it goes away.
   ctx.on('agent/disposed', ({ agent }) => {
@@ -1228,11 +1230,23 @@ export interface AutoRetrieveBackground {
   readonly message: {
     role: 'user'
     content: ReadonlyArray<{ type: 'text'; text: string }>
-    source: { kind: 'dsh-knowledge' }
+    source: { kind: 'dsh-knowledge'; form: 'notice'; summary: string; passageCount: number }
     id: string
   }
   /** Commit throttle/dedup state only after the message was actually folded or injected. */
   commit(): void
+}
+
+/** A completed search with no delivered evidence is still a durable, inspectable result. */
+export function emptyRetrievalBackground(): AutoRetrieveBackground {
+  return {
+    message: {
+      role: 'user', id: crypto.randomUUID(),
+      source: { kind: 'dsh-knowledge', form: 'notice', summary: 'Knowledge retrieved — 0 passages', passageCount: 0 },
+      content: [{ type: 'text', text: 'Automatic knowledge retrieval supplied no new passages for this question. Use knowledge_search for a targeted search when knowledge is needed. Do not claim the knowledge base was searched exhaustively.' }],
+    },
+    commit() {},
+  }
 }
 
 /** Search the bases for `text` and build the background message to fold into
@@ -1245,6 +1259,7 @@ export async function buildAutoRetrieveMessage(
   text: string,
   signal?: AbortSignal,
   contextText?: string | readonly string[],
+  onSearched?: () => void,
 ): Promise<AutoRetrieveBackground | undefined> {
   try {
     if (signal?.aborted) return undefined
@@ -1329,6 +1344,7 @@ export async function buildAutoRetrieveMessage(
         knowledge.search(searchRequest, { rerank: 'skip', signal: executionSignal, deadlineAt }),
         executionSignal,
       )
+      onSearched?.()
       clearAutoRetrieveFailure(knowledge, 'search')
       clearAutoRetrieveFailure(knowledge, 'planner')
     } catch (error) {
@@ -1508,7 +1524,7 @@ export async function buildAutoRetrieveMessage(
       message: {
         role: 'user',
         content: [{ type: 'text', text: background }],
-        source: { kind: 'dsh-knowledge' },
+        source: { kind: 'dsh-knowledge', form: 'notice', summary: `Knowledge retrieved — ${delivered.length} ${delivered.length === 1 ? 'passage' : 'passages'}`, passageCount: delivered.length },
         id: crypto.randomUUID(),
       },
       commit() {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   autoRetrieveBackground,
+  emptyRetrievalBackground,
   buildAutoRetrieveMessage,
   userTextOf,
   foldBackground,
@@ -220,7 +221,7 @@ describe('autoRetrieveBackground', () => {
     expect(agent.injected).toHaveLength(1)
     const message = agent.injected[0] as { role: string; content: Array<{ type: string; text: string }>; source: { kind: string; plugin: string } }
     expect(message.role).toBe('user')
-    expect(message.source).toEqual({ kind: 'dsh-knowledge' })
+    expect(message.source).toMatchObject({ kind: 'dsh-knowledge', form: 'notice', passageCount: 1, summary: 'Knowledge retrieved — 1 passage' })
     expect(message.content[0].type).toBe('text')
     expect(message.content[0].text).toContain('报销流程是提交发票后审批')
     expect(message.content[0].text).toContain('source: base0; baseId=b0; docId=d;')
@@ -1007,7 +1008,7 @@ describe('autoRetrieveBackground', () => {
     // The build path must NOT touch the agent handle — folding owns delivery.
     expect(agent.injected).toHaveLength(0)
     expect(background!.message.role).toBe('user')
-    expect(background!.message.source).toEqual({ kind: 'dsh-knowledge' })
+    expect(background!.message.source).toMatchObject({ kind: 'dsh-knowledge', form: 'notice', passageCount: 1, summary: 'Knowledge retrieved — 1 passage' })
     expect(background!.message.content[0].type).toBe('text')
     expect(background!.message.content[0].text).toContain('报销流程')
     expect(typeof background!.message.id).toBe('string')
@@ -1116,4 +1117,11 @@ describe('autoRetrieveBackground', () => {
     const entered = foldBackground([{ id: 'only-context' }], [{ id: 'claimed-elsewhere' }] as never, { id: 'bg' })
     expect(entered.map(m => (m as { id: string }).id)).toEqual(['only-context', 'bg'])
   })
+})
+
+ it('records a completed empty search without changing retrieval throttle state', () => {
+  const result = emptyRetrievalBackground()
+  expect(result.message.source.passageCount).toBe(0)
+  expect(result.message.content[0].text).toContain('knowledge_search')
+  result.commit(); result.commit()
 })

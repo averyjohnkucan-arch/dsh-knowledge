@@ -606,3 +606,17 @@ New base now has an **Internal / External** storage selector. Existing bases rem
 Native selection uses Windows Forms through Windows PowerShell on Windows, or Zenity/KDialog on Linux. The dialog opens on the DSH host's desktop. A remote/headless host may require entering its absolute folder path instead. Linux integration is tested; Windows dialog execution still requires qualification on a Windows machine.
 
 The entire implementation is in this plugin. No DSH core files are patched. Accelerator embedding/OCR scheduling and the earlier requested model benchmarks are separate work and are not enabled by this folder-sync feature.
+
+Automatic knowledge retrieval is recorded in the conversation as a collapsed
+“Knowledge retrieved — N passages” row, above the model's reasoning within
+Analysis. Expanding it shows the exact evidence sent to the model and links to
+original sources. Completed searches that deliver no new evidence record zero
+passages; disabled or skipped retrieval does not pretend to have searched. The
+row replays from DSH's existing `user/message` log through the public conversation
+registry and keyed Chat slot, including older saved knowledge injections.
+
+Directory reconciliation overlaps up to four file jobs per source, retaining
+processor-level concurrency limits, and combines base timestamp writes across a
+scan. Two source roots can reconcile concurrently, without overlapping scans of
+the same root. Metadata still uses the DSH storage API; this is not a migration
+of document metadata to SQLite, and a full 50,000-file speedup has not been measured.

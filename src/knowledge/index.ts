@@ -2022,6 +2022,8 @@ export class KnowledgeService extends Service {
     return { ...current, sync }
   }
 
+  private readonly directoryWriteBatches = new Map<string, number>()
+
   /** Synchronize a single source-root against disk. Root validation happens
    * before any write; child failures are preserved as itemized `partial`
    * outcomes instead of being rethrown after useful work succeeds. */
@@ -2032,8 +2034,14 @@ export class KnowledgeService extends Service {
   ): Promise<DirectorySyncResult> {
     if (this.syncingRoots.has(root.id)) throw new Error('Source folder is already synchronizing')
     this.syncingRoots.add(root.id)
+    this.directoryWriteBatches.set(root.baseId, (this.directoryWriteBatches.get(root.baseId) ?? 0) + 1)
     try { return await this.performDirectorySync(root, sourcePath, mode) }
-    finally { this.syncingRoots.delete(root.id) }
+    finally {
+      this.syncingRoots.delete(root.id)
+      const remaining = (this.directoryWriteBatches.get(root.baseId) ?? 1) - 1
+      if (remaining > 0) this.directoryWriteBatches.set(root.baseId, remaining)
+      else { this.directoryWriteBatches.delete(root.baseId); await this.touchBase(root.baseId) }
+    }
   }
 
   private async performDirectorySync(root: KnowledgeDocument, sourcePath: string, mode: 'created' | 'synced'): Promise<DirectorySyncResult> {
@@ -2200,87 +2208,96 @@ export class KnowledgeService extends Service {
       }
     }
 
-    for (const entry of entries) {
-      if (this.shuttingDown || store.getBase(directory.baseId) === undefined || store.getDocument(directory.id) === undefined) {
-        throw new Error('directory sync canceled: source or knowledge base was deleted')
-      }
-      const fullPath = join(diskPath, entry.name)
-      const relativePath = this.relativeSourcePath(rootPath, fullPath)
-      if (entry.isDirectory()) {
-        const resolved = this.resolveDirectoryChild(children, 'directory', diskPath, entry.name)
+    const fileJobs: Promise<void>[] = []
+    try {
+      for (const entry of entries) {
+        if (this.shuttingDown || store.getBase(directory.baseId) === undefined || store.getDocument(directory.id) === undefined) {
+          throw new Error('directory sync canceled: source or knowledge base was deleted')
+        }
+        const fullPath = join(diskPath, entry.name)
+        const relativePath = this.relativeSourcePath(rootPath, fullPath)
+        if (entry.isDirectory()) {
+          await Promise.all(fileJobs.splice(0))
+          const resolved = this.resolveDirectoryChild(children, 'directory', diskPath, entry.name)
+          if (resolved.ambiguous !== undefined) {
+            items.push({
+              relativePath,
+              kind: 'directory',
+              action: 'failed',
+              error: {
+                code: 'ambiguous_source',
+                message: `multiple stored directory items match ${relativePath}`,
+              },
+            })
+            continue
+          }
+          try {
+            let child = resolved.document
+            let action: DirectorySyncItem['action'] = 'unchanged'
+            if (child === undefined) {
+              child = await this.createDirectory(directory.baseId, entry.name, directory.id)
+              action = 'created'
+              children.push(child)
+              childrenByParent.set(directory.id, children)
+            }
+            const bound = await this.bindDocumentSourcePath(child, fullPath)
+            if (bound !== child && action === 'unchanged') action = 'updated'
+            const childIndex = children.findIndex(candidate => candidate.id === child!.id)
+            if (childIndex >= 0) children[childIndex] = bound
+            items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
+            await this.syncDirectoryNode({ rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items })
+          } catch (error) {
+            items.push({ relativePath, kind: 'directory', action: 'failed', error: this.directoryItemError(error) })
+          }
+          continue
+        }
+        if (!entry.isFile() || !DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
+        const resolved = this.resolveDirectoryChild(children, 'file', diskPath, entry.name)
         if (resolved.ambiguous !== undefined) {
           items.push({
             relativePath,
-            kind: 'directory',
+            kind: 'file',
             action: 'failed',
-            error: {
-              code: 'ambiguous_source',
-              message: `multiple stored directory items match ${relativePath}`,
-            },
+            error: { code: 'ambiguous_source', message: `multiple stored file items match ${relativePath}` },
           })
           continue
         }
-        try {
-          let child = resolved.document
-          let action: DirectorySyncItem['action'] = 'unchanged'
-          if (child === undefined) {
-            child = await this.createDirectory(directory.baseId, entry.name, directory.id)
-            action = 'created'
-            children.push(child)
-            childrenByParent.set(directory.id, children)
+        fileJobs.push((async () => {
+          try {
+            const before = await stat(fullPath)
+            const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
+            let document = resolved.document
+            let action: DirectorySyncItem['action']
+            if (document === undefined) {
+              document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
+              action = 'created'
+              children.push(document)
+              childrenByParent.set(directory.id, children)
+            } else {
+              action = await this.syncDirectoryFile(document, fullPath, entry.name)
+              const refreshed = this.requireStore().getDocument(document.id)
+              if (refreshed !== undefined) {
+                const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
+                if (documentIndex >= 0) children[documentIndex] = refreshed
+                document = refreshed
+              }
+            }
+            if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
+              const fileStat = await stat(fullPath)
+              const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+              const fresh = store.getDocument(document.id)
+              if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
+            }
+            items.push({ relativePath, kind: 'file', documentId: document.id, action })
+          } catch (error) {
+            items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: this.directoryItemError(error) })
           }
-          const bound = await this.bindDocumentSourcePath(child, fullPath)
-          if (bound !== child && action === 'unchanged') action = 'updated'
-          const childIndex = children.findIndex(candidate => candidate.id === child!.id)
-          if (childIndex >= 0) children[childIndex] = bound
-          items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
-          await this.syncDirectoryNode({ rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items })
-        } catch (error) {
-          items.push({ relativePath, kind: 'directory', action: 'failed', error: this.directoryItemError(error) })
-        }
-        continue
+        })())
+        // Bound file buffers and parser requests. Heavy processors retain their
+        // own two-worker queue; this overlaps disk I/O, parsing and index writes.
+        if (fileJobs.length >= 4) await Promise.all(fileJobs.splice(0))
       }
-      if (!entry.isFile() || !DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
-      const resolved = this.resolveDirectoryChild(children, 'file', diskPath, entry.name)
-      if (resolved.ambiguous !== undefined) {
-        items.push({
-          relativePath,
-          kind: 'file',
-          action: 'failed',
-          error: { code: 'ambiguous_source', message: `multiple stored file items match ${relativePath}` },
-        })
-        continue
-      }
-      try {
-        const before = await stat(fullPath)
-        const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
-        let document = resolved.document
-        let action: DirectorySyncItem['action']
-        if (document === undefined) {
-          document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
-          action = 'created'
-          children.push(document)
-          childrenByParent.set(directory.id, children)
-        } else {
-          action = await this.syncDirectoryFile(document, fullPath, entry.name)
-          const refreshed = this.requireStore().getDocument(document.id)
-          if (refreshed !== undefined) {
-            const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
-            if (documentIndex >= 0) children[documentIndex] = refreshed
-            document = refreshed
-          }
-        }
-        if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
-          const fileStat = await stat(fullPath)
-          const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
-          const fresh = store.getDocument(document.id)
-          if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
-        }
-        items.push({ relativePath, kind: 'file', documentId: document.id, action })
-      } catch (error) {
-        items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: this.directoryItemError(error) })
-      }
-    }
+    } finally { await Promise.all(fileJobs) }
   }
 
   private async ingestDirectoryFile(baseId: string, parentDirectoryId: string, sourcePath: string, fileName: string): Promise<KnowledgeDocument> {
@@ -4207,6 +4224,7 @@ export class KnowledgeService extends Service {
 
   /** Bump the base's updatedAt so the data view's "更新于" stays meaningful. */
   private async touchBase(baseId: string): Promise<void> {
+    if (this.directoryWriteBatches.has(baseId)) return
     const store = this.requireStore()
     const base = store.getBase(baseId)
     if (base !== undefined) await store.putBase({ ...base, updatedAt: Date.now() })

@@ -7,6 +7,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { KnowledgeRetrieval, retrievalDefinition } from './KnowledgeRetrieval.js'
 import { KnowledgeApi } from './api.js'
 import { KnowledgePanel, SidebarKnowledgeAction } from './KnowledgeSection.js'
 import type { Translate } from './KnowledgeSection.js'
@@ -29,7 +30,7 @@ interface LocaleService {
 }
 
 /** Required services; each target slot is awaited through `slots.inject`. */
-export const inject = ['slots', 'locale']
+export const inject = ['slots', 'locale', 'uiConversation']
 
 /** Register the knowledge sidebar action and its overlay panel. */
 export function apply(ctx: Context): void {
@@ -41,6 +42,12 @@ export function apply(ctx: Context): void {
   const t = locale.bind(NS) as Translate
   const store = createKnowledgePanelStore()
   const api = new KnowledgeApi()
+
+  const conversation = ctx.get('uiConversation') as { events: { register(definition: unknown): () => void } } | undefined
+  if (conversation) ctx.effect(() => conversation.events.register(retrievalDefinition), 'knowledge: logged retrieval projection')
+  slots.inject('conversation.chat.node', () => slots.register({
+    name: 'conversation.chat.node', key: 'dsh-knowledge-retrieval',
+  }, KnowledgeRetrieval))
 
   slots.inject('sidebar.footer.action', () => slots.register({
     name: 'sidebar.footer.action',
