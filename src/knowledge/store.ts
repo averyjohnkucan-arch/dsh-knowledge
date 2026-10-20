@@ -132,6 +132,7 @@ export interface Store {
 
   listDocuments(baseId: string, options?: { includeRawText?: boolean }): KnowledgeDocument[]
   getDocument(id: string): KnowledgeDocument | undefined
+  hasDocumentsWithoutSource(baseId: string): boolean
   putDocument(doc: KnowledgeDocument): Promise<void>
   deleteDocument(id: string): Promise<void>
   /** Incremental candidate batches, invisible until commit; same revision upserts. */
@@ -360,6 +361,14 @@ class DomainStore implements Store {
     }).filter(doc => doc.baseId === baseId)
   }
 
+  hasDocumentsWithoutSource(baseId: string): boolean {
+    if (this.sqliteDocuments && this.chunkDb.pendingDocumentGenerations().length === 0) {
+      return this.chunkDb.hasDocumentsWithoutSource(baseId)
+    }
+    return this.listDocuments(baseId).some(doc => doc.sourceType !== 'directory'
+      && doc.rawText === undefined && doc.rawFilePath === undefined)
+  }
+
   getDocument(id: string): KnowledgeDocument | undefined {
     const current = this.documents.get(id)
     if (current === undefined) return undefined
@@ -525,7 +534,9 @@ class DomainStore implements Store {
     }
     let removed = 0
     const resume: string[] = []
-    for (const [id, doc] of [...this.documents.entries()]) {
+    for (const header of this.sqliteDocuments ? this.chunkDb.listDocumentMetadata(undefined, false) : [...this.documents.entries()].map(([, doc]) => doc)) {
+      const id = header.id
+      let doc = header
       if (doc.sourceType === 'directory') continue
       // Parsing failed in a completed import. Keep its raw source for an
       // explicit retry, but never re-run a potentially paid processor at boot.
@@ -537,6 +548,7 @@ class DomainStore implements Store {
       // reconciliation pass that runs after this one would otherwise make the
       // chunk count agree and hide the interrupted document forever.
       if (doc.incomplete === true) {
+        doc = this.getDocument(id) ?? doc
         if (doc.rawText !== undefined || doc.rawFilePath !== undefined) resume.push(id)
         continue
       }
@@ -545,6 +557,7 @@ class DomainStore implements Store {
         // document (possibly with a recording embedding failure) — keep it.
         continue
       }
+      doc = this.getDocument(id) ?? doc
       // No chunks at all and no incomplete marker: a placeholder whose source
       // was never persisted (crash before the raw write or before rawText
       // landed) is unrecoverable; one that already holds rawText or a raw
@@ -571,9 +584,10 @@ class DomainStore implements Store {
    */
   async reconcileChunkCounts(): Promise<void> {
     const actual = this.chunkCountsByDoc(this.listBases().map(base => base.id))
-    for (const [id, doc] of [...this.documents.entries()]) {
+    for (const doc of this.sqliteDocuments ? this.chunkDb.listDocumentMetadata(undefined, false) : [...this.documents.entries()].map(([, doc]) => doc)) {
+      const id = doc.id
       if ((doc.chunkCount ?? 0) !== (actual.get(id) ?? 0)) {
-        await this.documents.put(id, { ...doc, chunkCount: actual.get(id) ?? 0 })
+        await this.documents.put(id, { ...(this.getDocument(id) ?? doc), chunkCount: actual.get(id) ?? 0 })
       }
     }
   }
@@ -729,6 +743,11 @@ class MemoryStore implements Store {
 
   listDocuments(baseId: string, options?: { includeRawText?: boolean }): KnowledgeDocument[] {
     return [...this.documents.values()].filter(doc => doc.baseId === baseId)
+  }
+
+  hasDocumentsWithoutSource(baseId: string): boolean {
+    return this.listDocuments(baseId).some(doc => doc.sourceType !== 'directory'
+      && doc.rawText === undefined && doc.rawFilePath === undefined)
   }
 
   getDocument(id: string): KnowledgeDocument | undefined {

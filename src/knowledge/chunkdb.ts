@@ -491,6 +491,13 @@ export class ChunkDatabase implements RetrievalLane {
     return rows.map(row => ({ ...JSON.parse(row.header), ...(typeof row.raw_text === 'string' ? { rawText: row.raw_text } : {}) }))
   }
 
+  /** Check source availability in SQL without materializing the library's text. */
+  hasDocumentsWithoutSource(baseId: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM knowledge_document WHERE base_id=?
+      AND json_extract(header, '$.sourceType') != 'directory'
+      AND raw_text IS NULL AND json_extract(header, '$.rawFilePath') IS NULL LIMIT 1`).get(baseId) !== undefined
+  }
+
   deleteDocumentMetadata(id: string): boolean {
     return this.db.prepare('DELETE FROM knowledge_document WHERE doc_id=?').run(id).changes > 0
   }

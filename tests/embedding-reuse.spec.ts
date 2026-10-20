@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { hashEmbeddingText } from '../src/knowledge/chunkdb.js'
@@ -155,6 +158,29 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     const doc = service.listDocuments(base.id)[0]
     const chunk = service.listChunks(doc.id)[0]
     expect(chunk.embeddingModel).toBe('openai:m9')
+  })
+
+  it('backfills unchanged folder files from canonical text instead of a sync that skips them', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-embedding-folder-'))
+    try {
+      await writeFile(join(root, 'sample.txt'), 'A stable folder document about astronomy.')
+      const service = await mountService()
+      const base = await service.createBase({ name: 'folder backfill' })
+      await service.importDirectoryTree(base.id, root)
+      await service.waitForIdle()
+      embedTextsMock.mockClear()
+      const reindex = vi.spyOn(service, 'reindexDocument')
+      await service.renameBase(base.id, { config: { embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'folder-model' } })
+      await service.waitForIdle()
+      expect(embedTextsMock).toHaveBeenCalled()
+      expect(reindex.mock.calls.every(([, options]) => options?.mode === 'rechunk')).toBe(true)
+      const leaf = service.listDocuments(base.id).find(doc => doc.sourceType === 'file')!
+      expect(service.listChunks(leaf.id).every(chunk => chunk.embeddingModel === 'openai:folder-model')).toBe(true)
+      embedTextsMock.mockClear()
+      await service.renameBase(base.id, { config: { embeddingProvider: 'openai', embeddingModel: 'folder-model' } })
+      await service.waitForIdle()
+      expect(embedTextsMock).not.toHaveBeenCalled()
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   it('reuses vectors across documents with identical chunk text', async () => {
