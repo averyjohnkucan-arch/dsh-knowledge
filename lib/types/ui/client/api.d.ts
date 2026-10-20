@@ -43,6 +43,7 @@ export interface BaseConfig {
     structuredChunking?: boolean;
     semanticChunk?: boolean;
     semanticChunkThreshold?: number;
+    semanticChunkCandidateTokens?: number;
     chunkTokenLimit?: number;
     conflictStrategy?: 'keep' | 'replace' | 'rename';
     urlRefreshHours?: number;
@@ -212,6 +213,7 @@ export interface KnowledgeConfig {
     embeddingBatchSize: number;
     semanticChunk: boolean;
     semanticChunkThreshold: number;
+    semanticChunkCandidateTokens?: number;
     chunkTokenLimit: number;
     conflictStrategy: 'keep' | 'replace' | 'rename';
     urlRefreshHours: number;
@@ -337,6 +339,7 @@ export interface BaseStats {
     charCount: number;
     tokenCount: number;
     embedded: boolean;
+    embeddedChunkCount?: number;
     embeddingDimensions?: number;
     staleEmbeddings?: boolean;
     staleChunkCount?: number;
@@ -493,8 +496,8 @@ export declare class KnowledgeApi {
      * Embed one probe text through the given (or current) embedding config and
      * return the vector width (Cherry's dimension probe, run before a save).
      */
-    getEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
-    prepareEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
+    getEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
+    prepareEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
     probeEmbeddingDimensions(options?: {
         provider?: EmbeddingProvider;
         baseUrl?: string;
@@ -660,6 +663,9 @@ export declare class KnowledgeApi {
     renameDocument(documentId: string, title: string): Promise<{
         id: string;
         title: string;
+    }>;
+    revectorizeBase(baseId: string): Promise<{
+        queued: true;
     }>;
     reindexDocument(documentId: string, mode?: 'reparse' | 'rechunk'): Promise<{
         id: string;

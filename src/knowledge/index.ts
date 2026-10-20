@@ -1,5 +1,6 @@
+import { canMigrateQwenVectors } from './qwen-embedding-variants.js'
 import { orderedEmbeddingLanes } from './embedding-tuning.js'
-import { embeddingAcceleration } from './embedding-acceleration.js'
+import { embeddingAcceleration, embeddingFp16Acceleration, FP16_EMBEDDING_MODEL } from './embedding-acceleration.js'
 /**
  * The host knowledge service (`ctx.knowledge`): durable bases/documents/chunks
  * over `ctx.storageDomain`, heading-aware chunking with context injection,
@@ -17,7 +18,7 @@ import { createHash } from 'node:crypto'
 import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { isIP } from 'node:net'
-import { chunkText, mergeSemanticSegments, refineChunksByTokenLimit, splitSemanticSegments } from './chunk.js'
+import { chunkText, createSemanticMerger, refineChunksByTokenLimit, splitSemanticSegments } from './chunk.js'
 import type { ChunkPiece } from './chunk.js'
 import { chunkParsedDocument } from './structured-chunk.js'
 import { ArtifactRepository } from './artifacts.js'
@@ -38,6 +39,7 @@ import {
   DEFAULT_LOCAL_MODEL,
   disposeLocalModelWorker,
   embedTexts,
+  loadLocalModel,
   expandHomePath,
   getLocalModelStatus,
   hasActiveLocalModelDownload,
@@ -353,7 +355,7 @@ export class KnowledgeService extends Service {
     this.ctx.effect(() => () => { void disposeLocalModelWorker() }, 'knowledge: dispose local model worker')
     this.ctx.effect(() => () => { void disposeLocalRerankProcess() }, 'knowledge: dispose local rerank process')
     this.ctx.effect(() => () => { void disposeOcrWorker() }, 'knowledge: dispose OCR worker')
-    this.ctx.effect(() => () => embeddingAcceleration.dispose(), 'knowledge: dispose embedding accelerators')
+    this.ctx.effect(() => () => { embeddingAcceleration.dispose(); embeddingFp16Acceleration.dispose() }, 'knowledge: dispose embedding accelerators')
     this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
     this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
     if (store === undefined) { this.resolveStore(); return }
@@ -385,7 +387,15 @@ export class KnowledgeService extends Service {
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     setLocalEmbeddingTuning(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
+    embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    // Warm only configured, already-downloaded embedding models. Keep startup
+    // responsive and never download or load the whole catalog implicitly.
+    const selectedEmbeddings=new Set([resolved,...store.listBases().map(base=>resolveConfigFor(this.baseConfig,store.getConfigOverrides(),base.config))]
+      .filter(config=>config.embeddingProvider==='local').map(config=>config.embeddingModel||DEFAULT_LOCAL_MODEL))
+    for(const model of selectedEmbeddings) void isLocalModelDownloaded(model).then(ready=>{
+      if(ready&&!this.shuttingDown)return loadLocalModel(model)
+    }).catch(error=>this.ctx.logger.warn(`knowledge: embedding warmup failed: ${error instanceof Error?error.message:String(error)}`))
     // One-time compatibility path for caches created before readiness markers:
     // validate only rerankers that are actually configured, in the background.
     const configuredLocalRerankers = new Set<string>()
@@ -433,10 +443,10 @@ export class KnowledgeService extends Service {
     void resume.then(async () => {
       for (const base of store.listBases()) {
         const config = this.getConfigFor(base.id), key = embeddingKey(config)
-        const legacyQwen = key?.endsWith(':canonical-single-v1') === true
+        const legacyFormat = (key?.endsWith(':canonical-single-v1') === true || key?.endsWith(':full-context-v1') === true || key?.endsWith(':canonical-fp16-v1') === true)
           && store.chunkStats([base.id]).embeddingModelCounts.some(entry => entry.model !== key)
-        if (legacyQwen && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
-        if ((base.embeddingBackfillPending || legacyQwen) && config.resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
+        if (legacyFormat && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
+        if ((base.embeddingBackfillPending || legacyFormat) && config.resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
       }
     }).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     this.armUrlRefreshTimer()
@@ -653,6 +663,7 @@ export class KnowledgeService extends Service {
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     setLocalEmbeddingTuning(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
+    embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     return resolved
   }
@@ -857,7 +868,7 @@ export class KnowledgeService extends Service {
         || newConfig.embeddingModel !== oldConfig.embeddingModel
       if (modelChanged && store.listDocuments(id, { includeRawText: false }).length > 0) {
         const hadModel = oldConfig.embeddingProvider !== 'none' && oldConfig.embeddingModel.trim() !== ''
-        if (hadModel) {
+        if (hadModel && !canMigrateQwenVectors(oldConfig, newConfig)) {
           throw new Error('Changing the embedding model invalidates existing vectors. Use Rebuild knowledge base to generate vectors with the new model')
         }
         // BM25-only → enable-in-place: commit the model, then backfill vectors
@@ -889,14 +900,33 @@ export class KnowledgeService extends Service {
 
   private readonly embeddingBackfills = new Set<string>()
 
+  /** Explicit full vector pass, separate from sync, parsing and chunking. */
+  revectorizeBase(baseId: string): { queued: true } {
+    const base = this.requireStore().getBase(baseId)
+    if (!base) throw new NotFoundError('knowledge base not found')
+    if (!embeddingKey(this.getConfigFor(baseId))) throw new Error('Select an embedding model before re-vectorizing')
+    if (this.embeddingBackfills.has(baseId)) throw new Error('Vectorization is already running for this base')
+    void this.backfillBaseEmbeddings(baseId, crypto.randomUUID()).catch(error => {
+      this.ctx.logger.warn(`knowledge: re-vectorization paused: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    return { queued: true }
+  }
+
   /** Enable vectors from saved canonical text; unchanged external files must not be skipped. */
-  private async backfillBaseEmbeddings(baseId: string): Promise<void> {
+  private async backfillBaseEmbeddings(baseId: string, forceRevision?: string): Promise<void> {
     if (this.embeddingBackfills.has(baseId)) return
     this.embeddingBackfills.add(baseId)
     try {
       const store = this.requireStore(), base = store.getBase(baseId)
-      if (base) await store.putBase({ ...base, embeddingBackfillPending: true })
-      await this.runEmbeddingBackfill(baseId)
+      if (base) await store.putBase({ ...base, embeddingBackfillPending: true, ...(forceRevision ? { embeddingBackfillRevision: forceRevision } : {}) })
+      // A precision/export change can arrive during an existing backfill.
+      // Restart its inventory under the new key; old vectors remain excluded.
+      while (!this.shuttingDown && store.getBase(baseId)) {
+        const key = embeddingKey(this.getConfigFor(baseId))
+        try { await this.runEmbeddingBackfill(baseId) }
+        catch (error) { if (key === embeddingKey(this.getConfigFor(baseId))) throw error }
+        if (key === embeddingKey(this.getConfigFor(baseId))) break
+      }
     } finally { this.embeddingBackfills.delete(baseId) }
   }
 
@@ -908,31 +938,42 @@ export class KnowledgeService extends Service {
       await new Promise<void>(resolve => setTimeout(resolve, 100))
     }
     if (this.shuttingDown || !store.getBase(baseId)) return
+    const passKey = embeddingKey(this.getConfigFor(baseId))
     const meterId = `embedding:${baseId}`
-    const missing = store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
+    const forceRevision = store.getBase(baseId)?.embeddingBackfillRevision
+    const missing = forceRevision ? undefined : store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
     const documents = store.listDocuments(baseId, { includeRawText: false })
-      .filter(doc => doc.sourceType !== 'directory' && missing.has(doc.id))
+      .filter(doc => doc.sourceType !== 'directory' && (forceRevision ? doc.vectorizationRevision !== forceRevision : missing!.has(doc.id)))
     this.processingMeter.start(meterId, baseId)
     this.processingMeter.add(meterId, documents.length)
     this.directoryWriteBatches.set(baseId, (this.directoryWriteBatches.get(baseId) ?? 0) + 1)
+    let completed = false
     try {
       await orderedEmbeddingLanes(documents, this.getConfigFor(baseId).embeddingProvider === 'local' ? 2 : 1, async doc => {
         if (this.shuttingDown || !store.getBase(baseId)) throw new Error('Embedding backfill stopped')
+        if (passKey !== embeddingKey(this.getConfigFor(baseId))) throw new Error('Embedding model changed; restarting vector inventory')
         await new Promise<void>(resolve => setImmediate(resolve))
         this.processingMeter.begin(meterId)
         try {
-          await this.embedExistingDocument(doc.id)
+          await this.embedExistingDocument(doc.id, forceRevision)
           this.processingMeter.settle(meterId, 'processed')
         } catch (error) {
           this.processingMeter.settle(meterId, 'failed')
-          this.ctx.logger.warn(`knowledge: embedding backfill paused after a document failure: ${error instanceof Error ? error.message : String(error)}`)
-          throw error
+          if (this.shuttingDown || passKey !== embeddingKey(this.getConfigFor(baseId))) throw error
+          const message = error instanceof Error ? error.message : String(error)
+          const current = store.getDocument(doc.id)
+          if (current) await store.putDocument({ ...current, embeddingError: message, errorCode: 'embedding_provider', updatedAt: Date.now() })
+          // One exhausted document must not stop millions of independent
+          // candidates. Keep its old generation intact and the durable base
+          // marker pending, so a retry can fill only the missing vectors.
+          this.ctx.logger.warn(`knowledge: embedding failed for document ${doc.id} (${doc.title}); continuing the queue: ${message}`)
         }
       })
+      completed = true
     } finally {
       this.processingMeter.finish(meterId)
-      if (!this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
-        await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false })
+      if (completed && passKey === embeddingKey(this.getConfigFor(baseId)) && !this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
+        await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false, embeddingBackfillRevision: undefined })
       }
       const remaining = (this.directoryWriteBatches.get(baseId) ?? 1) - 1
       if (remaining > 0) this.directoryWriteBatches.set(baseId, remaining)
@@ -941,7 +982,7 @@ export class KnowledgeService extends Service {
   }
 
   /** Fill vectors without applying newly saved parsing/chunking settings. */
-  private async embedExistingDocument(id: string): Promise<void> {
+  private async embedExistingDocument(id: string, forceRevision?: string): Promise<void> {
     const store = this.requireStore(), document = store.getDocument(id)
     if (!document || document.sourceType === 'directory') return
     if (this.indexing.has(id)) throw new Error('Document is already being indexed')
@@ -957,17 +998,17 @@ export class KnowledgeService extends Service {
       const hashes = chunks.map(chunk => hashEmbeddingText(chunkSearchText(chunk)))
       // Include durable candidate batches from an interrupted embedding pass
       // before replacing its stage; a restart must not repeat completed work.
-      const cached = store.listEmbeddingVectorsByHashes(hashes, key)
+      const cached = forceRevision ? new Map<string, number[]>() : store.listEmbeddingVectorsByHashes(hashes, key)
       await store.discardStagedDocumentGeneration(id)
       await store.stageDocumentGeneration(document, [])
       const missing: number[] = []
       for (let i = 0; i < chunks.length; i++) {
-        if (chunks[i].embeddingModel === key && chunks[i].embedding !== undefined) continue
+        if (!forceRevision && chunks[i].embeddingModel === key && chunks[i].embedding !== undefined) continue
         const vector = cached.get(hashes[i])
         if (vector) chunks[i] = { ...chunks[i], embedding: vector, embeddingModel: key }
         else missing.push(i)
       }
-      const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(8, config.embeddingBatchSize) : config.embeddingBatchSize)
+      const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8, config.embeddingBatchSize) : config.embeddingBatchSize)
       for (let i = 0; i < missing.length; i += batchSize) {
         controller.signal.throwIfAborted()
         this.assertIndexTargetAlive(id, document.baseId)
@@ -985,7 +1026,7 @@ export class KnowledgeService extends Service {
       controller.signal.throwIfAborted()
       this.assertIndexTargetAlive(id, document.baseId)
       const { embeddingError: _error, errorCode: _code, incomplete: _incomplete, ...rest } = document
-      await store.commitDocumentGeneration({ ...rest, updatedAt: Date.now() }, chunks)
+      await store.commitDocumentGeneration({ ...rest, ...(forceRevision ? { vectorizationRevision: forceRevision } : {}), updatedAt: Date.now() }, chunks)
     } catch (error) {
       if ((error as { published?: boolean }).published !== true) await store.discardStagedDocumentGeneration(id)
       throw error
@@ -3053,9 +3094,14 @@ export class KnowledgeService extends Service {
 
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
-  enterEmbeddingForeground() { return embeddingAcceleration.enterForeground() }
-  embeddingAccelerationStatus() { return embeddingAcceleration.status() }
-  prepareEmbeddingAcceleration() { return embeddingAcceleration.prepare() }
+  async enterEmbeddingForeground() {
+    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(), embeddingFp16Acceleration.enterForeground()])
+    const failed = releases.find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); throw failed.reason }
+    return () => { for (const result of releases) if (result.status === 'fulfilled') result.value() }
+  }
+  embeddingAccelerationStatus(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).status() }
+  prepareEmbeddingAcceleration(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).prepare() }
 
   listLocalModels(): Promise<LocalModelSummary[]> {
     return listLocalModels()
@@ -3473,6 +3519,7 @@ export class KnowledgeService extends Service {
       charCount,
       tokenCount,
       embedded: chunkStats.embedded,
+      embeddedChunkCount: chunkStats.embeddedCount,
       ...(chunkStats.dimensions !== undefined ? { embeddingDimensions: chunkStats.dimensions } : {}),
       ...(hasCurrentKey && staleChunkCount > 0 ? { staleEmbeddings: true, staleChunkCount } : {}),
     }
@@ -4211,19 +4258,23 @@ export class KnowledgeService extends Service {
       // similar ones (length-weighted mean vector — no extra embedding pass).
       // Segment embedding is best-effort: any failure falls back to the
       // regular chunker and the normal embedding flow below still runs.
-      const segments = splitSemanticSegments(text, { separator: config.chunkSeparator })
+      const segments = refineChunksByTokenLimit(splitSemanticSegments(text, { separator: config.chunkSeparator, candidateTokens: config.semanticChunkCandidateTokens ?? 128 }), config.chunkSize, estimateTokens)
       let merged: Array<ChunkPiece & { embedding?: number[] }> | null = null
       if (segments.length > 0 && config.embeddingProvider !== 'none') {
         try {
-          const vectors: Array<number[] | undefined> = []
+          const merger = createSemanticMerger(segments, config.chunkSize, config.semanticChunkThreshold)
           const batchSize = Math.max(1, config.embeddingBatchSize)
           for (let i = 0; i < segments.length; i += batchSize) {
+            signal?.throwIfAborted()
+            this.assertIndexTargetAlive(docId, baseId)
             const batch = segments.slice(i, i + batchSize)
             const embedded = await this.embedTextsOnce(config, batch.map(segment => segment.text))
-            for (const vector of embedded) vectors.push(vector)
+            if (embedded.length !== batch.length) throw new Error('Semantic embedding count mismatch')
+            batch.forEach((segment, index) => merger.add(segment, embedded[index]))
           }
-          merged = mergeSemanticSegments(segments, vectors, config.chunkSize, config.semanticChunkThreshold)
+          merged = merger.finish()
         } catch (error) {
+          signal?.throwIfAborted()
           this.ctx.logger.warn(`knowledge: semantic chunking embedding failed, using regular chunker: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
@@ -4312,7 +4363,7 @@ export class KnowledgeService extends Service {
         // uses 10) so one forward pass never allocates a huge intermediate
         // tensor in the shared main-process WASM heap.
         const batchSize = config.embeddingProvider === 'local'
-          ? Math.min(config.embeddingBatchSize, 8)
+          ? Math.min(config.embeddingBatchSize, config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8)
           : config.embeddingBatchSize
         for (let i = 0; i < need.length; i += batchSize) {
           const batch = need.slice(i, i + batchSize)
@@ -4449,8 +4500,8 @@ function embeddingKey(config: KnowledgeConfig): string | undefined {
   if (model === '') return undefined
   // Older padded Qwen batches are not numerically compatible with the
   // canonical single-text path, despite identical dimensions and weights.
-  const format = config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
-    ? ':canonical-single-v1' : ''
+  const format = config.embeddingProvider === 'local' && model === FP16_EMBEDDING_MODEL ? ':canonical-fp16-v1' : config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
+    ? ':canonical-single-v1' : config.embeddingProvider === 'local' && /(?:bge|gte|e5)/i.test(model) ? ':full-context-v1' : ''
   return `${config.embeddingProvider}:${model}${format}`
 }
 

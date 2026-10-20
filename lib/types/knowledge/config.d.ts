@@ -57,6 +57,7 @@ export interface Config {
     semanticChunk: boolean;
     /** Cosine threshold below which adjacent segments start a new chunk (0–1). */
     semanticChunkThreshold: number;
+    semanticChunkCandidateTokens?: number;
     /** Token budget per chunk (0 = off); oversized chunks split at preferred boundaries. */
     chunkTokenLimit: number;
     /** Same-name conflict strategy for file imports: keep / replace / rename (Cherry's default). */

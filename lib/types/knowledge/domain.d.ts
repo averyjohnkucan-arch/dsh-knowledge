@@ -60,6 +60,7 @@ export declare const baseConfigSchema: z.ZodObject<{
     structuredChunking: z.ZodOptional<z.ZodBoolean>;
     semanticChunk: z.ZodOptional<z.ZodBoolean>;
     semanticChunkThreshold: z.ZodOptional<z.ZodNumber>;
+    semanticChunkCandidateTokens: z.ZodOptional<z.ZodNumber>;
     chunkTokenLimit: z.ZodOptional<z.ZodNumber>;
     conflictStrategy: z.ZodOptional<z.ZodEnum<{
         replace: "replace";
@@ -156,6 +157,7 @@ export declare const documentSchema: z.ZodObject<{
     tokenCount: z.ZodOptional<z.ZodNumber>;
     chunkCount: z.ZodNumber;
     incomplete: z.ZodOptional<z.ZodBoolean>;
+    vectorizationRevision: z.ZodOptional<z.ZodString>;
     embeddingError: z.ZodOptional<z.ZodString>;
     errorCode: z.ZodOptional<z.ZodEnum<{
         interrupted: "interrupted";
@@ -220,6 +222,7 @@ export declare const configOverridesSchema: z.ZodObject<{
     structuredChunking: z.ZodOptional<z.ZodBoolean>;
     semanticChunk: z.ZodOptional<z.ZodBoolean>;
     semanticChunkThreshold: z.ZodOptional<z.ZodNumber>;
+    semanticChunkCandidateTokens: z.ZodOptional<z.ZodNumber>;
     chunkTokenLimit: z.ZodOptional<z.ZodNumber>;
     conflictStrategy: z.ZodOptional<z.ZodEnum<{
         replace: "replace";
@@ -281,6 +284,7 @@ export interface ConfigOverrides {
     structuredChunking?: boolean;
     semanticChunk?: boolean;
     semanticChunkThreshold?: number;
+    semanticChunkCandidateTokens?: number;
     chunkTokenLimit?: number;
     conflictStrategy?: 'keep' | 'replace' | 'rename';
     urlRefreshHours?: number;
@@ -360,6 +364,7 @@ export declare const knowledgeDomainSpec: {
                 structuredChunking: z.ZodOptional<z.ZodBoolean>;
                 semanticChunk: z.ZodOptional<z.ZodBoolean>;
                 semanticChunkThreshold: z.ZodOptional<z.ZodNumber>;
+                semanticChunkCandidateTokens: z.ZodOptional<z.ZodNumber>;
                 chunkTokenLimit: z.ZodOptional<z.ZodNumber>;
                 conflictStrategy: z.ZodOptional<z.ZodEnum<{
                     replace: "replace";

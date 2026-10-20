@@ -49,7 +49,7 @@ export function chunkText(
   const safeOverlap = Math.min(Math.round(tokenOverlap * charsPerToken), safeSize - 1)
   const smartChunk = options?.smartChunk ?? true
   const blocks = smartChunk
-    ? splitBlocks(normalized)
+    ? packAdjacentParagraphs(splitBlocks(normalized), safeSize)
     : [{ text: normalized, heading: undefined }]
   const chunks: ChunkPiece[] = []
   for (const block of blocks) {
@@ -66,6 +66,25 @@ export function chunkText(
   }
   // A degenerate guard: always yield at least one chunk for non-empty input.
   return chunks.length > 0 ? chunks : [{ text: normalized.slice(0, safeSize) }]
+}
+
+/** Pack short paragraphs within a heading into useful, budget-sized passages.
+ * Paragraph boundaries remain in the text; headings and fenced blocks remain
+ * hard boundaries. A list item must not require its own model forward pass.
+ */
+function packAdjacentParagraphs(blocks: readonly Block[], size: number): Block[] {
+  const packed: Block[] = []
+  let pending: Block | undefined
+  const flush = () => { if (pending) packed.push(pending); pending = undefined }
+  for (const block of blocks) {
+    const fenced = /^\s*(`{3,}|~{3,})/.test(block.text)
+    if (fenced || block.text.length > size) { flush(); packed.push(block); continue }
+    if (pending && pending.heading === block.heading && pending.text.length + 2 + block.text.length <= size) {
+      pending = { ...pending, text: `${pending.text}\n\n${block.text}` }
+    } else { flush(); pending = block }
+  }
+  flush()
+  return packed
 }
 
 function windowOrKeep(blockText: string, size: number, overlap: number, heading: string | undefined): ChunkPiece[] {
@@ -93,24 +112,26 @@ function normalizeSeparator(separator: string): string {
  * merge adjacent similar ones via {@link mergeSemanticSegments}. Exported for
  * the service layer.
  */
-export function splitSemanticSegments(text: string, options?: { separator?: string }): ChunkPiece[] {
+export function splitSemanticSegments(text: string, options?: { separator?: string; candidateTokens?: number }): ChunkPiece[] {
   const normalized = normalizeText(text)
   if (normalized.length === 0) return []
   const blocks = splitBlocks(normalized)
-  if (options?.separator === undefined || options.separator === '') return blocks
-  const separator = normalizeSeparator(options.separator)
-  const out: ChunkPiece[] = []
-  for (const block of blocks) {
-    for (const piece of block.text.split(separator).map(piece => piece.trim()).filter(piece => piece.length > 0)) {
-      out.push({ text: piece, ...(block.heading !== undefined ? { heading: block.heading } : {}) })
-    }
+  let out: ChunkPiece[] = blocks
+  if (options?.separator !== undefined && options.separator !== '') {
+    const separator = normalizeSeparator(options.separator)
+    out = blocks.flatMap(block => block.text.split(separator).map(piece => piece.trim()).filter(Boolean)
+      .map(text => ({ text, ...(block.heading !== undefined ? { heading: block.heading } : {}) })))
+  }
+  if (options?.candidateTokens && Number.isFinite(options.candidateTokens) && options.candidateTokens > 0) {
+    const charsPerToken = normalized.length / Math.max(1, estimateTokens(normalized))
+    return packAdjacentParagraphs(out, Math.max(64, Math.round(options.candidateTokens * charsPerToken)))
   }
   return out
 }
 
 /**
- * Greedy merge of embedded candidate segments into chunks of at most `size`
- * characters: adjacent segments merge while (a) their cosine similarity is at
+ * Greedy merge of embedded candidate segments within one heading. Adjacent
+ * prose segments merge while (a) their cosine similarity is at
  * least `threshold` (semantically coherent) and (b) the combined length stays
  * within `size`. The merged chunk's vector is the length-weighted mean of its
  * segments' vectors (renormalized), so semantic chunking costs no extra
@@ -123,62 +144,51 @@ export function mergeSemanticSegments(
   size: number,
   threshold = 0.75,
 ): Array<ChunkPiece & { embedding?: number[] }> {
-  // `size` is a token budget like chunkText's; convert with the document's
-  // measured chars-per-token ratio.
+  const merger = createSemanticMerger(segments, size, threshold)
+  segments.forEach((segment, index) => merger.add(segment, vectors[index]))
+  return merger.finish()
+}
+
+/** Consume embedded batches immediately; retain final vectors and one running
+ * sum instead of a second complete collection of every paragraph vector. */
+export function createSemanticMerger(segments: readonly ChunkPiece[], size: number, threshold = 0.75) {
   const fullText = segments.map(segment => segment.text).join('\n')
   const charsPerToken = fullText.length / Math.max(1, estimateTokens(fullText))
   const tokenBudget = Number.isFinite(size) ? Math.max(64, Math.trunc(size)) : 64
   const safeSize = Math.max(64, Math.round(tokenBudget * charsPerToken))
   const out: Array<ChunkPiece & { embedding?: number[] }> = []
-  if (segments.length === 0) return out
-  let text = segments[0].text
-  let heading = segments[0].heading
-  let vec: number[] | undefined = vectors[0]
-  let weight = text.length
+  let pending: ChunkPiece | undefined
+  let sum: number[] | undefined
+  let complete = false
+  let protectedBlock = false
   const flush = (): void => {
-    out.push({ text, ...(heading !== undefined ? { heading } : {}), ...(vec !== undefined ? { embedding: vec } : {}) })
+    if (pending === undefined) return
+    const norm = sum !== undefined ? Math.hypot(...sum) : 0
+    const embedding = complete && sum !== undefined && Number.isFinite(norm) && norm > 0
+      ? sum.map(value => value / norm) : undefined
+    out.push({ ...pending, ...(embedding !== undefined ? { embedding } : {}) })
+    pending = undefined
   }
-  for (let i = 1; i < segments.length; i += 1) {
-    const segment = segments[i]
-    // +1 accounts for the '\n' joining the segments.
-    const nextLength = text.length + segment.text.length + 1
-    const vector = vectors[i]
-    const similar = vec !== undefined && vector !== undefined
-      ? cosineSimilarity(vec, vector) >= threshold
-      : true
-    if (nextLength <= safeSize && similar) {
-      text += `\n${segment.text}`
-      if (vec !== undefined && vector !== undefined) {
-        const newWeight = weight + segment.text.length
-        vec = normalizeAdd(vec, weight, vector, segment.text.length)
-        weight = newWeight
+  return {
+    add(segment: ChunkPiece, vector?: number[]): void {
+      const fenced = /^\s*(`{3,}|~{3,})/.test(segment.text)
+      const similar = sum !== undefined && vector !== undefined ? cosineSimilarity(sum, vector) >= threshold : true
+      if (pending !== undefined && pending.text.length + 2 + segment.text.length <= safeSize
+        && similar && pending.heading === segment.heading && !protectedBlock && !fenced) {
+        pending = { ...pending, text: `${pending.text}\n\n${segment.text}` }
+        if (sum !== undefined && vector !== undefined && sum.length === vector.length) {
+          sum = sum.map((value, index) => value + vector[index] * segment.text.length)
+        } else complete = false
+      } else {
+        flush()
+        pending = segment
+        sum = vector?.map(value => value * segment.text.length)
+        complete = vector !== undefined
+        protectedBlock = fenced
       }
-    } else {
-      flush()
-      text = segment.text
-      heading = segment.heading
-      vec = vector
-      weight = text.length
-    }
+    },
+    finish(): Array<ChunkPiece & { embedding?: number[] }> { flush(); return out },
   }
-  flush()
-  return out
-}
-
-/** Weighted mean of two vectors (a*aWeight + b*bWeight), then L2-normalized. */
-function normalizeAdd(a: readonly number[], aWeight: number, b: readonly number[], bWeight: number): number[] {
-  const out: number[] = new Array(a.length)
-  let sum = 0
-  for (let i = 0; i < a.length; i += 1) {
-    const v = (a[i] * aWeight + b[i] * bWeight) / (aWeight + bWeight)
-    out[i] = v
-    sum += v * v
-  }
-  const length = Math.sqrt(sum)
-  // A NaN/zero norm (empty or corrupt vectors) must not divide into NaN.
-  if (!Number.isFinite(length) || length === 0) return out
-  for (let i = 0; i < out.length; i += 1) out[i] /= length
-  return out
 }
 
 /** Cosine similarity between two equal-length vectors (true cosine, so it is

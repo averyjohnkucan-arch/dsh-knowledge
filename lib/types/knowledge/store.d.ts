@@ -15,6 +15,7 @@ import type { KnowledgeBase, KnowledgeChunk, KnowledgeDocument } from './types.j
 export interface ChunkStats {
     count: number;
     embedded: boolean;
+    embeddedCount: number;
     dimensions?: number;
     /** Distinct embedding-model tags on embedded chunks (count per base+model). */
     embeddingModelCounts: Array<{

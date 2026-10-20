@@ -59,6 +59,7 @@ export interface Config {
   semanticChunk: boolean
   /** Cosine threshold below which adjacent segments start a new chunk (0–1). */
   semanticChunkThreshold: number
+  semanticChunkCandidateTokens?: number
   /** Token budget per chunk (0 = off); oversized chunks split at preferred boundaries. */
   chunkTokenLimit: number
   /** Same-name conflict strategy for file imports: keep / replace / rename (Cherry's default). */
@@ -145,6 +146,7 @@ export const Config: Schema<Config> = Schema.object({
   structuredChunking: Schema.boolean().default(true),
   semanticChunk: Schema.boolean().default(false),
   semanticChunkThreshold: Schema.number().default(0.75),
+  semanticChunkCandidateTokens: Schema.number().default(128),
   chunkTokenLimit: Schema.number().default(0),
   conflictStrategy: Schema.union(['keep', 'replace', 'rename']).default('rename'),
   urlRefreshHours: Schema.number().default(0),
@@ -210,6 +212,7 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     structuredChunking: overrides.structuredChunking ?? config.structuredChunking ?? true,
     semanticChunk: overrides.semanticChunk ?? config.semanticChunk,
     semanticChunkThreshold: clampNumber(overrides.semanticChunkThreshold ?? config.semanticChunkThreshold, 0, 1, 0.75),
+    semanticChunkCandidateTokens: clampInt(overrides.semanticChunkCandidateTokens ?? config.semanticChunkCandidateTokens ?? 128, 0, Math.min(1024, chunkSize), 128),
     chunkTokenLimit: clampInt(overrides.chunkTokenLimit ?? config.chunkTokenLimit, 0, 1_000_000, 0),
     conflictStrategy: overrides.conflictStrategy ?? config.conflictStrategy,
     urlRefreshHours: clampInt(overrides.urlRefreshHours ?? config.urlRefreshHours, 0, 24 * 365, 0),
@@ -275,6 +278,7 @@ export function resolveConfigFor(config: Config, overrides: ConfigOverrides, bas
     structuredChunking: baseConfig.structuredChunking ?? resolved.structuredChunking,
     semanticChunk: baseConfig.semanticChunk ?? resolved.semanticChunk,
     semanticChunkThreshold: clampNumber(baseConfig.semanticChunkThreshold ?? resolved.semanticChunkThreshold, 0, 1, 0.75),
+    semanticChunkCandidateTokens: clampInt(baseConfig.semanticChunkCandidateTokens ?? resolved.semanticChunkCandidateTokens ?? 128, 0, Math.min(1024, chunkSize), 128),
     chunkTokenLimit: clampInt(baseConfig.chunkTokenLimit ?? resolved.chunkTokenLimit, 0, 1_000_000, 0),
     conflictStrategy: baseConfig.conflictStrategy ?? resolved.conflictStrategy,
     urlRefreshHours: clampInt(baseConfig.urlRefreshHours ?? resolved.urlRefreshHours, 0, 24 * 365, 0),

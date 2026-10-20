@@ -195,6 +195,10 @@ export declare class KnowledgeService extends Service {
     deleteBase(id: string): Promise<void>;
     renameBase(id: string, request: UpdateBaseRequest): Promise<KnowledgeBase>;
     private readonly embeddingBackfills;
+    /** Explicit full vector pass, separate from sync, parsing and chunking. */
+    revectorizeBase(baseId: string): {
+        queued: true;
+    };
     /** Enable vectors from saved canonical text; unchanged external files must not be skipped. */
     private backfillBaseEmbeddings;
     private runEmbeddingBackfill;
@@ -485,8 +489,8 @@ export declare class KnowledgeService extends Service {
         apiKey?: string;
     }): Promise<number>;
     enterEmbeddingForeground(): Promise<() => void>;
-    embeddingAccelerationStatus(): Promise<import("./embedding-acceleration.js").EmbeddingAccelerationStatus>;
-    prepareEmbeddingAcceleration(): Promise<import("./embedding-acceleration.js").EmbeddingAccelerationStatus>;
+    embeddingAccelerationStatus(model?: string): Promise<import("./embedding-acceleration.js").EmbeddingAccelerationStatus>;
+    prepareEmbeddingAcceleration(model?: string): Promise<import("./embedding-acceleration.js").EmbeddingAccelerationStatus>;
     listLocalModels(): Promise<LocalModelSummary[]>;
     downloadLocalModel(id: string): Promise<LocalModelSummary>;
     registerCustomLocalReranker(id: string): Promise<LocalModelSummary>;

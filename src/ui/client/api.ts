@@ -46,6 +46,7 @@ export interface BaseConfig {
   structuredChunking?: boolean
   semanticChunk?: boolean
   semanticChunkThreshold?: number
+  semanticChunkCandidateTokens?: number
   chunkTokenLimit?: number
   conflictStrategy?: 'keep' | 'replace' | 'rename'
   urlRefreshHours?: number
@@ -220,6 +221,7 @@ export interface KnowledgeConfig {
   embeddingBatchSize: number
   semanticChunk: boolean
   semanticChunkThreshold: number
+  semanticChunkCandidateTokens?: number
   chunkTokenLimit: number
   conflictStrategy: 'keep' | 'replace' | 'rename'
   urlRefreshHours: number
@@ -341,6 +343,7 @@ export interface BaseStats {
   charCount: number
   tokenCount: number
   embedded: boolean
+  embeddedChunkCount?: number
   embeddingDimensions?: number
   staleEmbeddings?: boolean
   staleChunkCount?: number
@@ -526,8 +529,8 @@ export class KnowledgeApi {
    * Embed one probe text through the given (or current) embedding config and
    * return the vector width (Cherry's dimension probe, run before a save).
    */
-  getEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('GET','/embedding-acceleration') }
-  prepareEmbeddingAcceleration(): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('POST','/embedding-acceleration',{}) }
+  getEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('GET',`/embedding-acceleration${model ? `?model=${encodeURIComponent(model)}` : ''}`) }
+  prepareEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('POST',`/embedding-acceleration${model ? `?model=${encodeURIComponent(model)}` : ''}`,{}) }
 
   probeEmbeddingDimensions(options: {
     provider?: EmbeddingProvider
@@ -726,6 +729,8 @@ export class KnowledgeApi {
   renameDocument(documentId: string, title: string): Promise<{ id: string; title: string }> {
     return this.call('PATCH', `/documents/${encodeURIComponent(documentId)}`, { title })
   }
+
+  revectorizeBase(baseId: string): Promise<{ queued: true }> { return this.call('POST', `/bases/${encodeURIComponent(baseId)}/revectorize`, {}) }
 
   reindexDocument(documentId: string, mode?: 'reparse' | 'rechunk'): Promise<{ id: string; chunkCount: number; sync?: DirectorySyncResult }> {
     return this.call('POST', `/documents/${encodeURIComponent(documentId)}/reindex`, mode === undefined ? undefined : { mode }, 2 * 60 * 60_000 + 30_000)

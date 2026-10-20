@@ -3,7 +3,7 @@ import os,pathlib,urllib.request,json,hashlib,zipfile,platform,subprocess,sys
 
 def bootstrap(root):
     root=pathlib.Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
-    env={**os.environ,'UV_PYTHON_INSTALL_DIR':str(root/'python'),'UV_CACHE_DIR':str(root/'uv-cache'),'CUDA_VISIBLE_DEVICES':'','HIP_VISIBLE_DEVICES':'','ROCR_VISIBLE_DEVICES':''}
+    env={**os.environ,'UV_PYTHON_INSTALL_DIR':str(root/'python'),'UV_CACHE_DIR':str(root/'uv-cache'),'UV_HTTP_TIMEOUT':os.environ.get('UV_HTTP_TIMEOUT','600'),'UV_HTTP_RETRIES':os.environ.get('UV_HTTP_RETRIES','5'),'CUDA_VISIBLE_DEVICES':'','HIP_VISIBLE_DEVICES':'','ROCR_VISIBLE_DEVICES':''}
     uv=root/'bootstrap'/'uv-0.13.3.data'/'scripts'/('uv.exe' if os.name=='nt' else 'uv')
     if not uv.exists():
         machine=platform.machine().lower()

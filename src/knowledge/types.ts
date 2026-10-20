@@ -70,6 +70,7 @@ export interface BaseConfig {
   readonly structuredChunking?: boolean
   readonly semanticChunk?: boolean
   readonly semanticChunkThreshold?: number
+  readonly semanticChunkCandidateTokens?: number
   readonly chunkTokenLimit?: number
   readonly conflictStrategy?: 'keep' | 'replace' | 'rename'
   readonly urlRefreshHours?: number
@@ -96,6 +97,7 @@ export interface BaseConfig {
 /** One knowledge base (a namespace of documents). */
 export interface KnowledgeBase {
   readonly embeddingBackfillPending?: boolean
+  readonly embeddingBackfillRevision?: string
   readonly storageMode?: 'internal' | 'external'
   readonly externalPath?: string
   readonly syncEnabled?: boolean
@@ -232,6 +234,8 @@ export interface KnowledgeDocument {
    * resume the interrupted embed instead of dropping the document.
    */
   readonly incomplete?: boolean
+  /** Last completed explicit re-vectorization pass. */
+  readonly vectorizationRevision?: string
   /** Reason embedding failed at import/reindex time, when it degraded to lexical-only. */
   readonly embeddingError?: string
   /**
@@ -312,6 +316,7 @@ export interface KnowledgeConfig {
   readonly semanticChunk: boolean
   /** Cosine threshold below which adjacent segments start a new chunk (0–1). */
   readonly semanticChunkThreshold: number
+  readonly semanticChunkCandidateTokens?: number
   /** Token budget per chunk (0 = off); oversized chunks split at preferred boundaries. */
   readonly chunkTokenLimit: number
   /** Same-name conflict strategy for file imports: keep / replace / rename (Cherry's default). */
@@ -507,6 +512,7 @@ export interface BaseStats {
   readonly tokenCount: number
   /** Whether the base's chunks carry embeddings. */
   readonly embedded: boolean
+  readonly embeddedChunkCount?: number
   readonly embeddingDimensions?: number
   /** True when some embedded chunks were produced by a different embedding model than the one now configured. */
   readonly staleEmbeddings?: boolean

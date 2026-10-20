@@ -33,10 +33,11 @@ export declare function chunkText(text: string, size: number, overlap: number, o
  */
 export declare function splitSemanticSegments(text: string, options?: {
     separator?: string;
+    candidateTokens?: number;
 }): ChunkPiece[];
 /**
- * Greedy merge of embedded candidate segments into chunks of at most `size`
- * characters: adjacent segments merge while (a) their cosine similarity is at
+ * Greedy merge of embedded candidate segments within one heading. Adjacent
+ * prose segments merge while (a) their cosine similarity is at
  * least `threshold` (semantically coherent) and (b) the combined length stays
  * within `size`. The merged chunk's vector is the length-weighted mean of its
  * segments' vectors (renormalized), so semantic chunking costs no extra
@@ -46,6 +47,14 @@ export declare function splitSemanticSegments(text: string, options?: {
 export declare function mergeSemanticSegments(segments: readonly ChunkPiece[], vectors: readonly (number[] | undefined)[], size: number, threshold?: number): Array<ChunkPiece & {
     embedding?: number[];
 }>;
+/** Consume embedded batches immediately; retain final vectors and one running
+ * sum instead of a second complete collection of every paragraph vector. */
+export declare function createSemanticMerger(segments: readonly ChunkPiece[], size: number, threshold?: number): {
+    add(segment: ChunkPiece, vector?: number[]): void;
+    finish(): Array<ChunkPiece & {
+        embedding?: number[];
+    }>;
+};
 /**
  * Refine chunks to a token budget (Cherry's `refineChunksByTokenLimit`): any
  * chunk whose estimated token count exceeds `tokenLimit` is split at the

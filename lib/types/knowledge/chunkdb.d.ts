@@ -206,6 +206,7 @@ export declare class ChunkDatabase implements RetrievalLane {
     chunkStats(baseIds: readonly string[]): {
         count: number;
         embedded: boolean;
+        embeddedCount: number;
         dimensions?: number;
         embeddingModelCounts: Array<{
             baseId: string;

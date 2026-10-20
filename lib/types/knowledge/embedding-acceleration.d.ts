@@ -1,11 +1,14 @@
+export declare const FP16_EMBEDDING_MODEL = "dsh-local/Qwen3-Embedding-0.6B-FP16-Accelerated";
 export declare const OPENVINO_EMBEDDING_MODEL = "OpenVINO/Qwen3-Embedding-0.6B-int8-ov";
 interface Device {
+    maxTokens?: number;
     device: string;
     name?: string;
     qualified: boolean;
     medianMs?: number;
     minimumCosine?: number;
     error?: string;
+    blockedReason?: string;
 }
 export interface EmbeddingAccelerationStatus {
     status: 'not_installed' | 'installing' | 'ready' | 'error';
@@ -13,17 +16,27 @@ export interface EmbeddingAccelerationStatus {
     devices: Device[];
 }
 export declare class EmbeddingAcceleration {
+    private readonly fp16;
+    constructor(fp16?: boolean);
     private cache;
     private lanes;
     private ready?;
     private setup?;
     private setupChild?;
+    private readonly intelAvailability;
+    private used;
     private foreground;
     private timer?;
     private checking;
+    private polling;
     private stopped;
+    private warming?;
+    private warmed;
+    private reference?;
+    private gpuRetryAt;
     private igpuAllowed;
     private mainGpuAllowed;
+    private mainGpuCopies;
     private gpuTried;
     private threads;
     private cpuInstances;
@@ -46,7 +59,8 @@ export declare class EmbeddingAcceleration {
     private command;
     prepare(): Promise<EmbeddingAccelerationStatus>;
     private run;
-    embed(texts: readonly string[]): Promise<number[][]>;
+    warm(): Promise<void>;
+    embed(texts: readonly string[], purpose?: 'query' | 'index'): Promise<number[][]>;
     private stopGpu;
     enterForeground(): Promise<() => void>;
     private updateGpus;
@@ -55,5 +69,6 @@ export declare class EmbeddingAcceleration {
     dispose(): void;
 }
 export declare const embeddingAcceleration: EmbeddingAcceleration;
+export declare const embeddingFp16Acceleration: EmbeddingAcceleration;
 export {};
 //# sourceMappingURL=embedding-acceleration.d.ts.map

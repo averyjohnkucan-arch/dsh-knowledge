@@ -161,6 +161,22 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     expect(chunk.embeddingModel).toBe('openai:m9')
   })
 
+  it('migrates Qwen export vectors in place without applying new chunk settings', async () => {
+    const service = await mountService()
+    const base = await service.createBase({ name: 'Qwen precision', config: {
+      embeddingProvider: 'local', embeddingModel: 'onnx-community/Qwen3-Embedding-0.6B-ONNX',
+    } })
+    const doc = await service.addTextDocument({ baseId: base.id, title: 'evidence', content: 'Original canonical source evidence. '.repeat(100) })
+    await service.waitForIdle()
+    const chunks = service.listChunks(doc.id).map(({ id, text }) => ({ id, text }))
+    embedTextsMock.mockClear()
+    await service.renameBase(base.id, { config: { chunkSize: 64, embeddingModel: 'dsh-local/Qwen3-Embedding-0.6B-FP16-Accelerated' } })
+    await service.waitForIdle()
+    expect(embedTextsMock).toHaveBeenCalled()
+    expect(service.listChunks(doc.id).map(({ id, text }) => ({ id, text }))).toEqual(chunks)
+    expect(service.listChunks(doc.id).every(chunk => chunk.embeddingModel === 'local:dsh-local/Qwen3-Embedding-0.6B-FP16-Accelerated:canonical-fp16-v1')).toBe(true)
+  })
+
   it('backfills unchanged folder files from canonical text instead of a sync that skips them', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kb-embedding-folder-'))
     try {
@@ -188,6 +204,72 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('persists semantic merges and skips their embedding work on unchanged folder sync', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kb-semantic-once-'))
+    try {
+      await writeFile(join(root, 'sample.txt'), '# Astronomy\nA telescope collects distant light.\n\nDetectors record observations.\n\n# Accounting\nInvoices support reimbursement.')
+      const service = await mountService()
+      const base = await service.createBase({ name: 'semantic once', storageMode: 'external', externalPath: root, syncEnabled: false, config: {
+        embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'm1',
+        semanticChunk: true, semanticChunkThreshold: 0,
+      } })
+      embedTextsMock.mockClear()
+      await service.importDirectoryTree(base.id, root)
+      await service.waitForIdle()
+      const doc = service.listDocuments(base.id).find(entry => entry.sourceType === 'file')!
+      const chunks = service.listChunks(doc.id)
+      expect(chunks).toHaveLength(2)
+      expect(chunks[0].text).toContain('\n\n')
+      expect(embedTextsMock.mock.calls.flatMap(call => call[4])).toHaveLength(2)
+      embedTextsMock.mockClear()
+      await service.importDirectoryTree(base.id, root)
+      await service.waitForIdle()
+      expect(embedTextsMock).not.toHaveBeenCalled()
+      expect(service.listChunks(doc.id)).toEqual(chunks)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('continues other documents after one exhausts embedding retries', async () => {
+    const service = await mountService()
+    const base = await service.createBase({ name: 'isolated failure' })
+    const goodA = await service.addTextDocument({ baseId: base.id, title: 'good A', content: 'Healthy astronomy evidence.' })
+    const bad = await service.addTextDocument({ baseId: base.id, title: 'bad', content: 'Unembeddable example.' })
+    const goodB = await service.addTextDocument({ baseId: base.id, title: 'good B', content: 'Healthy ocean evidence.' })
+    await service.waitForIdle()
+    const originalImplementation = embedTextsMock.getMockImplementation()!
+    embedTextsMock.mockImplementation(async (...args) => {
+      if (args[4].some(text => text.includes('Unembeddable'))) throw new Error('Test provider failure')
+      return originalImplementation(...args)
+    })
+    try {
+      await service.renameBase(base.id, { config: { embeddingProvider: 'openai', embeddingModel: 'm1', embeddingBaseUrl: 'http://x' } })
+      await service.waitForIdle()
+      expect(service.listChunks(goodA.id).every(chunk => chunk.embedding?.length)).toBe(true)
+      expect(service.listChunks(goodB.id).every(chunk => chunk.embedding?.length)).toBe(true)
+      expect(service.listDocuments(base.id).find(doc => doc.id === bad.id)?.embeddingError).toContain('Test provider failure')
+      expect(service.processingSummary().find(row => row.id === `embedding:${base.id}`)).toMatchObject({ completed: 3, processed: 2, failed: 1, active: false })
+    } finally { embedTextsMock.mockImplementation(originalImplementation) }
+  })
+
+  it('explicitly re-vectorizes unchanged chunks instead of reusing their cached vectors', async () => {
+    const service = await mountService()
+    const base = await service.createBase({ name: 'force vectors', config: {
+      embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'm1', embeddingApiKey: 'k',
+    } })
+    const doc = await service.addTextDocument({ baseId: base.id, title: 'fixed', content: 'Important saved evidence.' })
+    await service.waitForIdle()
+    const original = service.listChunks(doc.id).map(({ id, text }) => ({ id, text }))
+    await service.renameBase(base.id, { config: { chunkSize: 64 } })
+    embedTextsMock.mockClear()
+    expect(service.revectorizeBase(base.id)).toEqual({ queued: true })
+    expect(() => service.revectorizeBase(base.id)).toThrow('already running')
+    await service.waitForIdle()
+    expect(embedTextsMock).toHaveBeenCalled()
+    expect(service.listChunks(doc.id).map(({ id, text }) => ({ id, text }))).toEqual(original)
+    const meter = service.processingSummary().find(row => row.id === `embedding:${base.id}`)!
+    expect(meter).toMatchObject({ completed: 1, processed: 1, failed: 0, active: false })
+  })
+
   it('reuses vectors across documents with identical chunk text', async () => {
     embedTextsMock.mockClear()
     const service = await mountService()
@@ -198,13 +280,13 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     // The shared paragraph is its own block, so it slices into identical
     // chunks in both documents (same title → same context → same search text).
     const shared = 'shared paragraph text '.repeat(60)
-    const docA = await service.addTextDocument({ baseId: base.id, title: 'A', content: `AAA\n\n${shared}` })
+    const docA = await service.addTextDocument({ baseId: base.id, title: 'A', content: `# Unique\nAAA\n\n# Shared\n${shared}` })
     expect(embedTextsMock).toHaveBeenCalled()
 
     // Doc B reuses A's vectors for the shared paragraph; only the 'BBB' block
     // is embedded.
     embedTextsMock.mockClear()
-    const docB = await service.addTextDocument({ baseId: base.id, title: 'A', content: `BBB\n\n${shared}` })
+    const docB = await service.addTextDocument({ baseId: base.id, title: 'A', content: `# Unique\nBBB\n\n# Shared\n${shared}` })
     expect(embedTextsMock).toHaveBeenCalled()
     const bTexts = embedTextsMock.mock.calls.flatMap(call => call[4])
     expect(bTexts.some(text => text.includes('shared paragraph'))).toBe(false)
@@ -241,7 +323,7 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
       config: { embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'm1', embeddingApiKey: 'k', embeddingBatchSize: 1 },
     })
     // Enough text for several chunks (batchSize 1 → one API call per chunk).
-    const content = 'alpha paragraph\n\nbeta paragraph\n\ngamma paragraph\n\ndelta paragraph'
+    const content = '# Alpha\nalpha paragraph\n\n# Beta\nbeta paragraph\n\n# Gamma\ngamma paragraph\n\n# Delta\ndelta paragraph'
     await service.addTextDocument({ baseId: base.id, title: 'doc', content })
     const firstEmbeddings = embedTextsMock.mock.calls.flatMap(call => call[4])
     expect(firstEmbeddings.length).toBeGreaterThan(2)

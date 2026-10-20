@@ -965,7 +965,7 @@ export const en: Record<KnowledgeKey, string> = {
   docProcessingHint: 'Document preprocessing runs automatically during document import. Choosing the right provider can improve document parsing quality.',
   processorBuiltin: 'Built-in parser (PDF / DOCX / PPTX / XLSX / EPUB / HTML / text)',
   smartChunk: 'Smart Chunking',
-  smartChunkHint: 'Automatically split along Markdown structure (headings, code blocks, paragraphs) and never split inside a code block. Turn off to split purely by the separator.',
+  smartChunkHint: 'Pack nearby paragraphs into budget-sized passages within each heading. Preserve paragraph breaks and fenced code boundaries. Turn off to split purely by the separator.',
   semanticChunk: 'Semantic chunking',
   semanticChunkHint: 'Embed paragraphs and merge adjacent similar ones (needs an embedding provider; off = heading/paragraph chunking)',
   semanticChunkThreshold: 'Merge threshold',

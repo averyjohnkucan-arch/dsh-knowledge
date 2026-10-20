@@ -15,6 +15,7 @@
  * @module dsh-knowledge/knowledge/embed-process
  */
 
+import { embeddingWindows, mergeWindowVectors } from './embedding-context.js'
 import { availableParallelism, freemem } from 'node:os'
 import { orderedEmbeddingLanes, resolveEmbeddingCpuTuning, type EmbeddingCpuTuning } from './embedding-tuning.js'
 import { parentPort } from 'node:worker_threads'
@@ -242,7 +243,7 @@ async function createRunner(
     }
   }
   const tuning = { ...activeCpuTuning }
-  type EmbeddingPipeline = ((text: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): unknown }>) & { dispose?(): Promise<void> }
+  type EmbeddingPipeline = ((text: string | string[], options?: Record<string, unknown>) => Promise<{ tolist(): unknown }>) & { dispose?(): Promise<void>; tokenizer?: ((text: string, options: Record<string, unknown>) => { input_ids: { dims: number[] } }) & { model_max_length?: number } }
   const make = async () => await tf.pipeline(task, join(cacheDir, modelId), { device: 'cpu', dtype: 'q8', session_options: { intraOpNumThreads: tuning.threads, interOpNumThreads: 1 } }) as EmbeddingPipeline
   const pipelines: Array<Promise<EmbeddingPipeline>> = [make()]
   await pipelines[0]
@@ -258,7 +259,23 @@ async function createRunner(
       while (pipelines.length < count) pipelines.push(make())
       const models = await Promise.all(pipelines.slice(0, count))
       const outputs = await orderedEmbeddingLanes(batches, count, async (batch, _index, lane) => {
-        const output = await models[lane](batch, { pooling, normalize: true })
+        const model = models[lane], tokenizer = model.tokenizer
+        const limit = tokenizer?.model_max_length
+        // FeatureExtractionPipeline otherwise truncates silently at 512 tokens
+        // for BGE/GTE/E5. Encode every window and pool; never drop the tail.
+        if (tokenizer && Number.isFinite(limit) && limit! > 0 && limit! <= 4096) {
+          const windows = await Promise.all(batch.map(text => embeddingWindows(text, limit!, async part => tokenizer(part, { truncation: false, padding: false }).input_ids.dims[1])))
+          if (windows.some(parts => parts.length > 1)) {
+            const rows: number[][] = []
+            for (const parts of windows) {
+              const vectors: number[][] = []
+              for (const part of parts) vectors.push(((await model([part.text], { pooling, normalize: true })).tolist() as number[][])[0])
+              rows.push(mergeWindowVectors(vectors, parts.map(part => part.tokens)))
+            }
+            return rows
+          }
+        }
+        const output = await model(batch, { pooling, normalize: true })
         return output.tolist() as number[][]
       })
       return outputs.flat()

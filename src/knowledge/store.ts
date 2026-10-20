@@ -25,6 +25,7 @@ import type {
 export interface ChunkStats {
   count: number
   embedded: boolean
+  embeddedCount: number
   dimensions?: number
   /** Distinct embedding-model tags on embedded chunks (count per base+model). */
   embeddingModelCounts: Array<{ baseId: string; model: string; count: number }>
@@ -929,12 +930,14 @@ class MemoryStore implements Store {
     const modelCounts = new Map<string, number>()
     let count = 0
     let embedded = false
+    let embeddedCount = 0
     let dimensions: number | undefined
     for (const chunk of this.chunks.values()) {
       if (!scope.has(chunk.baseId)) continue
       count += 1
       if (chunk.embedding === undefined) continue
       embedded = true
+      embeddedCount++
       if (dimensions === undefined) dimensions = chunk.embedding.length
       if (chunk.embeddingModel !== undefined) {
         const key = `${chunk.baseId}\u0000${chunk.embeddingModel}`
@@ -944,6 +947,7 @@ class MemoryStore implements Store {
     return {
       count,
       embedded,
+      embeddedCount,
       ...(dimensions !== undefined ? { dimensions } : {}),
       embeddingModelCounts: [...modelCounts.entries()].map(([key, countValue]) => {
         const [baseId, model] = key.split('\u0000')

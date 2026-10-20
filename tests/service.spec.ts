@@ -143,8 +143,8 @@ describe('KnowledgeService', () => {
 
   it('attaches sibling chunks as context around a search hit', async () => {
     const service = await mountService()
-    const base = await service.createBase({ name: 'siblings' })
-    // Three paragraph blocks → three chunks (smart chunking splits on blanks).
+    const base = await service.createBase({ name: 'siblings', config: { smartChunk: false } })
+    // Explicit delimiter mode keeps paragraphs separate for sibling-window coverage.
     await service.addTextDocument({
       baseId: base.id,
       title: 'report',

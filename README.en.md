@@ -28,6 +28,26 @@ existing documents require explicit reprocessing after a parser change.
 See the [English local pipeline guide](docs/local-pipeline.md) for settings,
 progress counters, ETA behavior, and current validation limits.
 
+## Accelerated Qwen embeddings
+
+Install this fork by pasting `https://github.com/averyjohnkucan-arch/dsh-knowledge`
+into DSH's plugin installer. The default GitHub branch includes compiled plugin
+assets; no harness source changes or other engine plugins are required.
+
+Settings → Local Models includes a **Qwen3 Embedding 0.6B FP16 accelerated**
+profile. Download and validate it, then select it in the base's embedding model
+list. The plugin owns its private Python runtimes and verified model downloads.
+CPU is the fallback; supported Intel NPU/iGPU and an available NVIDIA GPU can
+help with indexing. Query embedding stays on CPU/NPU. NVIDIA workers wait while
+another inference engine reserves the GPU and yield through the existing DSH
+LLM hook before foreground inference. Unsupported hardware falls back to CPU.
+
+Semantic chunking can pack and merge neighboring paragraphs within headings,
+reusing their vectors. **Rechunk saved parsing result** applies new chunk settings
+without OCR. **Re-vectorize all** replaces vectors while preserving chunk text
+and IDs; both have progress. Export changes never mix incompatible vectors.
+See [measurements and limitations](docs/embedding-performance.md).
+
 ## Why dsh-knowledge
 
 dsh-knowledge brings document ingestion, parsing, chunking, retrieval, evidence composition, and anchored follow-up reading into DSH. It works without vector configuration and can also run with fully local models, without a separate knowledge-base service.
@@ -85,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.2.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.4.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge

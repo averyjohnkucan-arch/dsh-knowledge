@@ -6,6 +6,7 @@ export declare class StructureProcess {
     private prefix;
     private child?;
     private pending?;
+    private get label();
     private sequence;
     private log;
     constructor(command: string, args: string[], env: NodeJS.ProcessEnv, prefix?: string);

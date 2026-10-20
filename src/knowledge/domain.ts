@@ -50,6 +50,7 @@ export const baseConfigSchema = z.object({
   structuredChunking: z.boolean().optional(),
   semanticChunk: z.boolean().optional(),
   semanticChunkThreshold: z.number().gte(0).lte(1).optional(),
+  semanticChunkCandidateTokens: z.number().int().gte(0).lte(1024).optional(),
   chunkTokenLimit: z.number().int().gte(0).optional(),
   conflictStrategy: z.enum(['keep', 'replace', 'rename']).optional(),
   urlRefreshHours: z.number().int().gte(0).optional(),
@@ -68,6 +69,7 @@ export const baseConfigSchema = z.object({
 
 const baseSchema = z.object({
   embeddingBackfillPending: z.boolean().optional(),
+  embeddingBackfillRevision: z.string().optional(),
   storageMode: z.enum(['internal', 'external']).optional(),
   externalPath: z.string().optional(),
   syncEnabled: z.boolean().optional(),
@@ -118,6 +120,7 @@ export const documentSchema = z.object({
   tokenCount: z.number().int().gte(0).optional(),
   chunkCount: z.number().int().gte(0),
   incomplete: z.boolean().optional(),
+  vectorizationRevision: z.string().optional(),
   embeddingError: z.string().optional(),
   errorCode: z.enum(['interrupted', 'dimension_mismatch', 'parse_failed', 'embedding_provider']).optional(),
   createdAt: z.number(),
@@ -159,6 +162,7 @@ export const configOverridesSchema = z.object({
   structuredChunking: z.boolean().optional(),
   semanticChunk: z.boolean().optional(),
   semanticChunkThreshold: z.number().gte(0).lte(1).optional(),
+  semanticChunkCandidateTokens: z.number().int().gte(0).lte(1024).optional(),
   chunkTokenLimit: z.number().int().gte(0).optional(),
   conflictStrategy: z.enum(['keep', 'replace', 'rename']).optional(),
   urlRefreshHours: z.number().int().gte(0).optional(),
@@ -212,6 +216,7 @@ export interface ConfigOverrides {
   structuredChunking?: boolean
   semanticChunk?: boolean
   semanticChunkThreshold?: number
+  semanticChunkCandidateTokens?: number
   chunkTokenLimit?: number
   conflictStrategy?: 'keep' | 'replace' | 'rename'
   urlRefreshHours?: number

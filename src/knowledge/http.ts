@@ -227,8 +227,8 @@ async function route(
   }
 
   if (segments[0] === 'embedding-acceleration') {
-    if (method === 'GET') return service.embeddingAccelerationStatus()
-    if (method === 'POST') return service.prepareEmbeddingAcceleration()
+    if (method === 'GET') return service.embeddingAccelerationStatus(query.get('model') ?? undefined)
+    if (method === 'POST') return service.prepareEmbeddingAcceleration(query.get('model') ?? undefined)
     return undefined
   }
 
@@ -409,6 +409,7 @@ async function route(
           ...(typeof bodyRequest.parentDirectoryId === 'string' ? { parentDirectoryId: bodyRequest.parentDirectoryId } : {}),
         })
       }
+      if (segments[2] === 'revectorize' && method === 'POST') return service.revectorizeBase(baseId)
       if (segments[2] === 'restore' && method === 'POST') {
         const config = typeof body.config === 'object' && body.config !== null
           ? body.config as BaseConfig

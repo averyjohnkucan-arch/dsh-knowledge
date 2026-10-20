@@ -1,3 +1,4 @@
+import { canMigrateQwenVectors } from '../../knowledge/qwen-embedding-variants.js'
 /**
  * Cherry Studio-style per-base retrieval settings panel (the 设置 view): the
  * exact section order of RagConfigPanel — 文档处理, 嵌入模型, 重排模型,
@@ -172,7 +173,8 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
   const embeddingChanged = values.embeddingProvider !== initial.embeddingProvider
     || values.embeddingModel !== initial.embeddingModel
   const hadModel = initial.embeddingProvider !== 'none' && (initial.embeddingModel ?? '').trim() !== ''
-  const needsRebuild = embeddingChanged && hadModel && (base.documentCount ?? 0) > 0
+  const vectorMigration = embeddingChanged && hadModel && canMigrateQwenVectors(initial, values) && (base.documentCount ?? 0) > 0
+  const needsRebuild = embeddingChanged && hadModel && !vectorMigration && (base.documentCount ?? 0) > 0
 
   const patch = (p: Partial<KnowledgeConfig>): void => setValues(prev => ({ ...prev, ...p }))
 
@@ -197,6 +199,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
     mmrDiversity: { min: 0, max: 1 },
     rrfVectorWeight: { min: 0.1, max: 5 },
     semanticChunkThreshold: { min: 0, max: 1 },
+    semanticChunkCandidateTokens: { min: 0, max: Math.min(1024, values.chunkSize), int: true },
     localRerankTimeoutMs: { min: 10_000, max: 300_000, int: true },
     documentProcessingTimeoutMs: { min: 10_000, max: 7_200_000, int: true },
     localWorkerIdleTimeoutMs: { min: 0, int: true },
@@ -564,6 +567,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
               </div>
             </>
           )}
+          {vectorMigration && <p style={style.hint}>Saving regenerates vectors in the background using the selected Qwen export. Documents and chunks stay intact; incompatible old vectors are excluded from search during the migration.</p>}
           {needsRebuild && (
             <div style={{ marginTop: 10 }}>
               <div style={style.warningHint}>{t('embeddingSwitchWarning')}</div>
@@ -691,6 +695,10 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   />
                 </FieldRow>
               )}
+              {values.semanticChunk && <FieldRow label="Semantic candidate size (tokens)" hint="Group short neighboring paragraphs within the same heading before embedding, then merge similar groups up to the chunk budget. Default 128; zero embeds each paragraph separately. Saved results are reused for unchanged files.">
+                <input style={{ ...style.input, width: 100 }} type="number" min={0} max={Math.min(1024, values.chunkSize)} step={32}
+                  value={values.semanticChunkCandidateTokens ?? 128} onChange={e => patchNumber('semanticChunkCandidateTokens', e.target.value)} />
+              </FieldRow>}
               <FieldRow label={t('chunkTokenLimit')} hint={t('chunkTokenLimitHint')}>
                 <input
                   style={{ ...style.input, width: 100 }}
