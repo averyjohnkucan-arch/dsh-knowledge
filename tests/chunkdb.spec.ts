@@ -304,3 +304,23 @@ describe('large-library status indexes', () => {
     db.close()
   })
 })
+
+
+describe('embedding format isolation', () => {
+  it('ignores stale vector formats while keeping their lexical evidence available', async () => {
+    const db = open()
+    db.putChunks([
+      { id: 'old', docId: 'd-old', baseId: 'b', index: 0, text: 'astronomy old', embedding: [1, 0], embeddingModel: 'local:qwen' },
+      { id: 'new', docId: 'd-new', baseId: 'b', index: 0, text: 'astronomy new', embedding: [0.9, 0.1], embeddingModel: 'local:qwen:canonical-single-v1' },
+      { id: 'untagged', docId: 'd-untagged', baseId: 'b', index: 0, text: 'astronomy untagged', embedding: [1, 0] },
+    ])
+    const filter = { embeddingModel: 'local:qwen:canonical-single-v1' }
+    const vector = await db.vector([1, 0], ['b'], 10, filter)
+    expect(vector.total).toBe(1)
+    expect(vector.hits.map(hit => hit.id)).toEqual(['new'])
+    expect((await db.lexical('astronomy', ['b'], 10, filter)).hits).toHaveLength(3)
+    expect([...db.docChunkStatus('b', filter.embeddingModel).missingEmbedding].sort()).toEqual(['d-old', 'd-untagged'])
+    expect(db.docChunkStatus('b').missingEmbedding.size).toBe(0)
+    db.close()
+  })
+})

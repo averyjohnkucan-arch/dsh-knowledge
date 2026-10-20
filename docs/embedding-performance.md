@@ -4,7 +4,7 @@
 
 1. Install the plugin from `https://github.com/averyjohnkucan-arch/dsh-knowledge` using the GitHub link installer.
 2. Open Settings → Local Models. Download the standard local models, or use Download / validate CPU and NPU embedding for the optional OpenVINO export.
-3. Select an installed model in the knowledge base settings and save. Existing lexical-only documents are embedded from canonical text, without parsing or OCR again. Backfill progress is durable across restarts when automatic recovery is enabled.
+3. Select an installed model in the knowledge base settings and save. Existing lexical-only documents are embedded from their existing chunks, without parsing, OCR, or re-chunking again. Backfill progress is durable across restarts when automatic recovery is enabled.
 4. The original ONNX model and the OpenVINO export have different model identities and vector spaces. Changing between them requires a new or rebuilt base.
 
 The plugin owns Python bootstrap, pinned Intel user-space runtime libraries, model downloads, validation, queues and CPU fallback. Cache paths derive from the DSH home or the configured model cache. No old Local AI paths, Strata or NInfer plugins are required. Linux and Windows x64 bootstrap paths are included. Kernel/device drivers must already be available; the plugin never installs drivers into the OS. Windows execution has not been verified on hardware.
@@ -23,6 +23,8 @@ Intel Core Ultra 9 285HX, 24 logical CPUs, Intel AI Boost NPU. Tests used the sa
 | NPU, 1 request | 7.8 | OpenVINO export |
 | NPU, 2 concurrent requests | 8.1 | Small gain; one NPU lane retained |
 | OpenVINO, CPU + NPU plugin scheduler | Up to 15.7 | Short warm run; sample and load dependent |
+
+The older padded ONNX batches differed from single-text vectors (minimum cosine 0.892 in the check). Qwen3 ONNX now always runs one text per inference, with a versioned vector-format tag. Legacy vectors are excluded from vector search and migrated in the background when automatic recovery is enabled; lexical search stays available. Migration preserves existing chunk boundaries and IDs.
 
 ONNX pool vectors matched the original single-text CPU path at cosine ≥0.9999996. OpenVINO CPU/NPU vectors matched each other at cosine ≥0.9995 in calibration. Mixing the two exports is explicitly prevented by their different model IDs. A warm OpenVINO query took approximately 0.13 seconds in the small test.
 

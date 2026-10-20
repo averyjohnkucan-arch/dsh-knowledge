@@ -435,7 +435,11 @@ export class KnowledgeService extends Service {
     void resume.catch(error => this.ctx.logger.warn(`knowledge: interrupted-import recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     void resume.then(async () => {
       for (const base of store.listBases()) {
-        if (base.embeddingBackfillPending && this.getConfigFor(base.id).resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
+        const config = this.getConfigFor(base.id), key = embeddingKey(config)
+        const legacyQwen = key?.endsWith(':canonical-single-v1') === true
+          && store.chunkStats([base.id]).embeddingModelCounts.some(entry => entry.model !== key)
+        if (legacyQwen && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
+        if ((base.embeddingBackfillPending || legacyQwen) && config.resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
       }
     }).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     this.armUrlRefreshTimer()
@@ -908,7 +912,7 @@ export class KnowledgeService extends Service {
     }
     if (this.shuttingDown || !store.getBase(baseId)) return
     const meterId = `embedding:${baseId}`
-    const missing = store.docChunkStatus(baseId).missingEmbedding
+    const missing = store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
     const documents = store.listDocuments(baseId, { includeRawText: false })
       .filter(doc => doc.sourceType !== 'directory' && missing.has(doc.id))
     this.processingMeter.start(meterId, baseId)
@@ -920,7 +924,7 @@ export class KnowledgeService extends Service {
         await new Promise<void>(resolve => setImmediate(resolve))
         this.processingMeter.begin(meterId)
         try {
-          await this.reindexDocument(doc.id, { mode: 'rechunk' })
+          await this.embedExistingDocument(doc.id)
           this.processingMeter.settle(meterId, 'processed')
         } catch (error) {
           this.processingMeter.settle(meterId, 'failed')
@@ -930,13 +934,65 @@ export class KnowledgeService extends Service {
       })
     } finally {
       this.processingMeter.finish(meterId)
-      if (!this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId).missingEmbedding.size === 0) {
+      if (!this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
         await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false })
       }
       const remaining = (this.directoryWriteBatches.get(baseId) ?? 1) - 1
       if (remaining > 0) this.directoryWriteBatches.set(baseId, remaining)
       else { this.directoryWriteBatches.delete(baseId); if (store.getBase(baseId)) await this.touchBase(baseId) }
     }
+  }
+
+  /** Fill vectors without applying newly saved parsing/chunking settings. */
+  private async embedExistingDocument(id: string): Promise<void> {
+    const store = this.requireStore(), document = store.getDocument(id)
+    if (!document || document.sourceType === 'directory') return
+    if (this.indexing.has(id)) throw new Error('Document is already being indexed')
+    const config = this.getConfigFor(document.baseId), key = embeddingKey(config)
+    if (!key) throw new Error('No embedding model configured')
+    const chunks = store.listChunksByDoc(id).map(chunk => ({ ...chunk }))
+    if (!chunks.length) return
+    const controller = new AbortController()
+    this.indexing.set(id, { baseId: document.baseId, title: document.title, phase: 'embedding', total: chunks.length, progress: 0, controller })
+    try {
+      // The base's durable pending marker owns crash recovery. Leave the live
+      // document/chunks intact until the entire replacement can commit.
+      const hashes = chunks.map(chunk => hashEmbeddingText(chunkSearchText(chunk)))
+      // Include durable candidate batches from an interrupted embedding pass
+      // before replacing its stage; a restart must not repeat completed work.
+      const cached = store.listEmbeddingVectorsByHashes(hashes, key)
+      await store.discardStagedDocumentGeneration(id)
+      await store.stageDocumentGeneration(document, [])
+      const missing: number[] = []
+      for (let i = 0; i < chunks.length; i++) {
+        if (chunks[i].embeddingModel === key && chunks[i].embedding !== undefined) continue
+        const vector = cached.get(hashes[i])
+        if (vector) chunks[i] = { ...chunks[i], embedding: vector, embeddingModel: key }
+        else missing.push(i)
+      }
+      const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(8, config.embeddingBatchSize) : config.embeddingBatchSize)
+      for (let i = 0; i < missing.length; i += batchSize) {
+        controller.signal.throwIfAborted()
+        this.assertIndexTargetAlive(id, document.baseId)
+        const indices = missing.slice(i, i + batchSize)
+        const vectors = await this.embedWithRetry(config, indices.map(index => chunkSearchText(chunks[index])), controller.signal)
+        if (vectors.length !== indices.length || vectors.some(vector => !vector.length || vector.some(value => !Number.isFinite(value)))
+          || new Set(vectors.map(vector => vector.length)).size !== 1) throw new Error('Invalid embedding vectors')
+        const width = vectors[0].length
+        if (chunks.some(chunk => chunk.embeddingModel === key && chunk.embedding && chunk.embedding.length !== width)) throw new Error('Embedding dimension mismatch')
+        indices.forEach((index, j) => { chunks[index] = { ...chunks[index], embedding: vectors[j], embeddingModel: key } })
+        await store.stageDocumentGeneration(document, indices.map(index => chunks[index]))
+        this.indexing.set(id, { baseId: document.baseId, title: document.title, phase: 'embedding', total: missing.length,
+          progress: Math.round(100 * Math.min(i + batchSize, missing.length) / missing.length), controller })
+      }
+      controller.signal.throwIfAborted()
+      this.assertIndexTargetAlive(id, document.baseId)
+      const { embeddingError: _error, errorCode: _code, incomplete: _incomplete, ...rest } = document
+      await store.commitDocumentGeneration({ ...rest, updatedAt: Date.now() }, chunks)
+    } catch (error) {
+      if ((error as { published?: boolean }).published !== true) await store.discardStagedDocumentGeneration(id)
+      throw error
+    } finally { this.indexing.delete(id) }
   }
 
   listBases(): BaseSummary[] {
@@ -2771,7 +2827,7 @@ export class KnowledgeService extends Service {
     const store = this.requireStore()
     // One grouped pass over the base's chunks (embedding is all-or-nothing per
     // doc), avoiding a full chunk scan per document on every list.
-    const { withChunks, missingEmbedding } = store.docChunkStatus(baseId)
+    const { withChunks, missingEmbedding } = store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId)))
     const allDocs = store.listDocuments(baseId, { includeRawText: false })
     const childCount = new Map<string, number>()
     for (const doc of allDocs) {
@@ -3525,7 +3581,7 @@ export class KnowledgeService extends Service {
       if (useVector) {
         vectorAttempted = true
         try {
-          vec = await lane.vector(queryVector!, scope, poolSize, documentFilter, deadlineAt)
+          vec = await lane.vector(queryVector!, scope, poolSize, { ...documentFilter, embeddingModel: embeddingKey(config) }, deadlineAt)
           vectorSucceeded = true
           vectorReturned = vec.hits.length
           total = Math.max(total, vec.total)
@@ -3592,7 +3648,8 @@ export class KnowledgeService extends Service {
       ranked.sort((a, b) => b.score - a.score)
       if (request.mmr ?? config.mmrDiversity > 0) {
         if (config.mmrDiversity > 0 && queryVector !== undefined) {
-          ranked = maximalMarginalRelevance(ranked, byId, queryVector, config.mmrDiversity, Math.max(topK * 3, 12))
+          const compatible = new Map([...byId].map(([id, chunk]) => [id, chunk.embeddingModel === embeddingKey(config) ? chunk : { ...chunk, embedding: undefined }]))
+          ranked = maximalMarginalRelevance(ranked, compatible, queryVector, config.mmrDiversity, Math.max(topK * 3, 12))
         }
       }
       throwIfAborted(signal)
@@ -3613,7 +3670,7 @@ export class KnowledgeService extends Service {
     const candidates = chunks.map(chunk => ({
       id: chunk.id,
       text: chunkSearchText(chunk),
-      embedding: chunk.embedding,
+      embedding: chunk.embeddingModel === embeddingKey(config) ? chunk.embedding : undefined,
     }))
 
     let queryVector: number[] | undefined
@@ -4381,7 +4438,11 @@ function embeddingKey(config: KnowledgeConfig): string | undefined {
     ? DEFAULT_LOCAL_MODEL
     : config.embeddingModel.trim()
   if (model === '') return undefined
-  return `${config.embeddingProvider}:${model}`
+  // Older padded Qwen batches are not numerically compatible with the
+  // canonical single-text path, despite identical dimensions and weights.
+  const format = config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
+    ? ':canonical-single-v1' : ''
+  return `${config.embeddingProvider}:${model}${format}`
 }
 
 function retrievalStatus(

@@ -11,7 +11,7 @@ export function EmbeddingPerformance({ api }: { api: KnowledgeApi }) {
   const save = async () => { setBusy(true); try { await api.setConfig({ localEmbeddingIgpuIdle: igpu, localEmbeddingMainGpuIdle: gpu, localEmbeddingThreads: threads, localEmbeddingInstances: instances, localEmbeddingMicroBatchSize: batch }); setMessage('Saved. The next embedding request applies these settings between batches.') } catch(e) { setMessage(String(e)) } finally { setBusy(false) } }
   return <section style={{ ...style.card, marginBottom: 16 }} aria-label="Embedding performance">
     <h3 style={{ marginTop: 0 }}>Embedding performance · CPU</h3>
-    <p style={style.hint}>Automatic uses two independent eight-thread models on a machine with at least 16 logical CPUs and enough RAM. Smaller machines use fewer resources. Measured micro-batches of one avoid padding overhead. Models run in the plugin’s isolated process.</p>
+    <p style={style.hint}>Automatic uses two independent eight-thread models on a machine with at least 16 logical CPUs and enough RAM. Smaller machines use fewer resources. Qwen3 ONNX always uses one text per inference to preserve vector consistency; the micro-batch setting applies to other models. Models run in the plugin’s isolated process.</p>
     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
       <label>Threads per instance (0 = automatic)<input type="number" min={0} max={64} value={threads} onChange={e => setThreads(Number(e.target.value))} style={style.input}/></label>
       <label>Instances (0 = automatic)<input type="number" min={0} max={4} value={instances} onChange={e => setInstances(Number(e.target.value))} style={style.input}/></label>

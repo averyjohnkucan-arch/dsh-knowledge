@@ -171,7 +171,7 @@ export interface Store {
   /** Actual chunk count per document, for reconciling stale document metadata. */
   chunkCountsByDoc(baseIds: readonly string[]): Map<string, number>
   /** Per-doc chunk presence + embedding coverage in one pass (document lists). */
-  docChunkStatus(baseId: string): { withChunks: Set<string>; missingEmbedding: Set<string> }
+  docChunkStatus(baseId: string, expectedModel?: string): { withChunks: Set<string>; missingEmbedding: Set<string> }
   /**
    * Startup self-healing, returning:
    * - `removed`: documents a crashed import left behind with nothing to
@@ -592,8 +592,8 @@ class DomainStore implements Store {
     }
   }
 
-  docChunkStatus(baseId: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
-    return this.chunkDb.docChunkStatus(baseId)
+  docChunkStatus(baseId: string, expectedModel?: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
+    return this.chunkDb.docChunkStatus(baseId, expectedModel)
   }
 
   async reconcileOrphanRaws(): Promise<number> {
@@ -913,13 +913,13 @@ class MemoryStore implements Store {
     return 0
   }
 
-  docChunkStatus(baseId: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
+  docChunkStatus(baseId: string, expectedModel?: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
     const withChunks = new Set<string>()
     const missingEmbedding = new Set<string>()
     for (const chunk of this.chunks.values()) {
       if (chunk.baseId !== baseId) continue
       withChunks.add(chunk.docId)
-      if (chunk.embedding === undefined) missingEmbedding.add(chunk.docId)
+      if (chunk.embedding === undefined || expectedModel !== undefined && chunk.embeddingModel !== expectedModel) missingEmbedding.add(chunk.docId)
     }
     return { withChunks, missingEmbedding }
   }

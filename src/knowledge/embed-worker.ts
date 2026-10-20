@@ -250,7 +250,10 @@ async function createRunner(
   return {
     embed: async (texts: string[], pooling: Pooling): Promise<number[][]> => {
       const batches: string[][] = []
-      for (let i = 0; i < texts.length; i += tuning.microBatch) batches.push(texts.slice(i, i + tuning.microBatch))
+      // This quantized Qwen export is padding-sensitive: mixed-length batches
+      // change vectors. Keep its vector space canonical across all callers.
+      const microBatch = /qwen3/i.test(modelId) ? 1 : tuning.microBatch
+      for (let i = 0; i < texts.length; i += microBatch) batches.push(texts.slice(i, i + microBatch))
       const count = Math.min(tuning.instances, batches.length)
       while (pipelines.length < count) pipelines.push(make())
       const models = await Promise.all(pipelines.slice(0, count))
