@@ -511,19 +511,23 @@ export class ChunkDatabase implements RetrievalLane {
    * would fail the whole open.
    */
   private migrateEmbeddingHashColumn(): void {
+    this.db.exec('CREATE TABLE IF NOT EXISTS chunk_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
     const columns = this.db.prepare('PRAGMA table_info(chunk)').all() as Array<{ name: string }>
     if (!columns.some(column => column.name === 'embedding_text_hash')) {
       this.db.exec('ALTER TABLE chunk ADD COLUMN embedding_text_hash TEXT')
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS chunk_emb_hash_idx ON chunk(embedding_text_hash, embedding_model)')
+    // New writes already compute the hash. The legacy backfill is a migration,
+    // not a startup scan of every unembedded passage (potentially many GB).
+    if (this.readMeta('embedding_hash_backfill_v1') === '1') return
     const missing = this.db.prepare(
       'SELECT chunk_id, search_text FROM chunk WHERE embedding IS NOT NULL AND embedding_text_hash IS NULL',
     ).all() as Array<{ chunk_id: string; search_text: string }>
-    if (missing.length === 0) return
     const update = this.db.prepare('UPDATE chunk SET embedding_text_hash = ? WHERE chunk_id = ?')
     this.db.exec('BEGIN IMMEDIATE')
     try {
       for (const row of missing) update.run(hashEmbeddingText(row.search_text), row.chunk_id)
+      this.writeMeta('embedding_hash_backfill_v1', '1')
       this.db.exec('COMMIT')
     } catch (error) {
       this.db.exec('ROLLBACK')
@@ -631,7 +635,7 @@ export class ChunkDatabase implements RetrievalLane {
     // Scoped to the doc's own base: doc ids are UUIDs (globally unique in
     // practice), but an un-scoped delete would silently wipe another base's
     // rows if that invariant ever broke.
-    const deleteOld = this.db.prepare('DELETE FROM chunk WHERE doc_id = ? AND base_id = ?')
+    const deleteOld = this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ?')
     const insert = this.db.prepare(
       'INSERT INTO chunk (chunk_id, doc_id, base_id, idx, text, search_text, heading, context, embedding, embedding_model, embedding_text_hash, source_spans, processing_revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     )
@@ -753,7 +757,10 @@ export class ChunkDatabase implements RetrievalLane {
     if (doc.chunkCount !== chunks.length) throw new Error('document generation chunk count mismatch')
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare('DELETE FROM chunk WHERE doc_id = ? AND base_id = ?').run(doc.id, doc.baseId)
+      // Both columns are indexed separately. Without statistics SQLite may
+      // choose base_id and scan millions of passages for every document.
+      // This mutation is document-scoped; force its existing narrow index.
+      this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ?').run(doc.id, doc.baseId)
       const insert = this.db.prepare(`INSERT INTO chunk
         (chunk_id, doc_id, base_id, idx, text, search_text, heading, context, embedding, embedding_model, embedding_text_hash, source_spans, processing_revision)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -788,7 +795,7 @@ export class ChunkDatabase implements RetrievalLane {
   discardPublishedGeneration(doc: KnowledgeDocument): void {
     // Reused IDs must not let an old journal delete a newer incarnation's rows.
     if (doc.processing?.revision !== undefined) {
-      this.db.prepare('DELETE FROM chunk WHERE doc_id = ? AND base_id = ? AND processing_revision = ?')
+      this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ? AND processing_revision = ?')
         .run(doc.id, doc.baseId, doc.processing.revision)
       this.dropVectorCacheByDoc(doc.id)
       this.vectorCache.delete(doc.baseId)
@@ -846,7 +853,7 @@ export class ChunkDatabase implements RetrievalLane {
     // DELETE_YIELD_BUDGET_MS in deleteMaterials). `ORDER BY rowid` keeps each
     // batch deterministically anchored so the loop always makes progress.
     const stmt = this.db.prepare(
-      `DELETE FROM chunk WHERE rowid IN (SELECT rowid FROM chunk WHERE ${where} ORDER BY rowid LIMIT ?)`,
+      `DELETE FROM chunk WHERE rowid IN (SELECT rowid FROM chunk INDEXED BY chunk_doc_idx WHERE ${where} ORDER BY rowid LIMIT ?)`,
     )
     let started = Date.now()
     for (;;) {

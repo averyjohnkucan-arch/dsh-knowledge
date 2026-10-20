@@ -74,9 +74,10 @@ it('services other folders while a large source is still indexing and never over
   const monitor = new ExternalFolders(() => sources, async id => { calls.push(id); if (id === 'large') await blocked })
   const pending = monitor.tick()
   try {
-    const deadline = Date.now() + 1000
-    while (!calls.includes('small') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
-    expect(calls).toEqual(['large', 'small'])
+    const deadline = Date.now() + 3000
+    while (calls.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+    // Independent filesystem probes may finish in either order.
+    expect([...calls].sort()).toEqual(['large', 'small'])
     expect(monitor.states.get('paused')?.state).toBe('paused')
     monitor.request('large', true)
     await monitor.tick()

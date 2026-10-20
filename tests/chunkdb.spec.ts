@@ -251,3 +251,39 @@ describe('bulk KB generation removal', () => {
     db.close()
   })
 })
+
+describe('document-scoped publication query plan', () => {
+  it('uses the document index even without SQLite statistics and preserves other documents', () => {
+    const db = openSeeded()
+    const raw = (db as unknown as { db: DatabaseSync }).db
+    const prepare = vi.spyOn(raw, 'prepare')
+    const doc = { id: 'd1', baseId: 'b1', title: 'updated', sourceType: 'text' as const, charCount: 7, chunkCount: 1, createdAt: 1, updatedAt: 2 }
+    db.publishDocumentGeneration(doc, [{ id: 'replacement', docId: 'd1', baseId: 'b1', index: 0, text: 'updated' }], 1)
+    const statement = prepare.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith('DELETE FROM chunk ') && sql.includes('base_id = ?'))
+    expect(statement).toBeDefined()
+    prepare.mockRestore()
+    const plan = raw.prepare('EXPLAIN QUERY PLAN ' + statement).all('d1', 'b1') as Array<{ detail: string }>
+    expect(plan.map(row => row.detail).join(' ')).toContain('chunk_doc_idx')
+    expect(db.listChunksByDoc('d2').map(chunk => chunk.id)).toEqual(['c2'])
+    db.close()
+  })
+})
+
+describe('embedding hash migration completion', () => {
+  it('backfills legacy vectors once and retains the completion marker across reopen', async () => {
+    const dir=await mkdtemp(join(tmpdir(),'kb-hash-migration-')),path=join(dir,'chunks.sqlite')
+    try {
+      let db=new ChunkDatabase(path)
+      db.putChunks([{id:'legacy',docId:'d',baseId:'b',index:0,text:'legacy text',embedding:[1,0],embeddingModel:'test'}]);db.close()
+      const raw=new DatabaseSync(path)
+      raw.exec("DELETE FROM chunk_meta WHERE key='embedding_hash_backfill_v1'; UPDATE chunk SET embedding_text_hash=NULL")
+      raw.close()
+      db=new ChunkDatabase(path);db.close()
+      const verify=new DatabaseSync(path)
+      expect(verify.prepare("SELECT value FROM chunk_meta WHERE key='embedding_hash_backfill_v1'").get()).toEqual({value:'1'})
+      expect((verify.prepare('SELECT embedding_text_hash FROM chunk WHERE chunk_id=?').get('legacy') as {embedding_text_hash:string}).embedding_text_hash).toBeTruthy()
+      verify.close()
+      db=new ChunkDatabase(path);db.close()
+    } finally {await rm(dir,{recursive:true,force:true})}
+  })
+})
