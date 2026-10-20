@@ -238,7 +238,7 @@ describe('MinerU recovery (issue #30)', () => {
     expect(service.getDocument(doc.id, { includeChunks: false }).rawText).toContain('local text survives')
   })
 
-  it('does not send identical live and cached bytes to MinerU twice in one reindex', async () => {
+  it('limits identical live and cached bytes to three total parse attempts in one reindex', { timeout: 30_000 }, async () => {
     const mineru = await startFakeMineru()
     servers.push(mineru.server)
     const service = await mount(mineru.url)
@@ -254,7 +254,7 @@ describe('MinerU recovery (issue #30)', () => {
 
     const before = mineru.state.calls
     await expect(service.reindexDocument(doc.id)).rejects.toThrow(/MinerU extraction failed .*local parsing failed/)
-    expect(mineru.state.calls - before).toBe(1)
+    expect(mineru.state.calls - before).toBe(3)
   })
 
   it('tries a distinct cached raw source after the live path fails', { timeout: 45_000 }, async () => {

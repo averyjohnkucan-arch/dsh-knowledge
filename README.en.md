@@ -629,3 +629,9 @@ processor-level concurrency limits, and combines base timestamp writes across a
 scan. Two source roots can reconcile concurrently, without overlapping scans of
 the same root. Metadata still uses the DSH storage API; this is not a migration
 of document metadata to SQLite, and a full 50,000-file speedup has not been measured.
+
+### Document failure retries
+
+File parsing, imports and individual document rebuilds use three total attempts, with one- and two-second waits before retries. Parsing stays pending while it retries; only an exhausted run is marked failed, retaining the final error and uploaded source for manual rebuild. Existing embedding requests also use three attempts. Nested parser/import retries share exhaustion state, so a parser is not called nine times. Successfully processed siblings are not replayed when one file fails. A fresh manual rebuild starts a new run.
+
+Cancellation stops immediately. Uncertain remote submissions are not resubmitted automatically; their saved jobs remain available for reconciliation. Crash-recovery attempts remain bounded across restarts. Sync also rebuilds incomplete or errored files even when their stored bytes have not changed.

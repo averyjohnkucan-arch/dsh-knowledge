@@ -7,6 +7,7 @@ import { extensionOf, parseDocumentBuffer } from './parse.js'
 import { extractPdfWithMineru } from './mineru.js'
 import { extractWithMineruLocal } from './mineru-local.js'
 import { parsedTextDocument } from './parsed-document.js'
+import { retryDocument, DOCUMENT_MAX_ATTEMPTS, markAttemptsExhausted } from './document-retry.js'
 
 export interface ProcessedFile {
   readonly text: string
@@ -63,6 +64,19 @@ export interface ProcessFileInput {
 /** All file entry points use this function. Cloud is only contacted when the
  * user explicitly selected the legacy cloud provider (never as local fallback). */
 export async function processDocumentFile(input: ProcessFileInput): Promise<ProcessedFile> {
+  try {
+    return await retryDocument(attempt => processDocumentFileAttempt(input, attempt), { signal: input.signal })
+  } catch (error) {
+    // Cancellation during backoff also settles the durable job immediately.
+    if (input.signal?.aborted) {
+      const job = await input.artifacts.getJob(input.baseId, input.documentId)
+      if (job?.state === 'running') await input.artifacts.saveJob({ ...job, state: 'canceled', progress: { stage: 'canceled' }, updatedAt: Date.now() }).catch(() => {})
+    }
+    throw error
+  }
+}
+
+async function processDocumentFileAttempt(input: ProcessFileInput, attempt: number): Promise<ProcessedFile> {
   input.signal?.throwIfAborted()
   const { config, bytes, artifacts, baseId, documentId } = input
   const sourceHash = hash(bytes)
@@ -80,6 +94,7 @@ export async function processDocumentFile(input: ProcessFileInput): Promise<Proc
   }
   let job: ProcessingJobRecord = {
     version: 1, baseId, documentId, sourceHash, fingerprint, state: 'running',
+    attempt,
     progress: { stage: 'checking' }, updatedAt: Date.now(),
     startupAttempts: input.resume ? (matching?.startupAttempts ?? 0) + 1 : 0,
   }
@@ -176,7 +191,11 @@ export async function processDocumentFile(input: ProcessFileInput): Promise<Proc
   } catch (error) {
     await progressWrite.catch(() => {})
     const canceled = input.signal?.aborted === true
-    await artifacts.saveJob({ ...job, state: canceled ? 'canceled' : 'failed', errorCode: processorErrorCode(error), progress: { ...job.progress, stage: canceled ? 'canceled' : 'failed' }, updatedAt: Date.now() }).catch(() => {})
+    const uncertain = ['submission_unknown', 'job_lost'].includes(processorErrorCode(error))
+    const recoveryExhausted = input.resume && (job.startupAttempts ?? 0) >= DOCUMENT_MAX_ATTEMPTS
+    const retrying = !canceled && !uncertain && !recoveryExhausted && attempt < DOCUMENT_MAX_ATTEMPTS
+    await artifacts.saveJob({ ...job, state: canceled ? 'canceled' : retrying || uncertain ? 'running' : 'failed', errorCode: processorErrorCode(error), progress: { ...job.progress, stage: canceled ? 'canceled' : retrying ? 'queued' : uncertain ? job.progress.stage : 'failed' }, updatedAt: Date.now() }).catch(() => {})
+    if (recoveryExhausted && typeof error === 'object' && error !== null) throw markAttemptsExhausted(error)
     throw error
   }
 }

@@ -29,6 +29,7 @@ import { composeDocumentEvidence } from './evidence.js'
 import { ExternalFolders, externalFile, readableRoot, pickFolder } from './external-folders.js'
 import { ProcessingQueue } from './processing-queue.js'
 import { processingBudget } from './processor-transport.js'
+import { retryDocument, markAttemptsExhausted, attemptsExhausted } from './document-retry.js'
 import { composeContextWindow, estimateContextTokens, serializeContextWindow } from './context.js'
 import { snapSliceEnd, snapSliceStart } from './text-safety.js'
 import { Config, resolveConfig, resolveConfigFor } from './config.js'
@@ -230,10 +231,6 @@ const FAILURE_LINGER_TTL_MS = 10 * 60_000
 /** Extra deadline granted to a COLD local rerank child so its model load is not
  *  charged to the inference budget of the query that triggered it (issue #18). */
 const LOCAL_RERANK_LOAD_ALLOWANCE_MS = 120_000
-/** Embedding batch retry policy (Cherry's job retry contract). */
-const EMBED_MAX_ATTEMPTS = 3
-const EMBED_RETRY_BASE_DELAY_MS = 1000
-const EMBED_RETRY_MAX_DELAY_MS = 30_000
 
 interface BackgroundJob {
   readonly baseId: string
@@ -1201,43 +1198,45 @@ export class KnowledgeService extends Service {
     const fallbackPayload = rawFilePath !== undefined ? undefined : request.contentBase64
     this.enqueueIngest(request.baseId, async () => {
       try {
-        // Prefer re-reading the persisted raw copy (the queue never holds file
-        // contents in memory); fall back to the request payload only when the
-        // deployment has no raw backend (e.g. in-memory test stores).
-        let bytes: Uint8Array | null = rawFilePath !== undefined ? (await store.raw?.read(rawFilePath)) ?? null : null
-        if (bytes === null && fallbackPayload !== undefined) bytes = decodeBase64(fallbackPayload)
-        if (bytes === null) throw new Error('raw copy is missing — cannot parse the file')
-        // Cherry's fileProcessorId posture: when the MinerU remote processor
-        // is configured, PDFs go through the API first (scanned/complex
-        // layouts get true layout-aware Markdown); any failure falls back to
-        // the local pipeline. A double failure reports BOTH reasons, so the
-        // row shows why the remote processor rejected the file (log-only
-        // before) instead of just the local parser's complaint.
-        const extracted = await this.extractDocumentText({
-          baseId: request.baseId,
-          documentId: docId,
-          fileName,
-          ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
-          bytes,
-          signal: taskController.signal,
-        })
-        const text = extracted.text
-        if (text.trim().length === 0) {
-          throw new Error('parsed document is empty')
-        }
-        await this.ingestDocument({
-          baseId: request.baseId,
-          title,
-          sourceType: 'file',
-          fileName,
-          ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
-          ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
-          placeholderId: docId,
-          rawFilePath,
-          text,
-          processed: extracted,
-        }, taskController.signal)
-        if (store.getDocument(docId)?.embeddingError) return false
+        return await retryDocument(async () => {
+          // Prefer re-reading the persisted raw copy (the queue never holds file
+          // contents in memory); fall back to the request payload only when the
+          // deployment has no raw backend (e.g. in-memory test stores).
+          let bytes: Uint8Array | null = rawFilePath !== undefined ? (await store.raw?.read(rawFilePath)) ?? null : null
+          if (bytes === null && fallbackPayload !== undefined) bytes = decodeBase64(fallbackPayload)
+          if (bytes === null) throw new Error('raw copy is missing — cannot parse the file')
+          // Cherry's fileProcessorId posture: when the MinerU remote processor
+          // is configured, PDFs go through the API first (scanned/complex
+          // layouts get true layout-aware Markdown); any failure falls back to
+          // the local pipeline. A double failure reports BOTH reasons, so the
+          // row shows why the remote processor rejected the file (log-only
+          // before) instead of just the local parser's complaint.
+          const extracted = await this.extractDocumentText({
+            baseId: request.baseId,
+            documentId: docId,
+            fileName,
+            ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
+            bytes,
+            signal: taskController.signal,
+          })
+          const text = extracted.text
+          if (text.trim().length === 0) {
+            throw new Error('parsed document is empty')
+          }
+          await this.ingestDocument({
+            baseId: request.baseId,
+            title,
+            sourceType: 'file',
+            fileName,
+            ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
+            ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
+            placeholderId: docId,
+            rawFilePath,
+            text,
+            processed: extracted,
+          }, taskController.signal)
+          if (store.getDocument(docId)?.embeddingError) return false
+        }, { signal: taskController.signal })
       } catch (error) {
         this.indexing.delete(docId)
         taskController.abort()
@@ -1842,6 +1841,12 @@ export class KnowledgeService extends Service {
   }
 
   async reindexDocument(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
+    // Retry leaves only: never replay an entire directory's successful children.
+    if (this.requireStore().getDocument(id)?.sourceType === 'directory') return this.reindexDocumentAttempt(id, options)
+    return retryDocument(() => this.reindexDocumentAttempt(id, options))
+  }
+
+  private async reindexDocumentAttempt(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
     const store = this.requireStore()
     const document = store.getDocument(id)
     if (document === undefined) throw new Error(`document not found: ${id}`)
@@ -1934,7 +1939,7 @@ export class KnowledgeService extends Service {
       await store.stageDocumentGeneration(candidate, [])
       const { chunks, embeddingError, embeddingErrorCode } = await this.buildChunks(document.baseId, document.id, document.title, rebuilt.text, config, pieces, batch => store.stageDocumentGeneration(candidate, batch), controller.signal, candidate.processing?.revision)
       controller.signal.throwIfAborted()
-      if (embeddingError !== undefined && document.chunkCount > 0) throw Object.assign(new Error('embedding failed; the previous document generation was preserved'), { code: embeddingErrorCode })
+      if (embeddingError !== undefined && document.chunkCount > 0) throw markAttemptsExhausted(Object.assign(new Error('embedding failed; the previous document generation was preserved'), { code: embeddingErrorCode }))
       const { embeddingError: _staleError, errorCode: _staleCode, incomplete: _staleIncomplete, contentHash: _staleHash, ...rest } = candidate
       const next: KnowledgeDocument = {
         ...rest,
@@ -2042,6 +2047,7 @@ export class KnowledgeService extends Service {
   }> {
     const store = this.requireStore()
     const sourceFailures: string[] = []
+    const sourceErrors: unknown[] = []
     let failedLiveSourceBytes: Uint8Array | undefined
     let failedLiveSourceWasPdf = false
     // A single-file path import tracks its live source on disk. Reindex re-reads
@@ -2090,6 +2096,8 @@ export class KnowledgeService extends Service {
       } catch (error) {
         signal?.throwIfAborted()
         if (strictSource) throw error
+        if (['submission_unknown', 'job_lost'].includes(processorErrorCode(error))) throw error
+        sourceErrors.push(error)
         const reason = error instanceof Error ? error.message : String(error)
         sourceFailures.push(`source path: ${reason}`)
         this.ctx.logger.warn(`knowledge: re-reading source path failed, falling back to stored copy: ${reason}`)
@@ -2119,6 +2127,8 @@ export class KnowledgeService extends Service {
             throw new Error('parsed document is empty')
           } catch (error) {
             signal?.throwIfAborted()
+            if (['submission_unknown', 'job_lost'].includes(processorErrorCode(error))) throw error
+            sourceErrors.push(error)
             const reason = error instanceof Error ? error.message : String(error)
             sourceFailures.push(`stored raw source: ${reason}`)
             this.ctx.logger.warn(`knowledge: re-parsing raw source failed, falling back to stored text: ${reason}`)
@@ -2135,7 +2145,8 @@ export class KnowledgeService extends Service {
       const detail = sourceFailures.length > 0
         ? sourceFailures.join('; ')
         : 'its source could not be parsed — check the document processor settings, or re-import the file'
-      throw new Error(`document "${document.title}" has no source text to reindex (${detail})`)
+      const error = new Error(`document "${document.title}" has no source text to reindex (${detail})`)
+      throw sourceErrors.some(attemptsExhausted) ? markAttemptsExhausted(error) : error
     }
     if (document.processing !== undefined) {
       try {
@@ -2421,32 +2432,36 @@ export class KnowledgeService extends Service {
           this.processingMeter.begin(meterId)
           let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
           try {
-            const before = await stat(fullPath)
-            const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
-            let document = resolved.document
-            let action: DirectorySyncItem['action']
-            if (document === undefined) {
-              document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
-              action = 'created'
-              children.push(document)
-              childrenByParent.set(directory.id, children)
-            } else {
-              action = await this.syncDirectoryFile(document, fullPath, entry.name)
-              const refreshed = this.requireStore().getDocument(document.id)
-              if (refreshed !== undefined) {
-                const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
-                if (documentIndex >= 0) children[documentIndex] = refreshed
-                document = refreshed
+            await retryDocument(async () => {
+              const before = await stat(fullPath)
+              const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
+              let document = resolved.document
+              let action: DirectorySyncItem['action']
+              if (document === undefined) {
+                document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
+                action = 'created'
+                children.push(document)
+                childrenByParent.set(directory.id, children)
+              } else {
+                action = await this.syncDirectoryFile(document, fullPath, entry.name)
+                const refreshed = this.requireStore().getDocument(document.id)
+                if (refreshed !== undefined) {
+                  const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
+                  if (documentIndex >= 0) children[documentIndex] = refreshed
+                  document = refreshed
+                }
               }
-            }
-            if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
-              const fileStat = await stat(fullPath)
-              const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
-              const fresh = store.getDocument(document.id)
-              if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
-            }
-            outcome = document.incomplete || document.embeddingError ? 'failed' : action === 'unchanged' ? 'skipped' : 'processed'
-            items.push({ relativePath, kind: 'file', documentId: document.id, action })
+              if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
+                const fileStat = await stat(fullPath)
+                const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+                const fresh = store.getDocument(document.id)
+                if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
+              }
+              outcome = document.incomplete || document.embeddingError ? 'failed' : action === 'unchanged' ? 'skipped' : 'processed'
+              if (document.embeddingError) throw markAttemptsExhausted(new Error(document.embeddingError))
+              if (document.incomplete) throw new Error('Document processing did not finish')
+              items.push({ relativePath, kind: 'file', documentId: document.id, action })
+            })
           } catch (error) {
             items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: this.directoryItemError(error) })
           } finally { this.processingMeter.settle(meterId, outcome) }
@@ -2465,6 +2480,10 @@ export class KnowledgeService extends Service {
   /** Persist source/placeholder before parsing, so path imports recover just
    * like uploads if the host stops during a long-running processor call. */
   private async ingestPathFile(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
+    return retryDocument(() => this.ingestPathFileAttempt(baseId, sourcePath, fileName, parentDirectoryId))
+  }
+
+  private async ingestPathFileAttempt(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
     const store = this.requireStore()
     if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
     const externalRoot = store.getBase(baseId)?.storageMode === 'external' ? store.getBase(baseId)?.externalPath : undefined
@@ -2519,7 +2538,7 @@ export class KnowledgeService extends Service {
     const bound = await this.bindDocumentSourcePath(document, sourcePath)
     const stored = bound.rawFilePath !== undefined ? await store.raw?.read(bound.rawFilePath) : undefined
     const unchanged = stored !== undefined && stored !== null && stored.byteLength > 0 && Buffer.from(stored).equals(buffer)
-    if (unchanged) return bound === document ? 'unchanged' : 'updated'
+    if (unchanged && !bound.incomplete && !bound.embeddingError) return bound === document ? 'unchanged' : 'updated'
     // The unified source reader validates and parses once. A changed live
     // source must not silently fall back to the previous snapshot.
     await this.reindexDocument(bound.id, { mode: 'reparse', strictSource: true })
@@ -4384,19 +4403,9 @@ export class KnowledgeService extends Service {
    * interrupts the request chain immediately.
    */
   private async embedWithRetry(config: KnowledgeConfig, texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
-    let attempt = 1
-    for (;;) {
-      if (signal?.aborted === true) throw new Error('embedding aborted (document was deleted)')
-      try {
-        return await this.embedTextsOnce(config, texts, signal)
-      } catch (error) {
-        if (attempt >= EMBED_MAX_ATTEMPTS) throw error
-        const delay = Math.min(EMBED_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), EMBED_RETRY_MAX_DELAY_MS)
-        attempt += 1
-        this.ctx.logger.warn(`knowledge: embedding attempt ${attempt - 1}/${EMBED_MAX_ATTEMPTS} failed, retrying in ${delay}ms: ${error instanceof Error ? error.message : String(error)}`)
-        await new Promise(resolve => setTimeout(resolve, delay))
-      }
-    }
+    return retryDocument(() => this.embedTextsOnce(config, texts, signal), { signal,
+      onRetry: attempt => { this.ctx.logger.warn(`knowledge: embedding attempt ${attempt}/3 failed; retrying`) },
+    })
   }
 
   /** Bump the base's updatedAt so the data view's "更新于" stays meaningful. */

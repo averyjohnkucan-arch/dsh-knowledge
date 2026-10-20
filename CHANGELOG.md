@@ -9,6 +9,9 @@
 
 ## Unreleased
 
+- Retry file processing, imports and individual rebuilds up to three total attempts before reporting failure; retain final diagnostics and manual rebuild, stop immediately on cancellation, and avoid duplicate uncertain remote submissions.
+- Rebuild incomplete files on sync even when their stored bytes are unchanged.
+
 ## 0.5.2 — 2026-10-10 — Unicode safety, settings recovery and dependency security
 
 - Fix #51: preserve surrogate pairs when trimming retrieval evidence, document reads, evidence continuations and source labels. Replace existing lone surrogates with U+FFFD in retrieval injection, tool renderings, the knowledge-base usage prompt, and embedding/rerank inputs; retain stored text and UTF-16 offsets. Existing poisoned session history is not rewritten automatically.

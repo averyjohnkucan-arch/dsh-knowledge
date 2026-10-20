@@ -1747,6 +1747,12 @@ describe('external folder knowledge', () => {
       const unchanged = await service.importDirectoryTree(base.id, root)
       expect(unchanged.sync?.created).toBe(0)
       expect(unchanged.sync?.updated).toBe(0)
+      const store = (service as unknown as { store: Store }).store
+      const prior = store.getDocument(a.id)!
+      await store.putDocument({ ...prior, incomplete: true })
+      const repaired = await service.importDirectoryTree(base.id, root)
+      expect(repaired.sync?.failed).toBe(0)
+      expect(store.getDocument(a.id)?.incomplete).not.toBe(true)
       await writeFile(join(root, 'a.txt'), 'Changed article about orbital navigation.')
       await writeFile(join(root, 'new.txt'), 'New reference about satellite telemetry.')
       await rm(join(root, 'nested'), { recursive: true })
@@ -1816,4 +1822,22 @@ it('overlaps file processing in bounded batches and combines base timestamp writ
     expect(writes.mock.calls.length).toBeLessThanOrEqual(3)
     expect(service.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(9)
   } finally { parser.mockRestore(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+it('rebuilds an incomplete internal file even when live and stored bytes match', async () => {
+  const service = await mountService()
+  const root = await mkdtemp(join(tmpdir(), 'knowledge-retry-incomplete-'))
+  try {
+    await writeFile(join(root, 'article.txt'), 'Complete source for an interrupted document.')
+    const base = await service.createBase({ name: 'Incomplete retry fixture' })
+    await service.importDirectoryTree(base.id, root)
+    const doc = service.listDocuments(base.id).find(d => d.sourceType === 'file')!
+    const store = (service as unknown as { store: Store }).store
+    await store.putDocument({ ...store.getDocument(doc.id)!, incomplete: true })
+    const result = await service.importDirectoryTree(base.id, root)
+    expect(result.sync?.failed).toBe(0)
+    expect(store.getDocument(doc.id)?.incomplete).not.toBe(true)
+    expect(service.getDocument(doc.id).rawText).toContain('Complete source')
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

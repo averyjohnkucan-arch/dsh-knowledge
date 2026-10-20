@@ -312,6 +312,7 @@ export declare class KnowledgeService extends Service {
         mode?: 'reparse' | 'rechunk';
         strictSource?: boolean;
     }): Promise<ReindexDocumentResult>;
+    private reindexDocumentAttempt;
     /**
      * Extract a file's text through the base's configured processor chain: the
      * remote MinerU API first when this base selects it for a PDF, then the local
@@ -355,6 +356,7 @@ export declare class KnowledgeService extends Service {
     /** Persist source/placeholder before parsing, so path imports recover just
      * like uploads if the host stops during a long-running processor call. */
     private ingestPathFile;
+    private ingestPathFileAttempt;
     /** Returns unchanged only when the live bytes exactly match the stored raw
      * snapshot. A changed source is parsed once up front so an invalid on-disk
      * replacement cannot be silently treated as a successful old-snapshot
