@@ -787,7 +787,7 @@ describe('autoRetrieveBackground', () => {
     expect((options as { deadlineAt: number }).deadlineAt).toBeGreaterThan(Date.now())
   })
 
-  it('never invokes the local reranker on the auto path', async () => {
+  it('uses the configured CPU local reranker on the auto path', async () => {
     const knowledge = stubKnowledge({
       rerank: { model: 'local:Xenova/bge-reranker-base', baseUrl: '', apiKey: '' },
       search: async () => ({
@@ -796,7 +796,8 @@ describe('autoRetrieveBackground', () => {
       }),
     })
     await autoRetrieveBackground(knowledge as never, stubAgent() as never, '报销流程是什么')
-    expect(rerankMock).not.toHaveBeenCalled()
+    expect(rerankMock).toHaveBeenCalledOnce()
+    expect(rerankMock.mock.calls[0][1]).toBe('local:Xenova/bge-reranker-base')
   })
 
   it('uses the explicitly named base rerank configuration instead of another base setting', async () => {

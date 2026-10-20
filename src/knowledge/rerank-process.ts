@@ -129,6 +129,7 @@ async function createRunner(request: LocalRerankRequest): Promise<Runner> {
     let downloadedModel: Awaited<ReturnType<TransformersModule['AutoModel']['from_pretrained']>> | undefined
     try {
       downloadedModel = await tf.AutoModel.from_pretrained(request.modelId, {
+        device: 'cpu',
         dtype: 'q8',
         progress_callback: progressCallback,
         trust_remote_code: false,
@@ -166,7 +167,7 @@ async function createRunner(request: LocalRerankRequest): Promise<Runner> {
   let model: Awaited<ReturnType<TransformersModule['AutoModel']['from_pretrained']>>
   let tokenizer: Awaited<ReturnType<TransformersModule['AutoTokenizer']['from_pretrained']>>
   try {
-    model = await tf.AutoModel.from_pretrained(localPath, { dtype: 'q8', local_files_only: true, trust_remote_code: false })
+    model = await tf.AutoModel.from_pretrained(localPath, { device: 'cpu', dtype: 'q8', local_files_only: true, trust_remote_code: false })
     tokenizer = await tf.AutoTokenizer.from_pretrained(localPath, { local_files_only: true, trust_remote_code: false })
   } catch (error) {
     // A cache that exists but cannot be loaded is worthless and was previously

@@ -47,8 +47,23 @@ parentPort?.on('message', message => {
     try {
       // pdf-parse v1 is CommonJS; the default export is the parser function.
       const mod = await import('pdf-parse')
-      const result = await mod.default(Buffer.from(data))
-      parentPort?.postMessage({ id, ok: true, text: typeof result?.text === 'string' ? result.text : '' })
+      const pages = [], scanned = []
+      const result = await mod.default(Buffer.from(data), { pagerender: async page => {
+        const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false })
+        let text = '', lastY
+        for (const item of content.items) {
+          if (lastY !== undefined && lastY !== item.transform[5]) text += '\n'
+          text += item.str; lastY = item.transform[5]
+        }
+        pages[page.pageNumber - 1] = text
+        if (!text.trim()) {
+          const operators = await page.getOperatorList()
+          // Image-paint operator IDs from the bundled pdf.js 1.10 parser.
+          if (operators.fnArray.some(op => [82, 83, 84, 85, 86, 87, 88, 89].includes(op))) scanned.push(page.pageNumber)
+        }
+        return text
+      } })
+      parentPort?.postMessage({ id, ok: true, text: typeof result?.text === 'string' ? result.text : '', pages: Array.from({ length: result.numpages }, (_, index) => pages[index] ?? ''), scanned })
     } catch (error) {
       parentPort?.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) })
     }

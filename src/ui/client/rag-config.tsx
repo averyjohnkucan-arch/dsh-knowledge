@@ -11,6 +11,7 @@ import type { CSSProperties } from 'react'
 import { KnowledgeApi } from './api.js'
 import type { BaseConfig, BaseSummary, EmbeddingProvider, KnowledgeConfig, LocalModelStatus, ModelSuggestions } from './api.js'
 import { C, style } from './theme.js'
+import { RECOMMENDED_LOCAL } from './RecommendedLocalStack.js'
 import { IconRefresh } from './icons.js'
 import type { Translate } from './locales.js'
 
@@ -45,6 +46,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
   const [ollamaCaptionUnreachable, setOllamaCaptionUnreachable] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   /** Cherry's dimension probe is running (save button shows a pending state). */
+  const [defaultsSaved, setDefaultsSaved] = useState(false)
   const [probing, setProbing] = useState(false)
   const [processorChecking, setProcessorChecking] = useState(false)
   const [processorCheckResult, setProcessorCheckResult] = useState<string | null>(null)
@@ -317,20 +319,31 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
               {!processorDirty && processorCheckResult !== null && <div role="status" style={{ fontSize: 12, color: processorCheckError ? C.danger : C.success }}>{processorCheckResult}</div>}
             </div>
           )}
+          <FieldRow label="PaddleOCR for scanned PDFs" hint="Recognize scanned pages locally on CPU when ordinary text extraction is insufficient. OCR models must be downloaded first.">
+            <Switch checked={values.ocrEnabled !== false} onChange={v => patch({ ocrEnabled: v })} />
+          </FieldRow>
           <FieldRow label={t('processingTimeout')}>
             <input type="number" style={style.input} min={10000} max={7200000} step={1000} value={values.documentProcessingTimeoutMs ?? 1_800_000} onChange={e => patchNumber('documentProcessingTimeoutMs', e.target.value)} />
           </FieldRow>
           <FieldRow label={t('structuredChunking')} hint={t('structuredChunkingHint')}>
             <Switch checked={values.structuredChunking ?? true} onChange={v => patch({ structuredChunking: v })} />
           </FieldRow>
-          {/* 图表描述（VLM） */}
+          <button type="button" style={style.button} disabled={busy} onClick={() => {
+            void api.setConfig({ documentProcessorProvider: values.documentProcessorProvider, ocrEnabled: values.ocrEnabled !== false,
+              structureV3Charts: values.structureV3Charts !== false, structuredChunking: values.structuredChunking,
+              imageCaptionProvider: values.imageCaptionProvider, imageCaptionModel: values.imageCaptionModel,
+              imageCaptionBaseUrl: values.imageCaptionBaseUrl }).then(() => { setSaveError(null); setDefaultsSaved(true) }).catch(e => setSaveError(String(e)))
+          }}>Use these processing settings as plugin defaults</button>
+          {defaultsSaved && <p role="status" style={{ ...style.hint, color: C.success }}>Plugin processing defaults saved.</p>}
+          <p style={style.hint}>Defaults apply to bases without their own overrides. Save below to apply changes to this base. Existing documents are only changed by an explicit reprocess.</p>
+          {/* Optional chart and image processing */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 16 }}>
             <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>{t('imageCaptionHint')}</div>
             <select
               style={style.input}
               value={values.imageCaptionProvider}
               onChange={(e) => {
-                const provider = e.target.value as 'off' | 'openai' | 'ollama'
+                const provider = e.target.value as KnowledgeConfig['imageCaptionProvider']
                 if (provider === 'ollama') {
                   // Don't carry a leftover openai model name into the Ollama
                   // dropdown; auto-pick the first installed vision model.
@@ -338,18 +351,21 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                     ? values.imageCaptionModel
                     : (ollamaCaptionModels[0] ?? '')
                   patch({ imageCaptionProvider: provider, imageCaptionModel: next })
+                } else if (provider === 'paddle') {
+                  patch({ imageCaptionProvider: provider, imageCaptionModel: 'PP-Chart2Table' })
                 } else {
                   patch({ imageCaptionProvider: provider })
                 }
               }}
             >
+              <option value="paddle">PP-StructureV3 / PP-Chart2Table · local CPU (recommended)</option>
               <option value="off">{t('imageCaptionOff')}</option>
               <option value="openai">{t('imageCaptionOpenAI')}</option>
               <option value="ollama">{t('imageCaptionOllama')}</option>
             </select>
             {values.imageCaptionProvider !== 'off' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {values.imageCaptionProvider === 'ollama' ? (
+                {values.imageCaptionProvider === 'paddle' ? <><label style={style.label}>Chart/table model</label><select style={style.input} value="PP-Chart2Table" disabled><option value="PP-Chart2Table">PP-Chart2Table · CPU</option></select><FieldRow label="Chart parsing (PP-Chart2Table)"><Switch checked={values.structureV3Charts !== false} onChange={v => patch({ structureV3Charts: v })} /></FieldRow><p style={style.hint}>Extracts chart data and table structure locally. Installed with PP-StructureV3. For photograph descriptions, choose a vision provider.</p><button style={style.button} onClick={() => { void api.prepareStructure().catch(e => setSaveError(String(e))) }}>Download / repair PP-StructureV3</button></> : values.imageCaptionProvider === 'ollama' ? (
                   <select
                     style={style.input}
                     value={ollamaCaptionModels.includes(values.imageCaptionModel) ? values.imageCaptionModel : ''}
@@ -375,14 +391,14 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                     onChange={(e) => patch({ imageCaptionModel: e.target.value })}
                   />
                 )}
-                <input
+                {values.imageCaptionProvider !== 'paddle' && <input
                   style={style.input}
                   placeholder={values.imageCaptionProvider === 'ollama'
                     ? t('captionBaseUrlOllamaPlaceholder')
                     : t('captionBaseUrlPlaceholder')}
                   value={values.imageCaptionBaseUrl}
                   onChange={(e) => patch({ imageCaptionBaseUrl: e.target.value })}
-                />
+                />}
                 {values.imageCaptionProvider === 'openai' && (
                   <input
                     style={style.input}
@@ -397,6 +413,10 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           </div>
         </Section>
 
+        <div style={{ ...style.hint, margin: '8px 0' }}>
+          <button style={style.button} onClick={() => patch(RECOMMENDED_LOCAL)}>Select recommended local models</button>
+          <p>Qwen3 Embedding 0.6B + BGE Reranker Base + PP-StructureV3, all on CPU. Download models in Settings → Local Models before saving.</p>
+        </div>
         {/* 嵌入模型 */}
         <Section title={t('embeddingProvider')} hint={t('perBaseHint')}>
           <select
@@ -553,6 +573,12 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
 
         {/* 重排模型 */}
         <Section title={t('rerankModel')} hint={t('rerankHint')}>
+          <label style={style.label}>Local reranker · CPU</label>
+          <select style={{ ...style.input, marginBottom: 12 }} value={values.rerankModel.startsWith('local:') ? values.rerankModel : ''} onChange={e => patch({ rerankModel: e.target.value, rerankBaseUrl: '', rerankApiKey: '' })}>
+            <option value="">Disabled / use API settings below</option>
+            {values.rerankModel.startsWith('local:') && !readyLocalRerankers.includes(values.rerankModel.slice(6)) && <option value={values.rerankModel}>{values.rerankModel} · install / validate first</option>}
+            {readyLocalRerankers.map(id => <option key={id} value={`local:${id}`}>{id} · CPU</option>)}
+          </select>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <div style={{ flex: '1 1 220px', minWidth: 0 }}>
               <label style={style.label}>{t('modelLabel')}</label>

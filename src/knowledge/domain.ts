@@ -38,6 +38,8 @@ export const baseConfigSchema = z.object({
   siblingChunks: z.number().int().gte(0).lte(3).optional(),
   // Mirrors BaseConfig: every base-settable field must survive the durable
   // boundary — a missing key here makes zod strip the override on save.
+  ocrEnabled: z.boolean().optional(),
+  structureV3Charts: z.boolean().optional(),
   documentProcessorProvider: z.enum(['builtin', 'mineru', 'mineru-local']).optional(),
   mineruApiKey: z.string().optional(),
   mineruApiHost: z.string().optional(),
@@ -51,7 +53,7 @@ export const baseConfigSchema = z.object({
   chunkTokenLimit: z.number().int().gte(0).optional(),
   conflictStrategy: z.enum(['keep', 'replace', 'rename']).optional(),
   urlRefreshHours: z.number().int().gte(0).optional(),
-  imageCaptionProvider: z.enum(['off', 'openai', 'ollama']).optional(),
+  imageCaptionProvider: z.enum(['off', 'paddle', 'openai', 'ollama']).optional(),
   imageCaptionModel: z.string().optional(),
   imageCaptionBaseUrl: z.string().optional(),
   imageCaptionApiKey: z.string().optional(),
@@ -82,7 +84,7 @@ export const documentProcessingInfoSchema = z.object({
   revision: z.string().min(1),
   artifactId: z.string().min(1),
   sourceHash: z.string(),
-  provider: z.enum(['builtin', 'mineru', 'mineru-local']),
+  provider: z.enum(['builtin', 'paddle', 'mineru', 'mineru-local']),
   processorVersion: z.string().optional(),
   optionsFingerprint: z.string(),
   parsedAt: z.number(),
@@ -93,7 +95,7 @@ export const documentProcessingInfoSchema = z.object({
   reused: z.boolean().optional(),
 })
 
-const documentSchema = z.object({
+export const documentSchema = z.object({
   id: z.string(),
   baseId: z.string(),
   title: z.string(),
@@ -144,6 +146,8 @@ export const configOverridesSchema = z.object({
   siblingChunks: z.number().int().gte(0).lte(3).optional(),
   hfEndpoint: z.string().optional(),
   mineruPythonIndexUrl: z.string().optional(),
+  ocrEnabled: z.boolean().optional(),
+  structureV3Charts: z.boolean().optional(),
   documentProcessorProvider: z.enum(['builtin', 'mineru', 'mineru-local']).optional(),
   mineruApiKey: z.string().optional(),
   mineruApiHost: z.string().optional(),
@@ -157,7 +161,7 @@ export const configOverridesSchema = z.object({
   chunkTokenLimit: z.number().int().gte(0).optional(),
   conflictStrategy: z.enum(['keep', 'replace', 'rename']).optional(),
   urlRefreshHours: z.number().int().gte(0).optional(),
-  imageCaptionProvider: z.enum(['off', 'openai', 'ollama']).optional(),
+  imageCaptionProvider: z.enum(['off', 'paddle', 'openai', 'ollama']).optional(),
   imageCaptionModel: z.string().optional(),
   imageCaptionBaseUrl: z.string().optional(),
   imageCaptionApiKey: z.string().optional(),
@@ -205,7 +209,9 @@ export interface ConfigOverrides {
   chunkTokenLimit?: number
   conflictStrategy?: 'keep' | 'replace' | 'rename'
   urlRefreshHours?: number
-  imageCaptionProvider?: 'off' | 'openai' | 'ollama'
+  ocrEnabled?: boolean
+  structureV3Charts?: boolean
+  imageCaptionProvider?: 'off' | 'paddle' | 'openai' | 'ollama'
   imageCaptionModel?: string
   imageCaptionBaseUrl?: string
   imageCaptionApiKey?: string

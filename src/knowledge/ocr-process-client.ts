@@ -18,6 +18,8 @@ export class OcrProcessClient {
     private readonly timeoutMs = 5 * 60_000,
   ) {}
 
+  get pendingCount(): number { return this.pending.size }
+
   private failPending(error: Error): void {
     for (const entry of this.pending.values()) entry.reject(error)
     this.pending.clear()
@@ -30,7 +32,7 @@ export class OcrProcessClient {
       serialization: 'advanced',
       execArgv: [],
       windowsHide: true,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '' },
     }
     const child = fork(this.modulePath, [], options)
     this.child = child

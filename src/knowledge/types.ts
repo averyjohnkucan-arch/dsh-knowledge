@@ -60,7 +60,7 @@ export interface BaseConfig {
   readonly embeddingBatchSize?: number
   /** How many neighbouring chunks (±) to attach to each search hit as context (0–3, 0 = off). */
   readonly siblingChunks?: number
-  readonly documentProcessorProvider?: DocumentProcessor
+  readonly documentProcessorProvider?: Exclude<DocumentProcessor, 'paddle'>
   readonly mineruApiKey?: string
   readonly mineruApiHost?: string
   readonly mineruLocalUrl?: string
@@ -73,7 +73,9 @@ export interface BaseConfig {
   readonly chunkTokenLimit?: number
   readonly conflictStrategy?: 'keep' | 'replace' | 'rename'
   readonly urlRefreshHours?: number
-  readonly imageCaptionProvider?: 'off' | 'openai' | 'ollama'
+  readonly ocrEnabled?: boolean
+  readonly structureV3Charts?: boolean
+  readonly imageCaptionProvider?: 'off' | 'paddle' | 'openai' | 'ollama'
   readonly imageCaptionModel?: string
   readonly imageCaptionBaseUrl?: string
   readonly imageCaptionApiKey?: string
@@ -295,7 +297,7 @@ export interface KnowledgeConfig {
   readonly hfEndpoint: string
   readonly mineruPythonIndexUrl?: string
   /** Document processor: `builtin` (local parsers + OCR) or `mineru` (remote MinerU API). */
-  readonly documentProcessorProvider: DocumentProcessor
+  readonly documentProcessorProvider: Exclude<DocumentProcessor, 'paddle'>
   readonly mineruLocalUrl?: string
   readonly mineruLocalApiKey?: string
   readonly mineruTier?: MineruTier
@@ -318,7 +320,9 @@ export interface KnowledgeConfig {
   /** Local-model cache root; empty = `<DSH_HOME>/cache/dsh-knowledge/local-models`. */
   readonly localModelCacheDir: string
   /** Image/table captioning: `off` / `openai` (vision chat API) / `ollama` (local VLM). */
-  readonly imageCaptionProvider: 'off' | 'openai' | 'ollama'
+  readonly ocrEnabled?: boolean
+  readonly structureV3Charts?: boolean
+  readonly imageCaptionProvider: 'off' | 'paddle' | 'openai' | 'ollama'
   /** Captioning model id (OpenAI-compatible vision model, or an Ollama VLM like llava / qwen2.5vl). */
   readonly imageCaptionModel: string
   /** Captioning API root; empty = the embedding base URL (openai) or http://127.0.0.1:11434 (ollama). */

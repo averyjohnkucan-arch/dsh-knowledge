@@ -602,7 +602,7 @@ describe('DomainStore wiring', () => {
         await bases.put('b1', { id: 'b1', name: 'b1', description: '', createdAt: 1, updatedAt: 1 })
         await documents.put('ghost', { id: 'ghost', baseId: 'b1', title: 'crash-placeholder', sourceType: 'file', fileName: 'a.pdf', charCount: 0, chunkCount: 0, createdAt: 100, updatedAt: 100 })
         await documents.put('half', { id: 'half', baseId: 'b1', title: 'crash-half', sourceType: 'file', charCount: 10, chunkCount: 5, createdAt: 200, updatedAt: 200 })
-        await documents.put('fine', { id: 'fine', baseId: 'b1', title: 'complete', sourceType: 'file', charCount: 10, chunkCount: 1, createdAt: 300, updatedAt: 300 })
+        await documents.put('fine', { id: 'fine', baseId: 'b1', title: 'complete', sourceType: 'file', rawText: 'x', charCount: 10, chunkCount: 1, createdAt: 300, updatedAt: 300 })
         const store = await openStore({ open: async () => domain } as unknown as StorageDomainFacility, {
           chunkStorePath: join(dir, 'chunks.sqlite'),
           legacyJsonPath: join(dir, 'missing.json'),
@@ -619,7 +619,7 @@ describe('DomainStore wiring', () => {
       await bases.put('b1', { id: 'b1', name: 'b1', description: '', createdAt: 1, updatedAt: 1 })
       await documents.put('ghost', { id: 'ghost', baseId: 'b1', title: 'crash-placeholder', sourceType: 'file', fileName: 'a.pdf', charCount: 0, chunkCount: 0, createdAt: 100, updatedAt: 100 })
       await documents.put('half', { id: 'half', baseId: 'b1', title: 'crash-half', sourceType: 'file', charCount: 10, chunkCount: 5, createdAt: 200, updatedAt: 200 })
-      await documents.put('fine', { id: 'fine', baseId: 'b1', title: 'complete', sourceType: 'file', charCount: 10, chunkCount: 1, createdAt: 300, updatedAt: 300 })
+      await documents.put('fine', { id: 'fine', baseId: 'b1', title: 'complete', sourceType: 'file', rawText: 'x', charCount: 10, chunkCount: 1, createdAt: 300, updatedAt: 300 })
       const store = await openStore({ open: async () => domain } as unknown as StorageDomainFacility, {
         chunkStorePath: join(dir, 'chunks.sqlite'),
         legacyJsonPath: join(dir, 'missing.json'),

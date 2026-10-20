@@ -4,7 +4,7 @@ This integration is optional. Installing the npm plugin does not install Python,
 CUDA, MinerU, or model weights. Existing built-in parsing and explicitly configured
 MinerU cloud API settings continue to work.
 
-## Managed Basic preview / 托管 Basic 实验性入口
+## Managed Basic preview
 
 Settings → Local models now includes an explicit preparation flow. Choose a
 dedicated installation directory, optionally verify an existing MinerU ONNX model
@@ -14,15 +14,28 @@ pinned model revision, verifies every file and parses a synthetic public PDF bef
 granting readiness. Start the service separately; **Use as global default parser**
 is also a separate action. Per-base overrides continue to take precedence.
 
-当前边界：仅 Basic/ONNX，检测稳定版 64 位 CPython 3.10–3.14（非自由线程版，需 venv/ensurepip）。支持 PATH、Python launcher、Conda 注册表及有限常见目录发现，也可手动指定解释器绝对路径。不会下载 Python、安装 CUDA
-或修改全局 Python 包。真实模型安装/推理与三平台验收仍未完成，因此标为实验性。
+Current scope: Basic/ONNX only. Detection supports stable 64-bit CPython
+3.10–3.14, excluding free-threaded builds, with venv/ensurepip available. It checks
+PATH, the Python launcher, Conda registrations, and a limited set of common
+locations. You can also enter an absolute interpreter path. This MinerU workflow
+does not download Python, install CUDA, or change global Python packages. Real
+model installation/inference and acceptance on all three platforms are still
+pending, so this remains experimental.
 
-模型文件固定为 13 项，合计 **858,204,914 bytes（约 818.4 MiB）**；这不包含 Python 环境及其依赖。设置中的 `hfEndpoint` 镜像会用于模型下载，托管 Python 包源单独配置，默认 `https://pypi.org/simple`。预检会冻结并显示实际来源，来源发生变化后需要重新预检。无论是否使用镜像，模型 revision、文件大小和摘要校验都不会改变。
+The model manifest pins 13 files totaling **858,204,914 bytes (about 818.4 MiB)**,
+excluding the Python environment and dependencies. The `hfEndpoint` setting
+controls the model-download mirror. The managed Python package index is configured
+separately and defaults to `https://pypi.org/simple`. Preflight freezes and displays
+the selected sources; changing them requires another preflight. Model revisions,
+file sizes, and checksum requirements remain fixed regardless of mirror selection.
 
-检测不会安装依赖；通过检测仅表示可尝试创建隔离环境，不等于 MinerU 可用。
-安装预检绑定解释器指纹，安装前再次检查；解释器变化则拒绝继续，不自动切换到其他环境。
-解释器、隔离环境、依赖安装、真实解析分别记录验证结果。
-Standard/Advanced 继续通过已有外部服务使用，本入口不宣称已支持其托管部署。
+Detection installs no dependencies. Passing detection means environment preparation
+can be attempted; it does not mean MinerU is ready. Preflight records the interpreter
+fingerprint and checks it again before installation. A changed interpreter stops
+installation rather than silently selecting a different environment. Interpreter,
+environment, dependency, and real parsing validation have separate status records.
+Standard/Advanced continue to use an existing external service; managed deployment
+of those tiers is not claimed here.
 
 - Model metadata: `opendatalab/MinerU-4_models_onnx`, revision
   `358310b4f64b95f9fefc372ad899356e4111f376`, required files pinned with hashes.
@@ -60,7 +73,7 @@ claims of completed functionality. Runtime dependency size is still unknown unti
 measured on each supported platform. Managed real-install acceptance has not yet
 been run; Python detection and offline tests do not certify a platform.
 
-### Keep the existing cloud API / 继续使用现有云 API
+### Keep the existing cloud API
 
 You do not need to deploy a local service to keep using MinerU. Select the
 existing cloud provider (`mineru`) and save its API host and API key in settings.
@@ -73,7 +86,7 @@ only available when a provider actually returns those fields. The new local V1
 adapter's structural capabilities must not be advertised as verified cloud API
 capabilities. No real inference endpoint was available during local validation.
 
-## Configure / 配置
+## Configure
 
 Deploy a MinerU **4.x V1 HTTP service**, then select **local/self-hosted MinerU**
 in the knowledge-base processing settings. This adapter targets the 4.0.6 V1
@@ -93,7 +106,7 @@ Use the official deployment instructions for your hardware; an 8 GB laptop GPU
 does not guarantee every tier will fit. Do not expose an unauthenticated server
 to the public internet.
 
-## Data flow / 数据与隐私
+## Data flow
 
 PDF bytes go to the service you selected and its advertised upload destination.
 Self-hosting on another machine is still a network transfer, not on-device
@@ -107,7 +120,7 @@ envelopes are validated. Untrusted HTML is not rendered as active content; remot
 image references are not fetched. PNG/JPEG/WebP/GIF evidence is served through a
 document/revision-scoped route. Logs do not include document text or credentials.
 
-## Evidence and rebuild / 证据与重建
+## Evidence and rebuild
 
 - Synchronization compares live files and updates changed sources.
 - Reparse uses the selected processor again and can submit a new MinerU job.
@@ -130,7 +143,7 @@ revisions older than seven days for existing documents; deleting a document
 removes its artifacts. SQLite publication and DomainKV metadata updates use a
 recovery journal, not a claimed cross-database atomic transaction.
 
-## Verification / 验证
+## Verification
 
 `npm run benchmark:structured` runs deterministic offline protocol, storage,
 chunk/source mapping and evidence-continuation tests. These tests do **not** measure

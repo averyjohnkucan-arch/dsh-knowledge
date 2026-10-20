@@ -1,3 +1,4 @@
+import { type StructureV3Manager } from './structure-v3.js'
 import { createHash } from 'node:crypto'
 import type { ArtifactRepository, ProcessingJobRecord } from './artifacts.js'
 import type { KnowledgeConfig } from './types.js'
@@ -16,6 +17,8 @@ export interface ProcessedFile {
 export function processorFingerprint(config: KnowledgeConfig): string {
   // Credentials are neither persisted nor used as an artifact identity.
   return hash(JSON.stringify({
+    ocrEnabled: config.ocrEnabled !== false,
+    structureV3Charts: config.structureV3Charts ?? true,
     version: 1, provider: config.documentProcessorProvider,
     host: config.documentProcessorProvider === 'mineru-local' ? config.mineruLocalUrl : config.mineruApiHost,
     tier: config.mineruTier ?? 'basic',
@@ -43,6 +46,7 @@ export function processorErrorMessage(error: unknown): string {
 }
 
 export interface ProcessFileInput {
+  readonly structureV3?: StructureV3Manager
   readonly baseId: string
   readonly documentId: string
   readonly fileName: string
@@ -126,7 +130,7 @@ export async function processDocumentFile(input: ProcessFileInput): Promise<Proc
       if (remoteFailure !== undefined) warnings.push({ code: 'processor_fallback', message: `${processorErrorMessage(remoteFailure)}; used built-in local parsing` })
       progress({ stage: 'parsing' })
       try {
-        const text = await parseDocumentBuffer(bytes, input.fileName, input.mimeType)
+        const text = await parseDocumentBuffer(bytes, input.fileName, input.mimeType, { ocrEnabled: config.ocrEnabled })
         input.signal?.throwIfAborted()
         output = parsedTextDocument(text, bytes, 'builtin', fingerprint, warnings)
       } catch (error) {
@@ -142,6 +146,7 @@ export async function processDocumentFile(input: ProcessFileInput): Promise<Proc
         const { captionPdfImages } = await import('./caption.js')
         input.signal?.throwIfAborted()
         const caption = await captionPdfImages(bytes, {
+          structureV3: input.structureV3, signal: input.signal, charts: config.structureV3Charts,
           provider: config.imageCaptionProvider, model: config.imageCaptionModel,
           baseUrl: config.imageCaptionBaseUrl, apiKey: config.imageCaptionApiKey,
           embeddingBaseUrl: config.embeddingBaseUrl,
@@ -152,7 +157,7 @@ export async function processDocumentFile(input: ProcessFileInput): Promise<Proc
           output = { ...output, document: { ...output.document,
             text: `${output.document.text}\n\n${caption}`,
             blocks: [...output.document.blocks, { id: 'generated-caption', index: output.document.blocks.length, type: 'caption', text: caption, textStart: start, textEnd: start + caption.length }],
-            warnings: [...output.document.warnings, { code: 'generated_caption', message: 'Image descriptions are model-generated, not verbatim source text.' }],
+            warnings: [...output.document.warnings, { code: 'generated_caption', message: config.imageCaptionProvider === 'paddle' ? 'Chart/table data was extracted by PP-StructureV3; verify values against the original.' : 'Image descriptions are model-generated, not verbatim source text.' }],
           } }
         }
       } catch (error) {

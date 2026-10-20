@@ -44,20 +44,20 @@ export function rerankErrorDetail(error: unknown): RerankErrorDetail {
   if (error instanceof RerankExecutionError) return error.detail
   if (error instanceof LocalRerankError) {
     const messages: Record<LocalRerankError['code'], string> = {
-      model_not_downloaded: '本地重排模型尚未下载，请先在设置 → 本地模型中下载。',
-      model_checking: '本地重排模型正在下载或验证，本次使用原始检索顺序。',
-      model_unhealthy: '本地重排模型未通过健康检查，请在设置中重新验证。',
-      unsupported_model: '本地重排模型未登记或架构不受支持，请检查配置。',
-      timeout: '本地重排超过时间预算，本次使用原始检索顺序。',
-      invalid_response: '本地重排返回了无效分数，请重新验证模型。',
-      runtime_error: '本地重排运行失败，本次使用原始检索顺序。',
-      process_crash: '本地重排进程异常退出，本次使用原始检索顺序。',
-      circuit_open: '本地重排连续失败后已临时暂停，请稍后重试。',
-      busy: '本地重排队列繁忙，本次使用原始检索顺序。',
+      model_not_downloaded: 'Local reranker is not downloaded. Download it in Settings → Local Models.',
+      model_checking: 'Local reranker is downloading or being validated. Original retrieval order was preserved.',
+      model_unhealthy: 'Local reranker failed its health check. Run validation again in Settings.',
+      unsupported_model: 'Local reranker is not registered or its architecture is unsupported. Check the configuration.',
+      timeout: 'Local reranking exceeded its time budget. Original retrieval order was preserved.',
+      invalid_response: 'Local reranker returned invalid scores. Run model validation again.',
+      runtime_error: 'Local reranking failed. Original retrieval order was preserved.',
+      process_crash: 'Local reranker process exited unexpectedly. Original retrieval order was preserved.',
+      circuit_open: 'Local reranking was temporarily paused after repeated failures. Try again shortly.',
+      busy: 'Local reranking queue is busy. Original retrieval order was preserved.',
     }
     return { code: error.code, message: messages[error.code], retryable: error.retryable, action: localRerankActionFor(error.code) }
   }
-  return { code: 'provider_error', message: '重排服务暂时不可用，本次使用原始检索顺序。', retryable: true, action: 'retry_later' }
+  return { code: 'provider_error', message: 'Reranking service is temporarily unavailable. Original retrieval order was preserved.', retryable: true, action: 'retry_later' }
 }
 
 export function rerankTechnicalMessage(error: unknown): string {
@@ -169,7 +169,7 @@ export async function rerankCandidates(
     if (Date.now() >= options.deadlineAt || /\b(?:timeout|timed out)\b/i.test(message)) {
       throw new RerankExecutionError({
         code: 'timeout',
-        message: '重排服务超过时间预算，本次使用原始检索顺序。',
+        message: 'Reranking service exceeded its time budget. Original retrieval order was preserved.',
         retryable: true,
         action: 'retry_later',
       }, undefined, message)
@@ -182,7 +182,7 @@ export async function rerankCandidates(
     void response.body?.cancel().catch(() => {})
     throw new RerankExecutionError({
       code: 'provider_error',
-      message: `重排服务请求失败（HTTP ${response.status}），本次使用原始检索顺序。`,
+      message: `Reranking request failed (HTTP ${response.status}). Original retrieval order was preserved.`,
       retryable: ![400, 401, 403, 404].includes(response.status),
       action: [400, 401, 403, 404].includes(response.status) ? 'check_config' : 'retry_later',
     }, response.status, `rerank request failed: HTTP ${response.status}`)
@@ -245,7 +245,7 @@ export async function rerankCandidates(
 function remoteTimeoutError(technicalMessage: string): RerankExecutionError {
   return new RerankExecutionError({
     code: 'timeout',
-    message: '重排服务超过时间预算，本次使用原始检索顺序。',
+    message: 'Reranking service exceeded its time budget. Original retrieval order was preserved.',
     retryable: true,
     action: 'retry_later',
   }, undefined, technicalMessage)

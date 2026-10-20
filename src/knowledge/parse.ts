@@ -32,9 +32,10 @@ export async function parseDocumentBuffer(
   buffer: Uint8Array,
   fileName: string,
   mimeType?: string,
+  options: { ocrEnabled?: boolean } = {},
 ): Promise<string> {
   const ext = extensionOf(fileName)
-  if (mimeType === 'application/pdf' || ext === 'pdf') return parsePdf(buffer)
+  if (mimeType === 'application/pdf' || ext === 'pdf') return parsePdf(buffer, options.ocrEnabled !== false)
   if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || ext === 'docx') {
     return parseDocx(buffer)
   }
@@ -267,7 +268,8 @@ async function ocrFallback(bytes: Uint8Array): Promise<string> {
   return await ocrPdfText(bytes)
 }
 
-async function parsePdf(buffer: Uint8Array): Promise<string> {
+async function parsePdf(buffer: Uint8Array, ocrEnabled = true): Promise<string> {
+  if (!Buffer.from(buffer.subarray(0, 1024)).includes(Buffer.from('%PDF-'))) throw new Error('PDF parsing failed: invalid PDF header')
   // Primary engine: pdf-parse (pdf.js). On failure or an empty extraction,
   // fall back to @firecrawl/anydoc (Cherry's AnydocReader fallback posture):
   // anydoc detects the format by content signature and returns structured
@@ -275,8 +277,10 @@ async function parsePdf(buffer: Uint8Array): Promise<string> {
   // indexed. Only when both engines fail does the import fail.
   let primaryError: Error | null = null
   let text = ''
+  let native: NativePdfResult | undefined
   try {
-    text = await parsePdfInWorker(buffer)
+    native = await parsePdfInWorker(buffer)
+    text = native.text
   } catch (error) {
     primaryError = error instanceof Error ? error : new Error(String(error))
   }
@@ -286,7 +290,15 @@ async function parsePdf(buffer: Uint8Array): Promise<string> {
     // - per-glyph math layout: reassemble true lines from glyph coordinates;
     // - corrupt encoding (reassembly still yields junk): render + OCR.
     const avgLine = averageLineLength(text)
-    if (avgLine >= 5) return text
+    if (avgLine >= 5) {
+      if (ocrEnabled && native?.scanned?.length && native.pages) {
+        const { isOcrReady, ocrPdfPages } = await import('./ocr.js')
+        if (!isOcrReady()) throw new Error('This PDF mixes text and scanned pages. Download PaddleOCR in Settings → Local Models to index every page')
+        const recognized = await ocrPdfPages(buffer, native.scanned)
+        return native.pages.map((page, index) => recognized.get(index + 1) ?? page).join('\n\n')
+      }
+      return text
+    }
     let reassembled = ''
     try {
       reassembled = await extractTextWithLayout(buffer)
@@ -294,7 +306,7 @@ async function parsePdf(buffer: Uint8Array): Promise<string> {
       // reassembly unavailable — fall through to OCR
     }
     if (averageLineLength(reassembled) >= 12 && reassembled.trim().length > 0) return reassembled
-    const recognized = await ocrFallback(buffer)
+    const recognized = (ocrEnabled ? await ocrFallback(buffer) : '')
     if (recognized.trim().length > 0) return recognized
     // anydoc as the last resort before the fragmented original.
     try {
@@ -320,7 +332,7 @@ async function parsePdf(buffer: Uint8Array): Promise<string> {
   let ocrFailure: Error | undefined
   try {
     const { isOcrReady, ocrPdfText } = await import('./ocr.js')
-    ocrReady = isOcrReady()
+    ocrReady = ocrEnabled && isOcrReady()
     if (ocrReady) {
       const recognized = await ocrPdfText(buffer)
       if (recognized.trim().length > 0) return recognized
@@ -337,10 +349,10 @@ async function parsePdf(buffer: Uint8Array): Promise<string> {
       { code: (ocrFailure as { code?: string }).code ?? 'ocr_failed' })
   }
   if (primaryError !== null) {
-    throw new Error(`PDF parsing failed: ${primaryError.message}`)
+    throw new Error(`PDF parsing failed: ${primaryError.message}${ocrEnabled ? '' : '; PaddleOCR is disabled for this base'}`)
   }
   throw new Error(
-    ocrReady
+    !ocrEnabled ? 'PDF contains no extractable text and PaddleOCR is disabled for this base' : ocrReady
       ? 'PDF contains no extractable text (it may be scanned)'
       : 'PDF contains no extractable text (it may be scanned) — download the local OCR models in Settings → Local Models to auto-recognize scans',
   )
@@ -485,11 +497,12 @@ function stripXmlText(xml: string, tag: string): string {
 /** Per-request ceiling; a PDF the engine cannot finish must not block an import. */
 const PDF_PARSE_WORKER_TIMEOUT_MS = 120_000
 
+interface NativePdfResult { text: string; pages?: string[]; scanned?: number[] }
 let pdfParseWorker: Worker | null = null
 let pdfParseRequestSeq = 0
 /** Set once the worker bundle is known to be absent (a partial install). */
 let pdfParseWorkerMissing = false
-const pdfParsePending = new Map<number, { resolve(text: string): void; reject(error: Error): void }>()
+const pdfParsePending = new Map<number, { resolve(text: NativePdfResult): void; reject(error: Error): void }>()
 
 function failAllPdfParsePending(error: Error): void {
   for (const { reject } of pdfParsePending.values()) reject(error)
@@ -499,14 +512,14 @@ function failAllPdfParsePending(error: Error): void {
 function ensurePdfParseWorker(): Worker {
   if (pdfParseWorker !== null) return pdfParseWorker
   const worker = new Worker(fileURLToPath(new URL('./pdf-parse-worker.mjs', import.meta.url)))
-  worker.unref()
-  worker.on('message', (message: { id?: number; ok?: boolean; text?: string; error?: string }): void => {
+  worker.on('message', (message: { id?: number; ok?: boolean; text?: string; pages?: string[]; scanned?: number[]; error?: string }): void => {
     if (message.id === undefined) return
     const pending = pdfParsePending.get(message.id)
     if (pending === undefined) return
     pdfParsePending.delete(message.id)
-    if (message.ok === true) pending.resolve(message.text ?? '')
+    if (message.ok === true) pending.resolve({ text: message.text ?? '', pages: message.pages, scanned: message.scanned })
     else pending.reject(new Error(message.error ?? 'pdf-parse worker failed'))
+    if (pdfParsePending.size === 0) worker.unref()
   })
   const onFailure = (error: Error): void => {
     if (pdfParseWorker !== worker) return
@@ -515,11 +528,12 @@ function ensurePdfParseWorker(): Worker {
   }
   worker.on('error', error => onFailure(error instanceof Error ? error : new Error(String(error))))
   worker.on('exit', () => onFailure(new Error('pdf-parse worker exited')))
+  worker.unref()
   pdfParseWorker = worker
   return worker
 }
 
-function postPdfParseRequest(bytes: Uint8Array): Promise<string> {
+function postPdfParseRequest(bytes: Uint8Array): Promise<NativePdfResult> {
   return new Promise((resolve, reject) => {
     const id = ++pdfParseRequestSeq
     const timer = setTimeout(() => {
@@ -538,7 +552,9 @@ function postPdfParseRequest(bytes: Uint8Array): Promise<string> {
     try {
       // postMessage structured-clones the bytes, so the caller's buffer stays
       // usable (an import reuses the same bytes for raw storage and OCR).
-      ensurePdfParseWorker().postMessage({ id, data: Uint8Array.from(bytes) })
+      const worker = ensurePdfParseWorker()
+      worker.ref()
+      worker.postMessage({ id, data: Uint8Array.from(bytes) })
     } catch (error) {
       pdfParsePending.delete(id)
       clearTimeout(timer)
@@ -549,13 +565,13 @@ function postPdfParseRequest(bytes: Uint8Array): Promise<string> {
 
 /** Degraded path for an install with no worker bundle: parsing still works, but
  *  pdf-parse's stray rejection is no longer contained. */
-async function parsePdfInProcess(bytes: Uint8Array): Promise<string> {
+async function parsePdfInProcess(bytes: Uint8Array): Promise<NativePdfResult> {
   const mod = await import('pdf-parse')
   const result = await mod.default(Buffer.from(bytes))
-  return typeof result?.text === 'string' ? result.text : ''
+  return { text: typeof result?.text === 'string' ? result.text : '' }
 }
 
-async function parsePdfInWorker(bytes: Uint8Array): Promise<string> {
+async function parsePdfInWorker(bytes: Uint8Array): Promise<NativePdfResult> {
   if (!pdfParseWorkerMissing && !existsSync(fileURLToPath(new URL('./pdf-parse-worker.mjs', import.meta.url)))) {
     pdfParseWorkerMissing = true
     console.warn('[dsh-knowledge] pdf-parse worker bundle is missing; parsing PDFs in-process')

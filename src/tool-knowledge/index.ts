@@ -57,7 +57,7 @@ const processingInfoSchema = {
   type: 'object', additionalProperties: false,
   properties: {
     revision: { type: 'string', required: true }, artifactId: { type: 'string', required: true },
-    sourceHash: { type: 'string', required: true }, provider: { type: 'string', enum: ['builtin', 'mineru', 'mineru-local'], required: true },
+    sourceHash: { type: 'string', required: true }, provider: { type: 'string', enum: ['builtin', 'paddle', 'mineru', 'mineru-local'], required: true },
     processorVersion: { type: 'string' }, optionsFingerprint: { type: 'string', required: true },
     parsedAt: { type: 'number', required: true }, completeness: { type: 'string', enum: ['complete', 'partial', 'unknown'], required: true },
     pageCount: { type: 'number' }, processedPages: { type: 'array', items: { type: 'number' } },
@@ -1319,22 +1319,25 @@ export async function buildAutoRetrieveMessage(
     // rerank. The search itself is explicitly forbidden from invoking a
     // configured reranker, preventing local model startup and remote double
     // billing on this latency-critical path.
-    const deadlineAt = Date.now() + AUTO_RETRIEVE_RERANK_TIMEOUT_MS
-    const budgetSignal = AbortSignal.timeout(AUTO_RETRIEVE_RERANK_TIMEOUT_MS)
+    const config = knowledge.getConfig()
+    const localPipeline = config.embeddingProvider === 'local' || config.rerankModel?.startsWith('local:')
+    const retrievalBudget = localPipeline ? Math.min(30000, config.localRerankTimeoutMs ?? 30000) : AUTO_RETRIEVE_RERANK_TIMEOUT_MS
+    const deadlineAt = Date.now() + retrievalBudget
+    const budgetSignal = AbortSignal.timeout(retrievalBudget)
     const executionSignal = signal !== undefined ? AbortSignal.any([signal, budgetSignal]) : budgetSignal
     const searchRequest = namedBase !== undefined
       ? {
           query: currentQuery,
           ...(queryPlan.enhanced !== undefined ? { queries: [queryPlan.enhanced] } : {}),
           topK: AUTO_RETRIEVE_CANDIDATE_POOL,
-          mode: 'lexical' as const,
+          mode: config.embeddingProvider && config.embeddingProvider !== 'none' ? 'auto' as const : 'lexical' as const,
           baseId: namedBase.id,
         }
       : {
           query: currentQuery,
           ...(queryPlan.enhanced !== undefined ? { queries: [queryPlan.enhanced] } : {}),
           topK: AUTO_RETRIEVE_CANDIDATE_POOL,
-          mode: 'lexical' as const,
+          mode: config.embeddingProvider && config.embeddingProvider !== 'none' ? 'auto' as const : 'lexical' as const,
           baseIds: bases.map(base => base.id),
         }
     const searchStartedAt = Date.now()
@@ -1381,16 +1384,15 @@ export async function buildAutoRetrieveMessage(
       .sort((a, b) => b.score - a.score)
 
     // Rerank participation: when a rerank model is configured (global or any
-    // enabled base) and it is a remote API, re-score the candidates with it —
-    // relevance scores replace BM25 for the injection order. The local
-    // cross-encoder is skipped (loading ~280MB per user message is too heavy).
+    // enabled base), re-score candidates through its configured API or isolated
+    // CPU cross-encoder. Local setup is opt-in and uses a bounded warm worker.
     const rerank = namedBase !== undefined
       ? rerankSettingsForBase(knowledge, namedBase.id)
       : knowledge.rerankSettings()
     let ranked = scored
     let relevanceFloor = AUTO_RETRIEVE_ABS_MIN_SCORE
     let adaptive = true
-    if (rerank !== undefined && !rerank.model.startsWith('local:') && scored.length > 1) {
+    if (rerank !== undefined && scored.length > 1) {
       try {
         const { rerankCandidates } = await import('../knowledge/rerank.js')
         const remainingMs = Math.ceil(deadlineAt - Date.now())

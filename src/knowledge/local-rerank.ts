@@ -203,6 +203,7 @@ function spawnChild(): ChildProcess {
   const generation = ++childGeneration
   const spawned = fork(processPath(), [], {
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    env: { ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '' },
     // Host-only eval/test/debug flags can make a file-based fork fail or make
     // every rerank child fight for the same inspector port.
     execArgv: process.execArgv.filter(argument =>

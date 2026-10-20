@@ -55,7 +55,7 @@ async function handleRequest(service: KnowledgeService, req: IncomingMessage, re
     })
     const method = (req.method ?? 'GET').toUpperCase()
 
-    if (segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
+    if (segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
 
     const body = method === 'GET' ? undefined : await readJson(req)
     const value = await route(service, method, segments, body ?? {}, url.searchParams)
@@ -265,6 +265,17 @@ async function route(
     return undefined
   }
 
+  if (segments[0] === 'structure-v3') {
+    if (method === 'GET') return service.getStructureStatus()
+    if (method === 'POST' && segments[1] === 'prepare') return service.prepareStructure()
+    return undefined
+  }
+
+  if (segments[0] === 'ocr-acceleration') {
+    if (method === 'GET') return service.ocrAcceleration.status()
+    if (method === 'POST') return service.ocrAcceleration.prepare()
+  }
+
   // /local-ocr (status/download/remove) — scanned-PDF OCR models
   if (segments[0] === 'local-ocr') {
     if (method === 'GET' && segments.length === 1) return service.getOcrStatus()
@@ -314,6 +325,8 @@ async function route(
   }
 
   if (segments[0] === 'folder-picker' && method === 'POST') return service.pickSourceFolder()
+
+  if (segments[0] === 'processing-summary' && method === 'GET') return service.processingSummary()
 
   // /indexing-status
   if (segments[0] === 'indexing-status' && method === 'GET') {

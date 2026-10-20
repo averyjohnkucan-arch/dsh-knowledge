@@ -24,6 +24,7 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { KnowledgeChunk, KnowledgeDocument } from './types.js'
+import { documentSchema } from './domain.js'
 import { validSourceSpan } from './source-spans.js'
 
 /** Resolve the chunk database path: explicit config, else `<DSH_HOME>/storages/`. */
@@ -349,6 +350,9 @@ export class ChunkDatabase implements RetrievalLane {
         INSERT INTO chunk_fts(rowid, search_text) VALUES (NEW.fts_rowid, NEW.search_text);
       END;
     `)
+    this.db.exec(`CREATE TABLE IF NOT EXISTS knowledge_document (
+      doc_id TEXT PRIMARY KEY, base_id TEXT NOT NULL, header TEXT NOT NULL, raw_text TEXT
+    ); CREATE INDEX IF NOT EXISTS knowledge_document_base ON knowledge_document(base_id);`)
     this.migrateEmbeddingHashColumn()
     this.migrateFtsRowidColumn()
     this.migrateEvidenceColumns()
@@ -443,6 +447,48 @@ export class ChunkDatabase implements RetrievalLane {
       }
       throw error
     }
+  }
+
+  /** One transaction and a durable marker: stale legacy rows can never resurrect deletions. */
+  migrateDocumentMetadata(records: Iterable<[string, KnowledgeDocument]>): number {
+    if (this.readMeta('document_metadata_sqlite_v1') === '1') return 0
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      // Recheck after obtaining the writer lock if two hosts opened together.
+      if (this.readMeta('document_metadata_sqlite_v1') === '1') { this.db.exec('COMMIT'); return 0 }
+      let count = 0
+      for (const [id, document] of records) {
+        if (id !== document.id) throw new Error('document metadata key mismatch')
+        this.putDocumentMetadata(document); count++
+      }
+      this.writeMeta('document_metadata_sqlite_v1', '1')
+      this.db.exec('COMMIT')
+      return count
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  putDocumentMetadata(document: KnowledgeDocument): void {
+    const valid = documentSchema.parse(document)
+    const { rawText, ...header } = valid
+    this.db.prepare(`INSERT INTO knowledge_document(doc_id, base_id, header, raw_text) VALUES (?, ?, ?, ?)
+      ON CONFLICT(doc_id) DO UPDATE SET base_id=excluded.base_id, header=excluded.header, raw_text=excluded.raw_text`)
+      .run(valid.id, valid.baseId, JSON.stringify(header), rawText ?? null)
+  }
+
+  getDocumentMetadata(id: string): KnowledgeDocument | undefined {
+    const row = this.db.prepare('SELECT header, raw_text FROM knowledge_document WHERE doc_id=?').get(id) as { header: string; raw_text: string | null } | undefined
+    return row ? { ...JSON.parse(row.header), ...(row.raw_text !== null ? { rawText: row.raw_text } : {}) } : undefined
+  }
+
+  listDocumentMetadata(baseId?: string, includeRawText = true): KnowledgeDocument[] {
+    const columns = includeRawText ? 'header, raw_text' : 'header'
+    const rows = this.db.prepare(`SELECT ${columns} FROM knowledge_document${baseId !== undefined ? ' WHERE base_id=?' : ''}`)
+      .all(...(baseId !== undefined ? [baseId] : [])) as Array<{ header: string; raw_text?: string | null }>
+    return rows.map(row => ({ ...JSON.parse(row.header), ...(typeof row.raw_text === 'string' ? { rawText: row.raw_text } : {}) }))
+  }
+
+  deleteDocumentMetadata(id: string): boolean {
+    return this.db.prepare('DELETE FROM knowledge_document WHERE doc_id=?').run(id).changes > 0
   }
 
   private readMeta(key: string): string | undefined {
@@ -702,7 +748,7 @@ export class ChunkDatabase implements RetrievalLane {
   }
 
   /** Replace the live generation and its recovery record in ONE transaction. */
-  publishDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[], previousCreatedAt: number): void {
+  publishDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[], previousCreatedAt: number, atomicMetadata = false): void {
     validateDocumentGeneration(doc, chunks)
     if (doc.chunkCount !== chunks.length) throw new Error('document generation chunk count mismatch')
     this.db.exec('BEGIN IMMEDIATE')
@@ -715,7 +761,10 @@ export class ChunkDatabase implements RetrievalLane {
         chunk.heading ?? null, chunk.context ?? null, chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null,
         chunk.embeddingModel ?? null, chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
         chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null)
-      this.db.prepare(`INSERT INTO document_generation_commit(doc_id, base_id, previous_created_at, next_document) VALUES (?, ?, ?, ?)
+      if (atomicMetadata) {
+        this.putDocumentMetadata(doc)
+        this.db.prepare('DELETE FROM document_generation_commit WHERE doc_id=?').run(doc.id)
+      } else this.db.prepare(`INSERT INTO document_generation_commit(doc_id, base_id, previous_created_at, next_document) VALUES (?, ?, ?, ?)
         ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, previous_created_at = excluded.previous_created_at, next_document = excluded.next_document`)
         .run(doc.id, doc.baseId, previousCreatedAt, JSON.stringify(doc))
       this.db.prepare('DELETE FROM document_generation_stage WHERE doc_id = ?').run(doc.id)

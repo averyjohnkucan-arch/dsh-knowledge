@@ -1,11 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-// Load the sibling workspace's real built service. Importing its TS source
-// beside ToolRuntime's package declaration creates two nominal SystemPrompt
-// identities in module augmentation even though they are the same runtime.
-// @ts-expect-error the workspace build keeps declarations under lib/types/
-import SystemPrompt from '../../dsh/packages/core/system-prompt/lib/index.js'
+// Use the published DSH service so the fork builds without a sibling checkout.
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { estimateContextTokens, KnowledgeService } from '../src/knowledge/index.js'
 import type { Config } from '../src/knowledge/config.js'
 import type { KnowledgeBase, KnowledgeDocument } from '../src/knowledge/types.js'

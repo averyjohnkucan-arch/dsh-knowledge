@@ -16,7 +16,7 @@ import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { httpFetch } from './net.js'
 import { localModelCacheDir } from './embed.js'
-import { OcrProcessClient } from './ocr-process-client.js'
+import { OcrPool } from './ocr-pool.js'
 import { ocrError } from './ocr-protocol.js'
 
 /** Cap on OCR work per PDF (Cherry refuses >300 pages; images are capped similarly). */
@@ -237,7 +237,7 @@ interface PdfImage {
   data: Uint8ClampedArray
 }
 
-const ocrProcess = new OcrProcessClient()
+const ocrProcess = new OcrPool()
 
 /** Resolve pdfjs-dist's wasm directory (image decoders) for fake-worker mode. */
 const pdfjsWasmUrl: string | undefined = (() => {
@@ -319,7 +319,7 @@ async function loadMupdf(): Promise<MupdfModule | null> {
  * when the renderer is unavailable — the caller falls back to embedded-raster
  * extraction. Exported for tests.
  */
-export async function renderPdfPages(bytes: Uint8Array, maxPages: number): Promise<Array<{ page: number; png: Buffer }> | null> {
+export async function renderPdfPages(bytes: Uint8Array, maxPages: number, selectedPages?: readonly number[]): Promise<Array<{ page: number; png: Buffer }> | null> {
   const mupdf = await loadMupdf()
   if (mupdf === null) return null
   let document: ReturnType<MupdfModule['Document']['openDocument']> | null = null
@@ -327,9 +327,12 @@ export async function renderPdfPages(bytes: Uint8Array, maxPages: number): Promi
     document = mupdf.Document.openDocument(Uint8Array.from(bytes), 'application/pdf')
     const out: Array<{ page: number; png: Buffer }> = []
     const pageCount = document.countPages()
-    if (pageCount > maxPages) throw ocrError('ocr_incomplete', `OCR page limit exceeded (${pageCount} pages, limit ${maxPages}); split the PDF or use MinerU`)
+    const selection = selectedPages ? new Set(selectedPages) : undefined
+    if (selection && [...selection].some(page => !Number.isInteger(page) || page < 1 || page > pageCount)) throw ocrError('ocr_incomplete', 'OCR selected page is outside the document')
+    if ((selection?.size ?? pageCount) > maxPages) throw ocrError('ocr_incomplete', `OCR page limit exceeded (${pageCount} pages, limit ${maxPages}); split the PDF or use MinerU`)
     let totalBytes = 0
     for (let index = 0; index < pageCount; index += 1) {
+      if (selection && !selection.has(index + 1)) continue
       // NO yield here, deliberately. mupdf's render is synchronous WASM and this
       // runs in the host process, so a long document does block the event loop —
       // but yielding between pages was measured to CRASH the process: with a
@@ -594,12 +597,12 @@ function crc32(buffer: Buffer): number {
  * THROWS on a missing page, an engine failure, or a work-budget limit. Partial
  * text is never returned as a successful import (issues #17 and #37).
  */
-export async function ocrPdfText(bytes: Uint8Array): Promise<string> {
-  if (!isOcrReady()) return ''
+export async function ocrPdfPages(bytes: Uint8Array, selectedPages?: readonly number[]): Promise<Map<number, string>> {
+  if (!isOcrReady()) return new Map()
   const deadline = Date.now() + MAX_OCR_TOTAL_MS
   const pageTexts = new Map<number, string[]>()
   try {
-    const rendered = await renderPdfPages(bytes, MAX_OCR_PAGES)
+    const rendered = await renderPdfPages(bytes, MAX_OCR_PAGES, selectedPages)
     const recognize = async (page: number, png: Buffer): Promise<void> => {
       try {
         const text = postprocessOcrText(await ocrProcess.recognize(png, ocrCacheDir()))
@@ -616,16 +619,20 @@ export async function ocrPdfText(bytes: Uint8Array): Promise<string> {
     if (rendered !== null) {
       // Full-page renders: one PNG per page, straight into the recognizer
       // (mupdf output needs no grayscale/normalize chain).
-      for (const { page, png } of rendered) {
-        if (Date.now() >= deadline) {
-          throw ocrError('ocr_incomplete', `OCR time budget reached after ${pageTexts.size}/${rendered.length} pages; split the PDF or use MinerU`)
+      let next = 0
+      await Promise.all(Array.from({ length: Math.min(ocrProcess.concurrency, rendered.length) }, async () => {
+        for (;;) {
+          const item = rendered[next++]
+          if (!item) return
+          if (Date.now() >= deadline) throw ocrError('ocr_incomplete', 'OCR document time budget exceeded')
+          await recognize(item.page, item.png)
         }
-        await recognize(page, png)
-      }
+      }))
     } else {
       // No renderer — fall back to the embedded-raster extraction path.
       const images = await extractPdfImages(bytes)
       for (const image of images) {
+        if (selectedPages && !selectedPages.includes(image.page)) continue
         if (Date.now() >= deadline) {
           throw ocrError('ocr_incomplete', `OCR time budget reached after ${pageTexts.size} pages; split the PDF or use MinerU`)
         }
@@ -642,10 +649,10 @@ export async function ocrPdfText(bytes: Uint8Array): Promise<string> {
     console.warn(`[dsh-knowledge] OCR failed for scanned PDF: ${message}`)
     throw ocrError((error as { code?: string }).code ?? 'ocr_incomplete', `OCR could not process this document completely: ${message}`)
   }
-  return [...pageTexts.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, texts]) => texts.join('\n'))
-    .join('\n\n')
+  return new Map([...pageTexts.entries()].sort((a, b) => a[0] - b[0]).map(([page, texts]) => [page, texts.join('\n')]))
+}
+export async function ocrPdfText(bytes: Uint8Array): Promise<string> {
+  return [...(await ocrPdfPages(bytes)).values()].join('\n\n')
 }
 
 /** Nearest-neighbour 2x upscale for low-resolution rasters (pure JS). */
