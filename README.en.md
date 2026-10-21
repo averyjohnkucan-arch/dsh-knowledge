@@ -105,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.12.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.13.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -297,13 +297,13 @@ Filters apply only to the current request. No database migration, reindex, or do
 
 ---
 
-## v0.5.12 highlights
+## v0.5.13 highlights
 
-Enable **Keep internal Markdown** in a base's settings → Advanced to save future indexed text revisions for citation highlighting. The setting is off by default and does not rewrite existing documents when saved. Use a folder's fourth **Sync** menu action to apply changed source files and processing settings. Unchanged work is reused. Saved passage links preserve their indexed revision; original-source links remain available.
+Enable **Keep internal Markdown** in a base's settings → Advanced to save future indexed text revisions for citation highlighting. The setting is off by default and does not rewrite existing documents when saved. Use a folder's fourth **Sync** menu action to apply changed source files and processing settings. Unchanged work is reused. Saved passage links preserve their indexed revision while retention remains enabled; original-source links remain available. Turning retention off and syncing removes all saved Markdown revisions recursively, while preserving indexed text, vectors and original files. A retention-only cleanup does not repeat parsing or embedding.
 
 Deleting a source and syncing removes its KB data and retained Markdown. Removing an internal copy never removes the original source. Automatic folder sync can reimport originals that remain on disk.
 
-[Read the v0.5.12 release notes](./docs/releases/v0.5.12.md)
+[Read the v0.5.13 release notes](./docs/releases/v0.5.13.md)
 
 ### Previous update: v0.5.11
 

@@ -37,11 +37,13 @@ export class MarkdownSnapshots {
   private memory=new Map<string,MarkdownSnapshot>()
   private writes=new Set<{key:string;promise:Promise<string>}>()
   private deleted=new Set<string>()
+  private purging=new Set<string>()
   constructor(private root?:string){}
   private key(base:string,doc:string,revision:string){return [base,doc,revision].map(component).join('/')}
   async save(doc:KnowledgeDocument,text:string,chunks:readonly KnowledgeChunk[]):Promise<string>{
     const key=[doc.baseId,doc.id].map(component).join('/')
     if(this.deleted.has(doc.baseId)||this.deleted.has(key))throw Error('Markdown source was deleted')
+    if(this.purging.has(key))throw Error('Markdown retention is being synchronized; retry indexing after Sync finishes')
     const record={key,promise:this.saveVersion(doc,text,chunks)};this.writes.add(record)
     try{return await record.promise}finally{this.writes.delete(record)}
   }
@@ -77,6 +79,23 @@ export class MarkdownSnapshots {
     }catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw error}
   }
   async removeRevision(base:string,doc:string,revision:string):Promise<void>{const key=this.key(base,doc,revision);this.memory.delete(key);if(this.root)await rm(join(this.root,key),{recursive:true,force:true})}
+  /** Remove derived revisions without permanently retiring a live document. */
+  async clearDocument(base:string,doc:string):Promise<boolean>{
+    const prefix=[base,doc].map(component).join('/')
+    if(this.purging.has(prefix))throw Error('Markdown retention is already being synchronized')
+    this.purging.add(prefix)
+    try{
+      await Promise.allSettled([...this.writes].filter(row=>row.key===prefix).map(row=>row.promise))
+      let removed=false
+      for(const key of this.memory.keys())if(key.startsWith(prefix+'/')){this.memory.delete(key);removed=true}
+      if(this.root){
+        const path=join(this.root,prefix)
+        try{await stat(path)}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return removed;throw error}
+        await rm(path,{recursive:true,force:true});removed=true
+      }
+      return removed
+    }finally{this.purging.delete(prefix)}
+  }
   async removeBase(base:string):Promise<void>{const prefix=component(base);this.deleted.add(prefix);await Promise.allSettled([...this.writes].filter(row=>row.key.startsWith(prefix+'/')).map(row=>row.promise));for(const key of this.memory.keys())if(key.startsWith(prefix+'/'))this.memory.delete(key);if(this.root)await rm(join(this.root,prefix),{recursive:true,force:true})}
   async removeDocument(base:string,doc:string):Promise<void>{const prefix=[base,doc].map(component).join('/');this.deleted.add(prefix);await Promise.allSettled([...this.writes].filter(row=>row.key===prefix).map(row=>row.promise));for(const key of this.memory.keys())if(key.startsWith(prefix+'/'))this.memory.delete(key);if(this.root)await rm(join(this.root,prefix),{recursive:true,force:true})}
 }

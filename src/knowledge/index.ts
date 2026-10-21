@@ -2617,18 +2617,34 @@ export class KnowledgeService extends Service {
     const signature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
     const isExternal = store.getBase(document.baseId)?.storageMode === 'external'
     const config=this.getConfigFor(document.baseId)
-    let settingsMatch=document.indexingSettingsFingerprint!==undefined ? document.indexingSettingsFingerprint===indexingSettingsFingerprint(config) : !checkLegacySettings&&!(config.keepInternalMarkdown&&!document.markdownRevision)
+    const fingerprint=indexingSettingsFingerprint(config)
+    // Turning retention off needs metadata/file cleanup, not new parsing or vectors.
+    let settingsMatch=document.indexingSettingsFingerprint!==undefined ? document.indexingSettingsFingerprint===fingerprint||(!config.keepInternalMarkdown&&document.indexingSettingsFingerprint===indexingSettingsFingerprint({...config,keepInternalMarkdown:true})) : !checkLegacySettings&&!(config.keepInternalMarkdown&&!document.markdownRevision)
+    const finish=async(result:'updated'|'unchanged'):Promise<'updated'|'unchanged'>=>{
+      if(config.keepInternalMarkdown)return result
+      // Always purge: older revisions can exist after the current pointer was
+      // cleared by an earlier reindex. A failed purge remains retryable by Sync.
+      const removed=await this.markdownSnapshots.clearDocument(document.baseId,document.id)
+      const current=store.getDocument(document.id)
+      if(!current||!store.getBase(document.baseId))throw new NotFoundError('document no longer exists')
+      if(current.markdownRevision||current.indexingSettingsFingerprint!==fingerprint){
+        const {markdownRevision:_removed,...rest}=current
+        await store.putDocument({...rest,indexingSettingsFingerprint:fingerprint})
+        return 'updated'
+      }
+      return removed?'updated':result
+    }
     if(settingsMatch&&config.keepInternalMarkdown&&(!document.markdownRevision||!await this.markdownSnapshots.has(document.baseId,document.id,document.markdownRevision)))settingsMatch=false
-    if (settingsMatch && isExternal && document.sourceSignature === signature && !document.incomplete && !document.embeddingError) return 'unchanged'
+    if (settingsMatch && isExternal && document.sourceSignature === signature && !document.incomplete && !document.embeddingError) return finish('unchanged')
     const buffer = await readFile(sourcePath)
     const bound = await this.bindDocumentSourcePath(document, sourcePath)
     const stored = bound.rawFilePath !== undefined ? await store.raw?.read(bound.rawFilePath) : undefined
     const unchanged = stored !== undefined && stored !== null && stored.byteLength > 0 ? Buffer.from(stored).equals(buffer) : bound.processing?.sourceHash === createHash('sha256').update(buffer).digest('hex')
-    if (settingsMatch && unchanged && !bound.incomplete && !bound.embeddingError) return bound === document ? 'unchanged' : 'updated'
+    if (settingsMatch && unchanged && !bound.incomplete && !bound.embeddingError) return finish(bound === document ? 'unchanged' : 'updated')
     // The unified source reader validates and parses once. A changed live
     // source must not silently fall back to the previous snapshot.
     await this.reindexDocument(bound.id, { mode: 'reparse', strictSource: true })
-    return 'updated'
+    return finish('updated')
   }
 
   private async deleteTrackedSyncSubtree(document: KnowledgeDocument, rootPath: string, items: DirectorySyncItem[]): Promise<void> {

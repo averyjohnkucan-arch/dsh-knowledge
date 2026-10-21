@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type Server } from 'node:http'
@@ -64,7 +64,7 @@ async function mount(keep=false){
 async function directory(){const path=await mkdtemp(join(tmpdir(),'dsh-markdown-sync-'));cleanup.push(()=>rm(path,{recursive:true,force:true}));return path}
 async function sync(service:KnowledgeService,id:string){
  const {jobId}=service.startFolderSync(id)
- for(let n=0;n<200;n++){const status=service.folderSyncStatus(jobId);if(status.state==='failed')throw Error(status.error);if(status.state==='complete')return status.result!;await new Promise(resolve=>setTimeout(resolve,5))}
+ for(let n=0;n<2000;n++){const status=service.folderSyncStatus(jobId);if(status.state==='failed')throw Error(status.error);if(status.state==='complete')return status.result!;await new Promise(resolve=>setTimeout(resolve,5))}
  throw Error('Sync did not finish')
 }
 describe('future-only Markdown and settings-aware folder sync',()=>{
@@ -111,6 +111,51 @@ describe('future-only Markdown and settings-aware folder sync',()=>{
   await service.deleteDocument(imported.sourceId,{recursive:true})
   expect(await readFile(file,'utf8')).toBe('Keep this original source.')
  })
+ it('recursively removes all saved revisions when Sync applies retention off, preserving text and chunks without reindexing',async()=>{
+  const {service,base}=await mount(true);const path=await directory()
+  await mkdir(join(path,'nested'));await writeFile(join(path,'one.txt'),'A stable astronomy passage.')
+  await writeFile(join(path,'nested','two.txt'),'A stable telescope passage.')
+  const imported=await service.importDirectoryTree(base.id,path)
+  const files=service.listDocuments(base.id).filter(row=>row.sourceType==='file')
+  const revisions=files.map(doc=>({id:doc.id,revision:service.getDocument(doc.id).markdownRevision!}))
+  // Preserve an additional historical revision whose pointer has already gone.
+  await service.reindexDocument(files[0].id,{mode:'rechunk'})
+  revisions.push({id:files[0].id,revision:service.getDocument(files[0].id).markdownRevision!})
+  await service.renameBase(base.id,{config:{keepInternalMarkdown:false}})
+  expect((await service.getMarkdownSnapshot(revisions[0].id,revisions[0].revision)).text).toContain('stable')
+  await service.reindexDocument(files[0].id,{mode:'rechunk'})
+  const before=files.map(doc=>service.getDocument(doc.id))
+  const reindex=vi.spyOn(service,'reindexDocument')
+  expect((await sync(service,imported.sourceId)).updated).toBe(2)
+  expect(reindex).not.toHaveBeenCalled()
+  for(const {id,revision} of revisions)await expect(service.getMarkdownSnapshot(id,revision)).rejects.toThrow('not found')
+  files.forEach((doc,index)=>{
+   const after=service.getDocument(doc.id)
+   expect(after.markdownRevision).toBeUndefined()
+   expect(after.rawText).toBe(before[index].rawText)
+   expect(after.chunks).toEqual(before[index].chunks)
+  })
+  expect((await service.search({baseId:base.id,query:'stable',mode:'lexical'})).hits.length).toBe(2)
+  expect(await readFile(join(path,'one.txt'),'utf8')).toBe('A stable astronomy passage.')
+  expect(await readFile(join(path,'nested','two.txt'),'utf8')).toBe('A stable telescope passage.')
+  expect((await sync(service,imported.sourceId)).updated).toBe(0)
+  await service.renameBase(base.id,{config:{keepInternalMarkdown:true}})
+  expect((await sync(service,imported.sourceId)).updated).toBe(2)
+  expect(service.getDocument(files[0].id).markdownRevision).toBeTruthy()
+ })
+ it('reports a failed retention cleanup and retries it on the next Sync',async()=>{
+  const {service,base}=await mount(true);const path=await directory();await writeFile(join(path,'one.txt'),'Original astronomy text.')
+  const imported=await service.importDirectoryTree(base.id,path),doc=service.listDocuments(base.id).find(row=>row.sourceType==='file')!
+  const revision=service.getDocument(doc.id).markdownRevision!
+  await service.renameBase(base.id,{config:{keepInternalMarkdown:false}})
+  const repo=(service as unknown as {markdownSnapshots:{clearDocument:(base:string,doc:string)=>Promise<boolean>}}).markdownSnapshots
+  const cleanup=vi.spyOn(repo,'clearDocument').mockRejectedValue(Error('permission denied during cleanup'))
+  expect((await sync(service,imported.sourceId)).failed).toBe(1)
+  expect((await service.getMarkdownSnapshot(doc.id,revision)).text).toContain('astronomy')
+  cleanup.mockRestore()
+  expect((await sync(service,imported.sourceId)).updated).toBe(1)
+  await expect(service.getMarkdownSnapshot(doc.id,revision)).rejects.toThrow('not found')
+ },10000)
  it('does not resurrect a document deleted while its saved revision is being prepared',async()=>{
   const {service,base}=await mount(true)
   const repo=(service as unknown as {markdownSnapshots:{save: (...args:any[])=>Promise<string>}}).markdownSnapshots

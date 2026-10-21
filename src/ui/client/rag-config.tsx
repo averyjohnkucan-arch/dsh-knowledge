@@ -676,7 +676,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           </button>
           {advancedOpen && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
-              <FieldRow label="Keep internal Markdown" hint="Save a versioned copy of the exact indexed text for citation highlighting. Applies to future imports, reindexing and syncs; saving this setting does not change existing documents.">
+              <FieldRow label="Keep internal Markdown" hint="Save a versioned copy of the exact indexed text for citation highlighting. Saving this setting does not change existing documents. Folder Sync applies current settings recursively; when off, it removes existing internal Markdown copies, including older citation revisions. Indexed text and original files are preserved.">
                 <Switch checked={values.keepInternalMarkdown ?? false} onChange={value => patch({ keepInternalMarkdown: value })} />
               </FieldRow>
               <FieldRow label={t('smartChunk')} hint={t('smartChunkHint')}>
