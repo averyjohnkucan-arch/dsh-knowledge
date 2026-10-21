@@ -123,6 +123,7 @@ export const documentSchema = z.object({
   tokenCount: z.number().int().gte(0).optional(),
   chunkCount: z.number().int().gte(0),
   incomplete: z.boolean().optional(),
+  semanticChunkingPending: z.boolean().optional(),
   vectorizationRevision: z.string().optional(),
   embeddingError: z.string().optional(),
   errorCode: z.enum(['interrupted', 'dimension_mismatch', 'parse_failed', 'embedding_provider']).optional(),
@@ -181,6 +182,7 @@ export const configOverridesSchema = z.object({
   localModelCacheDir: z.string().optional(),
   localEmbeddingIgpuIdle: z.boolean().optional(),
   localEmbeddingMainGpuIdle: z.boolean().optional(),
+  localOcrGpuWorkers: z.number().int().gte(1).lte(2).optional(),
   localEmbeddingThreads: z.number().int().gte(0).lte(64).optional(),
   localEmbeddingInstances: z.number().int().gte(0).lte(4).optional(),
   localEmbeddingMicroBatchSize: z.number().int().gte(1).lte(8).optional(),
@@ -238,6 +240,7 @@ export interface ConfigOverrides {
   localModelCacheDir?: string
   localEmbeddingIgpuIdle?: boolean
   localEmbeddingMainGpuIdle?: boolean
+  localOcrGpuWorkers?: number
   localEmbeddingThreads?: number
   localEmbeddingInstances?: number
   localEmbeddingMicroBatchSize?: number

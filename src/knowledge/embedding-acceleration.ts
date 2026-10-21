@@ -1,4 +1,4 @@
-import { IntelEmbeddingAvailability, nvidiaEmbeddingAvailability } from './embedding-device-availability.js'
+import { registerBackgroundDevices, IntelEmbeddingAvailability, nvidiaEmbeddingAvailability } from './embedding-device-availability.js'
 import { EmbeddingBatcher, EmbeddingQueueTimeout } from './embedding-batcher.js'
 import { availableParallelism, freemem } from 'node:os'
 import { resolveEmbeddingCpuTuning } from './embedding-tuning.js'
@@ -20,7 +20,9 @@ const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, 
 const exec = promisify(execFile)
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 export class EmbeddingAcceleration {
-  constructor(private readonly fp16 = false) {}
+  private unregisterDevices?: () => void
+  constructor(private readonly fp16 = false) { this.registerDevices() }
+  private registerDevices(): void { this.unregisterDevices ??= registerBackgroundDevices(() => this.lanes.flatMap(lane => [lane.worker.pid, ...(lane.extraWorkers ?? []).map(worker => worker.pid)])) }
   private cache = ''; private lanes: Lane[] = []; private ready?: EmbeddingAccelerationStatus; private setup?: Promise<void>; private setupChild?: ChildProcess
   private readonly intelAvailability = new IntelEmbeddingAvailability()
   private used = false; private foreground = 0; private timer?: ReturnType<typeof setInterval>; private checking = false; private polling = false; private stopped = false
@@ -29,7 +31,7 @@ export class EmbeddingAcceleration {
   private igpuAllowed = true; private mainGpuAllowed = true; private mainGpuCopies = 1; private gpuTried = new Set<string>(); private threads = 8; private cpuInstances = 1; private tuningKey = ''; private needsReload = false
   configure(cache: string, options: { localEmbeddingThreads?: number; localEmbeddingInstances?: number; localEmbeddingIgpuIdle?: boolean; localEmbeddingMainGpuIdle?: boolean } = {}): void {
     if (this.cache && this.cache !== cache) { this.release(); this.gpuTried.clear(); this.ready = undefined }
-    this.cache = cache; this.stopped = false
+    this.cache = cache; this.stopped = false; this.registerDevices()
     const tuning=resolveEmbeddingCpuTuning({threads:options.localEmbeddingThreads,instances:options.localEmbeddingInstances},availableParallelism(),freemem())
     const key=JSON.stringify([tuning.threads,tuning.instances]);if(this.tuningKey&&key!==this.tuningKey)this.needsReload=true
     this.tuningKey=key;this.threads=tuning.threads;this.cpuInstances=tuning.instances
@@ -284,7 +286,7 @@ export class EmbeddingAcceleration {
   }
   async remove():Promise<void>{this.dispose();const {rm}=await import('node:fs/promises');await rm(this.root(),{recursive:true,force:true});this.ready=undefined;this.stopped=false}
   release():void{this.npuRecoveryLane?.batcher?.pause();this.npuRecoveryLane?.worker.dispose();this.warmed=false;this.reference=undefined;for(const lane of this.lanes){lane.batcher?.pause();lane.worker.dispose();lane.extraWorkers?.forEach(worker=>worker.dispose())}this.lanes=[]}
-  dispose():void{this.stopped=true;if(this.timer)clearInterval(this.timer);this.timer=undefined;this.setupChild && stopOwnedProcess(this.setupChild);this.release()}
+  dispose():void{this.unregisterDevices?.();this.unregisterDevices=undefined;this.stopped=true;if(this.timer)clearInterval(this.timer);this.timer=undefined;this.setupChild && stopOwnedProcess(this.setupChild);this.release()}
 }
 export const embeddingAcceleration=new EmbeddingAcceleration()
 

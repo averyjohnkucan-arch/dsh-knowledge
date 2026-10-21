@@ -254,6 +254,7 @@ export interface KnowledgeConfig {
    *  model hot and avoids an onnxruntime binding reload on respawn). */
   localEmbeddingIgpuIdle?: boolean
   localEmbeddingMainGpuIdle?: boolean
+  localOcrGpuWorkers?: number
   localEmbeddingThreads?: number
   localEmbeddingInstances?: number
   localEmbeddingMicroBatchSize?: number

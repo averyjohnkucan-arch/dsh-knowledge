@@ -8,6 +8,7 @@ import numpy as np,openvino as ov
 from rapidocr import RapidOCR,EngineType,OCRVersion
 import rapidocr.inference_engine.openvino as backend
 requested = None
+cpu_threads = 4
 compiled_cache = None
 class Session:
  def __init__(self,cfg):
@@ -32,7 +33,7 @@ class Session:
    elif self.rec:model.reshape({model.input(0).any_name:ov.PartialShape([shape[0],3,shape[2],ov.Dimension(1,4096)])})
    else:model.reshape({model.input(0).any_name:ov.PartialShape([shape[0],3,ov.Dimension(32,4096),ov.Dimension(32,4096)])})
    t=time.perf_counter();props={'PERFORMANCE_HINT':'LATENCY', 'CACHE_DIR':str(compiled_cache)}
-   if requested=='CPU':props.update(INFERENCE_NUM_THREADS=8,NUM_STREAMS=1)
+   if requested=='CPU':props.update(INFERENCE_NUM_THREADS=cpu_threads,NUM_STREAMS=1)
    compiled=self.core.compile_model(model,requested,props);self.compile_s+=time.perf_counter()-t;self.compiles+=1
   self.cache[key]=compiled
   while len(self.cache)>16:self.cache.popitem(last=False)
@@ -103,8 +104,9 @@ def calibrate(args):
 
 if __name__=='__main__':
  import argparse,base64,cv2,contextlib
- parser=argparse.ArgumentParser();parser.add_argument('--models',required=True);parser.add_argument('--cache',required=True);parser.add_argument('--device',default='CPU');parser.add_argument('--worker',action='store_true');parser.add_argument('--calibrate',action='store_true');parser.add_argument('--output')
- args=parser.parse_args()
+ cv2.setNumThreads(1)
+ parser=argparse.ArgumentParser();parser.add_argument('--models',required=True);parser.add_argument('--cache',required=True);parser.add_argument('--device',default='CPU');parser.add_argument('--worker',action='store_true');parser.add_argument('--calibrate',action='store_true');parser.add_argument('--output');parser.add_argument('--threads',type=int,default=4)
+ args=parser.parse_args();cpu_threads=max(1,min(64,args.threads))
  if args.calibrate:calibrate(args)
  elif args.worker:
   pipeline=None

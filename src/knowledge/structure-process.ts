@@ -6,7 +6,7 @@ export class StructureProcess {
   private child?: ChildProcessWithoutNullStreams
   private closing = new Set<ChildProcessWithoutNullStreams>()
   private pending?: { id: number; resolve(result: Record<string, unknown>): void; reject(error: Error): void }
-  private get label(): string { return this.prefix === 'DSH_EMBED_RESULT ' ? 'Embedding' : 'PP-StructureV3' }
+  private get label(): string { return this.prefix === 'DSH_EMBED_RESULT ' ? 'Embedding' : this.prefix === 'DSH_OCR_RESULT ' ? 'OCR' : 'PP-StructureV3' }
   private sequence = 0
   private log = ''
   constructor(private command: string, private args: string[], private env: NodeJS.ProcessEnv, private prefix = 'DSH_STRUCTURE_RESULT ') {}

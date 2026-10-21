@@ -2,6 +2,14 @@ import { readdir, readFile, stat } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 const exec = promisify(execFile)
+// Plugin-owned consumers share ownership, so OCR and embeddings can coexist.
+const backgroundOwners = new Set<() => readonly (number | undefined)[]>()
+export function registerBackgroundDevices(owner: () => readonly (number | undefined)[]): () => void {
+  backgroundOwners.add(owner); return () => { backgroundOwners.delete(owner) }
+}
+export function backgroundDevicePids(local: ReadonlySet<number> = new Set()): Set<number> {
+  return new Set([...local, ...[...backgroundOwners].flatMap(owner => owner()).filter((pid): pid is number => pid !== undefined)])
+}
 export interface DeviceAvailability { available: boolean; reason: string; freeMiB?: number }
 export function parseIntelActivity(text: string): { client: string; nanoseconds: number } | undefined {
   if (!/^drm-driver:\s*(?:i915|xe)\s*$/m.test(text)) return undefined
@@ -19,6 +27,7 @@ export class IntelEmbeddingAvailability {
   private previous = new Map<string, { ns: number; at: number }>()
   async sample(owned: ReadonlySet<number>): Promise<DeviceAvailability> {
     if (process.platform !== 'linux') return { available: false, reason: 'Device activity monitoring is unavailable; desktop idle is required' }
+    owned = backgroundDevicePids(owned)
     const now = Date.now()
     try {
       if (now - this.scanned > 2000) {
@@ -70,7 +79,7 @@ export function nvidiaMemorySufficient(freeMiB: number, hasOwnedWorker: boolean)
   return Number.isFinite(freeMiB) && freeMiB >= (hasOwnedWorker ? 1024 : 4096)
 }
 export async function nvidiaEmbeddingAvailability(owned: ReadonlySet<number> | (()=>ReadonlySet<number>)): Promise<DeviceAvailability> {
-  const currentOwned=()=>typeof owned==='function'?owned():owned
+  const currentOwned=()=>backgroundDevicePids(typeof owned==='function'?owned():owned)
   try {
     const [{stdout:apps},{stdout:memory}]=await Promise.all([
       exec('nvidia-smi',['--query-compute-apps=pid','--format=csv,noheader,nounits'],{timeout:2000,windowsHide:true}),

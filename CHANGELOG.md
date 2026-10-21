@@ -1,3 +1,10 @@
+## 0.5.14 — OCR first and available NVIDIA acceleration
+
+- Prioritize parsing/OCR across all KBs before bulk vectorization; commit lexical chunks first, then resume vectorization and deferred semantic merging from saved text.
+- Add optional one/two-worker NVIDIA CUDA OCR with CPU text qualification, private runtime setup, shared plugin GPU ownership and checkpoint-based foreground handoff.
+- Limit foreground CPU OCR to one four-thread session while preserving NPU work. Show why vectorization is waiting for OCR.
+- Preserve cached vectors through deferred reindexing and inventory new documents arriving during a vector pass. No DSH core changes.
+
 ## 0.5.13 — Sync reconciles Markdown retention
 
 - Folder Sync now removes all saved Markdown revisions when Keep internal Markdown is off, including historical copies whose current pointer was already cleared. Syncing a parent folder covers its descendants.

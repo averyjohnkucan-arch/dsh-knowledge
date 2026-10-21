@@ -1,6 +1,7 @@
 /** Administrative progress and bounded failure summaries; never retain document content. */
 export interface ProcessingFailure { documentId?: string; title: string; code?: string; message: string }
 export interface ProcessingSnapshot {
+  waitingReason?: string
   failures?: ProcessingFailure[]
   id: string
   baseId: string
