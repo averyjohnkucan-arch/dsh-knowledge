@@ -1,3 +1,11 @@
+## 0.5.24 — Bound import duplicate checks and preserve write batching
+
+- Replace per-file full-library source-text duplicate scans with a scoped indexed content-hash lookup; preserve the existing per-base mutation lock and self-exclusion.
+- Give arrivals during an occupied writer their own bounded collection window instead of immediately draining singleton publications. Shutdown still drains accepted work and callers wait for commit.
+- Avoid bulk source-text loading while deleting a base; restore reads source text one document at a time.
+- Keep metadata listing in insertion order regardless of the query planner's index selection.
+- Add regression coverage for hash updates/base isolation/self-exclusion without body scans, and arrivals while the writer is occupied.
+
 ## 0.5.23 — Batch fresh-import index writes
 
 - Insert new chunk rows in SQL groups of at most 64 while preserving atomic document rollback and full-text indexing.

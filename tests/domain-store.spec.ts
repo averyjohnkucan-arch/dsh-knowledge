@@ -1557,3 +1557,45 @@ it.each(['domain','sqlite'] as const)('does not recover or rewrite retained meta
     write.mockRestore()
   } finally {await store.close();await rm(root,{recursive:true,force:true})}
 })
+
+it('collects arrivals during an occupied writer into the next batch instead of a singleton drain train', async () => {
+  const root = await tempDir(), domain = fakeDomain()
+  const store = await openStore({ open: async () => domain } as StorageDomainFacility, { chunkStorePath: join(root, 'batch.sqlite') })
+  const internal = store as any
+  try {
+    await store.putBase({ id: 'b', name: 'b', description: '', createdAt: 1, updatedAt: 1 })
+    const docs = [0, 1, 2].map(i => ({ id: `d${i}`, baseId: 'b', title: 'doc', sourceType: 'text' as const, charCount: 5, chunkCount: 1, createdAt: 1, updatedAt: 2 }))
+    for (const doc of docs) await store.putDocument({ ...doc, chunkCount: 0 })
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const blocker = internal.writeDocuments(() => held)
+    const publish = vi.spyOn(internal.chunkDb, 'publishDocumentGenerations')
+    const first = store.commitDocumentGeneration(docs[0], [chunk('c0', 'd0', 'b', 0, 'hello')])
+    void internal.flushPublications()
+    const second = store.commitDocumentGeneration(docs[1], [chunk('c1', 'd1', 'b', 0, 'hello')])
+    release(); await blocker; await first
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(publish).toHaveBeenCalledTimes(1)
+    const third = store.commitDocumentGeneration(docs[2], [chunk('c2', 'd2', 'b', 0, 'hello')])
+    await Promise.all([second, third])
+    expect(publish.mock.calls.map(call => (call[0] as unknown[]).length)).toEqual([1, 2])
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+it('uses a scoped hash lookup for duplicate checks without loading source bodies', async () => {
+  const root = await tempDir(), domain = fakeDomain()
+  const store = await openStore({ open: async () => domain } as StorageDomainFacility, { chunkStorePath: join(root, 'dedup.sqlite') })
+  try {
+    const doc = { id: 'd', baseId: 'b', title: 'original', sourceType: 'text' as const, rawText: 'large body'.repeat(10000), contentHash: 'hash', charCount: 100000, chunkCount: 0, createdAt: 1, updatedAt: 1 }
+    await store.putDocument(doc)
+    const scan = vi.spyOn((store as any).chunkDb, 'listDocumentMetadata').mockImplementation(() => { throw new Error('whole-library scan') })
+    expect(store.findDocumentByContentHash!('b', 'hash')?.id).toBe('d')
+    expect(store.findDocumentByContentHash!('b', 'hash')?.rawText).toBeUndefined()
+    expect(store.findDocumentByContentHash!('other', 'hash')).toBeUndefined()
+    expect(store.findDocumentByContentHash!('b', 'hash', 'd')).toBeUndefined()
+    await store.putDocument({ ...doc, contentHash: 'changed' })
+    expect(store.findDocumentByContentHash!('b', 'hash')).toBeUndefined()
+    expect(store.findDocumentByContentHash!('b', 'changed')?.id).toBe('d')
+    scan.mockRestore()
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }) }
+})

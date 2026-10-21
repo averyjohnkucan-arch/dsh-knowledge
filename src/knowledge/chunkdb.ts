@@ -368,6 +368,7 @@ export class ChunkDatabase implements RetrievalLane {
     this.db.exec(`CREATE TABLE IF NOT EXISTS knowledge_document (
       doc_id TEXT PRIMARY KEY, base_id TEXT NOT NULL, header TEXT NOT NULL, raw_text TEXT
     ); CREATE INDEX IF NOT EXISTS knowledge_document_base ON knowledge_document(base_id);
+      CREATE INDEX IF NOT EXISTS knowledge_document_content_hash ON knowledge_document(base_id, json_extract(header, '$.contentHash'));
       CREATE TABLE IF NOT EXISTS knowledge_document_text (doc_id TEXT PRIMARY KEY, raw_text TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS knowledge_document_text_delete AFTER DELETE ON knowledge_document BEGIN
         DELETE FROM knowledge_document_text WHERE doc_id=OLD.doc_id;
@@ -517,9 +518,17 @@ export class ChunkDatabase implements RetrievalLane {
   listDocumentMetadata(baseId?: string, includeRawText = true): KnowledgeDocument[] {
     const columns = includeRawText ? 'd.header, COALESCE(t.raw_text,d.raw_text) AS raw_text' : 'd.header'
     const joinText = includeRawText ? ' LEFT JOIN knowledge_document_text t ON t.doc_id=d.doc_id' : ''
-    const rows = this.db.prepare(`SELECT ${columns} FROM knowledge_document d${joinText}${baseId !== undefined ? ' WHERE d.base_id=?' : ''}`)
+    const rows = this.db.prepare(`SELECT ${columns} FROM knowledge_document d${joinText}${baseId !== undefined ? ' WHERE d.base_id=?' : ''} ORDER BY d.rowid`)
       .all(...(baseId !== undefined ? [baseId] : [])) as Array<{ header: string; raw_text?: string | null }>
     return rows.map(row => ({ ...JSON.parse(row.header), ...(typeof row.raw_text === 'string' ? { rawText: row.raw_text } : {}) }))
+  }
+
+  /** Duplicate checks must never load the library's source bodies. */
+  findDocumentByContentHash(baseId: string, contentHash: string, excludeId?: string): KnowledgeDocument | undefined {
+    const row = this.db.prepare(`SELECT header FROM knowledge_document
+      WHERE base_id=? AND json_extract(header, '$.contentHash')=? AND doc_id IS NOT ? LIMIT 1`)
+      .get(baseId, contentHash, excludeId ?? null) as { header: string } | undefined
+    return row ? JSON.parse(row.header) as KnowledgeDocument : undefined
   }
 
   /** Check source availability without materializing the library's text. */
