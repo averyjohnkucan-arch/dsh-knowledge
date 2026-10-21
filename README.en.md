@@ -105,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.4.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.11.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -297,7 +297,16 @@ Filters apply only to the current request. No database migration, reindex, or do
 
 ---
 
-## v0.5.2 highlights
+## v0.5.11 highlights
+
+- Recall uses its own loading state and displays errors inside the panel.
+- NPU query requests have bounded priority waits and CPU fallback; failed accelerators must pass revalidation before reuse.
+- Expand processing failure counts to inspect document names and error reasons.
+- Delete dialogs distinguish indexed records from original source files.
+
+[Read the v0.5.11 release notes](./docs/releases/v0.5.11.md) · [Read the changelog](./CHANGELOG.md)
+
+## Previous release: v0.5.2
 
 - **Unicode text safety (#51):** preserve UTF-16 surrogate pairs when trimming evidence, document reads and source labels. Replace lone surrogates with `U+FFFD` in retrieval injection, tool output, the usage prompt, and embedding/rerank inputs to avoid upstream JSON parsing failures.
 - **Settings recovery (#47):** access the optional `remote.session` service when needed, restoring Local Models settings and directory actions even when host services register late or are replaced.

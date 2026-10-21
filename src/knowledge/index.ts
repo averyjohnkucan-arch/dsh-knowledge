@@ -958,7 +958,7 @@ export class KnowledgeService extends Service {
           await this.embedExistingDocument(doc.id, forceRevision)
           this.processingMeter.settle(meterId, 'processed')
         } catch (error) {
-          this.processingMeter.settle(meterId, 'failed')
+          this.processingMeter.settle(meterId, 'failed', { documentId: doc.id, title: doc.title, code: 'embedding_provider', message: error instanceof Error ? error.message : String(error) })
           if (this.shuttingDown || passKey !== embeddingKey(this.getConfigFor(baseId))) throw error
           const message = error instanceof Error ? error.message : String(error)
           const current = store.getDocument(doc.id)
@@ -2504,8 +2504,12 @@ export class KnowledgeService extends Service {
               items.push({ relativePath, kind: 'file', documentId: document.id, action })
             })
           } catch (error) {
-            items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: this.directoryItemError(error) })
-          } finally { this.processingMeter.settle(meterId, outcome) }
+            const detail = this.directoryItemError(error)
+            items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: detail })
+            this.processingMeter.settle(meterId, 'failed', { documentId: resolved.document?.id, title: relativePath, code: detail.code, message: detail.message })
+            return
+          }
+          this.processingMeter.settle(meterId, outcome)
         })())
         // Bound file buffers and parser requests. Heavy processors retain their
         // own two-worker queue; this overlaps disk I/O, parsing and index writes.
@@ -3633,7 +3637,8 @@ export class KnowledgeService extends Service {
 
       let queryVector: number[] | undefined
       if ((requestedMode === 'vector' || requestedMode === 'hybrid' || requestedMode === 'auto') && config.embeddingProvider !== 'none') {
-        const embeddingBudget=AbortSignal.timeout(2500)
+        // Allow the FP16 NPU query lane's five-second queue wait plus CPU fallback.
+        const embeddingBudget=AbortSignal.timeout(config.embeddingModel===FP16_EMBEDDING_MODEL?7500:2500)
         try {
           const [vector] = await embedTexts(
             config.embeddingProvider,

@@ -1,5 +1,5 @@
 import { IntelEmbeddingAvailability, nvidiaEmbeddingAvailability } from './embedding-device-availability.js'
-import { EmbeddingBatcher } from './embedding-batcher.js'
+import { EmbeddingBatcher, EmbeddingQueueTimeout } from './embedding-batcher.js'
 import { availableParallelism, freemem } from 'node:os'
 import { resolveEmbeddingCpuTuning } from './embedding-tuning.js'
 import { stopOwnedProcess } from './owned-process.js'
@@ -24,6 +24,7 @@ export class EmbeddingAcceleration {
   private cache = ''; private lanes: Lane[] = []; private ready?: EmbeddingAccelerationStatus; private setup?: Promise<void>; private setupChild?: ChildProcess
   private readonly intelAvailability = new IntelEmbeddingAvailability()
   private used = false; private foreground = 0; private timer?: ReturnType<typeof setInterval>; private checking = false; private polling = false; private stopped = false
+  private npuRevalidation?: Promise<void>; private npuRecoveryLane?: Lane
   private warming?: Promise<void>; private warmed = false; private reference?:Promise<number[][]>; private gpuRetryAt=new Map<string,number>()
   private igpuAllowed = true; private mainGpuAllowed = true; private mainGpuCopies = 1; private gpuTried = new Set<string>(); private threads = 8; private cpuInstances = 1; private tuningKey = ''; private needsReload = false
   configure(cache: string, options: { localEmbeddingThreads?: number; localEmbeddingInstances?: number; localEmbeddingIgpuIdle?: boolean; localEmbeddingMainGpuIdle?: boolean } = {}): void {
@@ -104,7 +105,7 @@ export class EmbeddingAcceleration {
     lane.pending++
     if (lane.batcher) {
       if (!lane.enabled) { lane.pending--; throw Error('Embedding device yielded') }
-      const job = lane.batcher.request(text,purpose).then(result => {
+      const job = lane.batcher.request(text,purpose,purpose==='query'&&lane.device==='NPU'?5000:undefined).then(result => {
         if (result.vector.length !== 1024 || result.vector.some(v=>!Number.isFinite(v)) || Math.abs(Math.hypot(...result.vector)-1)>.001) throw Error('Invalid embedding vector')
         lane.milliseconds = Math.max(1,result.elapsedMs); return result.vector
       }).catch(error => { if (!lane.enabled) throw Error('Embedding device yielded'); throw error })
@@ -131,7 +132,7 @@ export class EmbeddingAcceleration {
       const text='A telescope collects light from distant stars and records scientific observations. '.repeat(10)
       await Promise.all(this.lanes.filter(l=>!l.device.startsWith('GPU')).map(async lane=>{
         try {await this.run(lane,text);await this.run(lane,text)}
-        catch(error){if(lane.device==='CPU')throw error;lane.enabled=false;lane.worker.dispose();const state=this.ready?.devices.find(d=>d.device===lane.device);if(state){state.qualified=false;state.error='Device warmup failed; using CPU'}}
+        catch(error){if(lane.device==='CPU')throw error;lane.enabled=false;lane.qualified=false;lane.batcher?.pause();lane.worker.dispose();this.gpuRetryAt.set(lane.device,Date.now()+60_000);const state=this.ready?.devices.find(d=>d.device===lane.device);if(state){state.qualified=false;state.error=`Device warmup failed; CPU fallback active: ${String(error).slice(-1500)}`}}
       }))
       this.warmed=true
     })().finally(()=>{this.warming=undefined})
@@ -160,11 +161,43 @@ export class EmbeddingAcceleration {
       }
       try{return await this.run(chosen,text,purpose)}catch(error){
         if(chosen.device==='CPU')throw error
-        if(!String(error).includes('NPU_LONG_INPUT') && !String(error).includes('yield')) {chosen.enabled=false;chosen.worker.dispose();chosen.extraWorkers?.forEach(worker=>worker.dispose());const state=this.ready?.devices.find(d=>d.device===chosen.device);if(state){state.qualified=false;state.error='Device failed at runtime; using CPU until revalidation'}}
+        if(!(error instanceof EmbeddingQueueTimeout) && !String(error).includes('NPU_LONG_INPUT') && !String(error).includes('IGPU_LONG_INPUT') && !String(error).includes('yield')) {
+          chosen.enabled=false;chosen.qualified=false;chosen.batcher?.pause();chosen.worker.dispose();chosen.extraWorkers?.forEach(worker=>worker.dispose())
+          this.gpuRetryAt.set(chosen.device,Date.now()+60_000)
+          const state=this.ready?.devices.find(d=>d.device===chosen.device)
+          if(state){state.qualified=false;state.error=`Device failed at runtime; CPU fallback active: ${String(error).slice(-1500)}`}
+          if(chosen.device.startsWith('GPU')) {this.lanes=this.lanes.filter(lane=>lane!==chosen);this.gpuTried.delete(chosen.device)}
+        }
         const cpu=this.lanes.filter(l=>l.device==='CPU').sort((a,b)=>a.pending-b.pending)[0]
         if(!cpu)throw error;return await this.run(cpu,text,purpose)
       }
     }))
+  }
+  private async revalidateNpu():Promise<void>{
+    if(this.npuRevalidation||this.stopped)return
+    const failed=this.lanes.find(lane=>lane.device==='NPU'&&!lane.enabled)
+    const cpu=this.lanes.find(lane=>lane.device==='CPU'&&lane.enabled)
+    if(!failed||!cpu||(this.gpuRetryAt.get('NPU')??0)>Date.now())return
+    this.npuRevalidation=(async()=>{
+      const candidate=this.lane('NPU',failed.milliseconds);this.npuRecoveryLane=candidate
+      const text='A telescope collects light from distant stars.'
+      try {
+        const [reference,vector]=await Promise.all([this.run(cpu,text,'query'),this.run(candidate,text,'query')])
+        const cosine=reference.reduce((sum,value,index)=>sum+value*vector[index],0)
+        if(cosine<.995)throw Error('NPU recovery vectors did not match CPU reference')
+        if(this.stopped||!this.lanes.includes(failed))throw Error('NPU recovery yielded during plugin disposal')
+        candidate.qualified=true;this.lanes[this.lanes.indexOf(failed)]=candidate
+        const state=this.ready?.devices.find(device=>device.device==='NPU')
+        if(state){state.qualified=true;state.minimumCosine=cosine;state.medianMs=candidate.milliseconds;delete state.error}
+        this.gpuRetryAt.delete('NPU')
+      }catch(error){
+        candidate.batcher?.pause();candidate.worker.dispose()
+        this.gpuRetryAt.set('NPU',Date.now()+300_000)
+        const state=this.ready?.devices.find(device=>device.device==='NPU')
+        if(state)state.error=`NPU revalidation failed; CPU fallback active: ${String(error).slice(-1500)}`
+      }
+    })().finally(()=>{this.npuRevalidation=undefined;this.npuRecoveryLane=undefined})
+    await this.npuRevalidation
   }
   private async stopGpu(lane:Lane):Promise<void>{
     lane.enabled=false
@@ -175,6 +208,7 @@ export class EmbeddingAcceleration {
   async enterForeground():Promise<()=>void>{this.foreground++;try{await Promise.all(this.lanes.filter(l=>l.device.startsWith('GPU')).map(l=>this.stopGpu(l)))}catch(error){this.foreground--;throw error}let done=false;return()=>{if(!done){done=true;this.foreground--}}}
   private async updateGpus():Promise<void>{
     if(this.stopped||!this.used||this.ready?.status!=='ready')return
+    void this.revalidateNpu()
     if(this.foreground){await Promise.all(this.lanes.filter(l=>l.device.startsWith('GPU')&&l.enabled).map(l=>this.stopGpu(l)));return}
     if(this.polling)return
     this.polling=true
@@ -249,7 +283,7 @@ export class EmbeddingAcceleration {
     }finally{this.checking=false}
   }
   async remove():Promise<void>{this.dispose();const {rm}=await import('node:fs/promises');await rm(this.root(),{recursive:true,force:true});this.ready=undefined;this.stopped=false}
-  release():void{this.warmed=false;this.reference=undefined;for(const lane of this.lanes){lane.batcher?.pause();lane.worker.dispose();lane.extraWorkers?.forEach(worker=>worker.dispose())}this.lanes=[]}
+  release():void{this.npuRecoveryLane?.batcher?.pause();this.npuRecoveryLane?.worker.dispose();this.warmed=false;this.reference=undefined;for(const lane of this.lanes){lane.batcher?.pause();lane.worker.dispose();lane.extraWorkers?.forEach(worker=>worker.dispose())}this.lanes=[]}
   dispose():void{this.stopped=true;if(this.timer)clearInterval(this.timer);this.timer=undefined;this.setupChild && stopOwnedProcess(this.setupChild);this.release()}
 }
 export const embeddingAcceleration=new EmbeddingAcceleration()

@@ -1,3 +1,13 @@
+## 0.5.11 — Recall feedback, recoverable accelerators and failure details
+
+- Recall has its own loading state and displays request errors inside the panel instead of borrowing unrelated operation state.
+- NPU query requests move ahead of queued indexing; after five seconds waiting, remove only the queued query and fall back to CPU without stopping the active indexing job.
+- Preserve device error diagnostics; retry failed NPU lanes with CPU vector parity before readmission, and requalify failed GPU lanes after cooldown and availability checks. Bound Intel iGPU shapes at 512 tokens and send longer inputs to CPU without truncation.
+- Expand failed processing counts into document names, error codes and reasons, capped at 1,000 bounded entries. Earlier in-memory runs that did not retain errors cannot be reconstructed.
+- Clarify that subtree deletion removes indexed documents and internal snapshots, preserves original source files, and may be undone by automatic folder synchronization.
+- Add an isolated 50-article plain/Smart/Semantic comparison script using actual FP16 embeddings and separate fresh in-memory stores; reports exclude original-model loading and production SQLite publication.
+- All changes are inside the Cordis Knowledge plugin; no harness patches or driver changes.
+
 # 0.5.5 — keep background indexing from stalling streamed replies
 
 - Run large UI chunk-count and document-coverage scans in bounded read-only worker threads, with exact results, coalesced duplicate requests and a timeout.

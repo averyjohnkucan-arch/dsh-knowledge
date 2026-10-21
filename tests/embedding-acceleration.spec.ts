@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { EmbeddingBatcher } from '../src/knowledge/embedding-batcher.js'
 import { EmbeddingAcceleration } from '../src/knowledge/embedding-acceleration.js'
 afterEach(()=>vi.useRealTimers())
 const vector=()=>[1,...Array(1023).fill(0)]
@@ -60,4 +61,40 @@ describe('embedding device fallback and yielding',()=>{
   await vi.advanceTimersByTimeAsync(9999);expect(gpu.worker.stopAndWait).not.toHaveBeenCalled()
   await vi.advanceTimersByTimeAsync(1);const release=await pending;expect(gpu.worker.stopAndWait).toHaveBeenCalledTimes(1);release();manager.dispose()
  })
+ it('falls back after a five-second NPU queue wait without disabling or stopping the NPU',async()=>{
+  vi.useFakeTimers();const {manager,cpu,npu}=fixture()
+  let finish!:()=>void
+  const gate=new Promise<void>(resolve=>{finish=resolve})
+  const calls:string[]=[]
+  const batcher=new EmbeddingBatcher(async texts=>{calls.push(texts[0]);await gate;return {vectors:[vector()],elapsedMs:1}},1)
+  Object.assign(npu,{batcher,jobs:new Set()})
+  const active=batcher.request('bulk')
+  await vi.advanceTimersByTimeAsync(3)
+  const query=manager.embed(['question'],'query')
+  await vi.advanceTimersByTimeAsync(4999);expect(cpu.worker.request).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(1);expect(await query).toEqual([vector()])
+  expect(npu.enabled).toBe(true);expect(npu.worker.dispose).not.toHaveBeenCalled()
+  finish();await active;await vi.advanceTimersByTimeAsync(10)
+  expect(calls).toEqual(['bulk']);manager.dispose()
+ })
+
+ it('retains runtime diagnostics and pauses the failed lane before CPU fallback',async()=>{
+  const {manager,npu}=fixture();const pause=vi.fn()
+  Object.assign(npu,{batcher:{request:vi.fn(async()=>{throw Error('driver reset details')}),pause},jobs:new Set()})
+  const device={device:'NPU',qualified:true};Object.assign(manager,{ready:{status:'ready',devices:[device]}})
+  await manager.embed(['question'],'query')
+  expect(pause).toHaveBeenCalled();expect(manager.snapshot.devices[0].error).toContain('driver reset details')
+  manager.dispose()
+ })
+ it('requalifies a failed NPU against CPU before returning it to service',async()=>{
+  const {manager,cpu,npu}=fixture()
+  Object.assign(npu,{enabled:false,qualified:false})
+  const worker={...cpu.worker,request:vi.fn(async()=>({vector:vector(),elapsedMs:80}))}
+  const candidate={...cpu,device:'NPU',worker}
+  Object.assign(manager,{lane:vi.fn(()=>candidate),ready:{status:'ready',devices:[{device:'NPU',qualified:false,error:'old failure'}]}})
+  await (manager as unknown as {revalidateNpu():Promise<void>}).revalidateNpu()
+  expect(manager.snapshot.devices[0]).toMatchObject({qualified:true,minimumCosine:1})
+  expect(manager.snapshot.devices[0].error).toBeUndefined();manager.dispose()
+ })
+
 })

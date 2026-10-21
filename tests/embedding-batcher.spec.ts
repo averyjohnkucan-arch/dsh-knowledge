@@ -42,4 +42,33 @@ describe('GPU micro-batching', () => {
     expect(execute).not.toHaveBeenCalled()
     queue.resume();const resumed=queue.request('ready');await vi.advanceTimersByTimeAsync(5);expect((await resumed).vector).toEqual([1])
   })
+  it('expires only the queued query and preserves active and queued indexing', async () => {
+    vi.useFakeTimers()
+    let finish!: () => void
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    const calls: string[] = []
+    const queue = new EmbeddingBatcher(async texts => {
+      calls.push(texts[0]); if (texts[0] === 'active') await gate
+      return { vectors: [[1]], elapsedMs: 1 }
+    }, 1)
+    const active = queue.request('active')
+    await vi.advanceTimersByTimeAsync(3)
+    const bulk = queue.request('bulk')
+    const query = queue.request('question', 'query', 5000)
+    const expired = expect(query).rejects.toThrow('queue wait budget')
+    await vi.advanceTimersByTimeAsync(5000); await expired
+    expect(calls).toEqual(['active'])
+    finish(); await active; await vi.advanceTimersByTimeAsync(10); await bulk
+    expect(calls).toEqual(['active', 'bulk'])
+  })
+  it('clears the queue deadline when query inference starts', async () => {
+    vi.useFakeTimers()
+    let finish!: () => void
+    const gate = new Promise<void>(resolve => { finish = resolve })
+    const queue = new EmbeddingBatcher(async () => { await gate; return { vectors: [[1]], elapsedMs: 6000 } }, 1)
+    const query = queue.request('question', 'query', 5000)
+    await vi.advanceTimersByTimeAsync(6000)
+    finish(); expect((await query).vector).toEqual([1])
+  })
+
 })
