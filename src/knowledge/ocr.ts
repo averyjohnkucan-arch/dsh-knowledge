@@ -620,7 +620,7 @@ export async function ocrPdfPages(bytes: Uint8Array, selectedPages?: readonly nu
         throw ocrError((error as { code?: string }).code ?? 'ocr_failed', `OCR failed for page ${page}: ${message}`)
       }
     }
-    const streamed = await streamOcrRasters(bytes, selectedPages, {maxPages:MAX_OCR_PAGES,pageBytes:MAX_PAGE_RASTER_BYTES,totalBytes:MAX_TOTAL_RASTER_BYTES,maxDimension:MAX_RASTER_DIMENSION,timeoutMs:Math.max(1,deadline-Date.now()),window:pool.concurrency},recognize)
+    const streamed = await streamOcrRasters(bytes, selectedPages, {maxPages:MAX_OCR_PAGES,pageBytes:MAX_PAGE_RASTER_BYTES,totalBytes:MAX_TOTAL_RASTER_BYTES,maxDimension:MAX_RASTER_DIMENSION,timeoutMs:Math.max(1,deadline-Date.now()),window:16},recognize)
     const rendered = streamed ? [] : await renderPdfPages(bytes, MAX_OCR_PAGES, selectedPages)
     if (rendered !== null) {
       // Full-page renders: one PNG per page, straight into the recognizer

@@ -1,3 +1,4 @@
+import { MIN_OCR_AGREEMENT, ocrTextAgreement } from './ocr-quality.js'
 import { stopOwnedProcess } from './owned-process.js'
 import { ensurePrivatePython } from './private-python.js'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -13,7 +14,7 @@ import { StructureProcess } from './structure-process.js'
 
 interface Device { device: string; name: string; qualified: boolean; medianMs?: number; error?: string }
 export interface OcrAccelerationStatus { status: 'not_installed' | 'installing' | 'ready' | 'error'; message: string; devices: Device[] }
-interface Lane { device: Device; process: StructureProcess; pending: number; tail: Promise<unknown>; samples: number[]; runs: number; failed: boolean; enabled: boolean; current?: Promise<unknown> }
+interface Lane { device: Device; process: StructureProcess; pending: number; tail: Promise<unknown>; samples: number[]; runs: number; failed: boolean; enabled: boolean; current?: Promise<unknown>; retryAt?: number }
 const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, import.meta.url))
 export function acceleratorEnvironment(root: string): NodeJS.ProcessEnv {
   const env = { ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '', PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
@@ -46,10 +47,10 @@ export class OcrAcceleration {
     const cuda = device.device.startsWith('CUDA')
     const env = acceleratorEnvironment(this.root())
     if (cuda) { delete env.CUDA_VISIBLE_DEVICES; delete env.OCL_ICD_VENDORS }
-    env.OMP_NUM_THREADS = '4'; env.OPENBLAS_NUM_THREADS = '1'
+    env.OMP_NUM_THREADS = '8'; env.OPENBLAS_NUM_THREADS = '1'
     return { device: { ...device }, process: new StructureProcess(cuda ? this.gpuPython() : this.python(),
       cuda ? [script('ocr-cuda-worker.py'), '--models', join(localModelCacheDir(), 'ocr'), '--cache', join(this.root(), 'compiled')]
-      : [script('ocr-accelerator-worker.py'), '--worker', '--models', join(localModelCacheDir(), 'ocr'), '--cache', join(this.root(), 'compiled'), '--device', device.device, '--threads', '4'],
+      : [script('ocr-accelerator-worker.py'), '--worker', '--models', join(localModelCacheDir(), 'ocr'), '--cache', join(this.root(), 'compiled'), '--device', device.device, '--threads', '8'],
       env, 'DSH_OCR_RESULT '), pending: 0, tail: Promise.resolve(), samples: [], runs: 0, failed: false, enabled: !device.device.startsWith('GPU') && (!this.foreground || device.device !== 'CPU' || !this.lanes.some(lane => lane.device.device === 'CPU')) }
   }
   private async stopLane(lane: Lane): Promise<void> {
@@ -77,6 +78,7 @@ export class OcrAcceleration {
       const nvidia: Awaited<ReturnType<typeof nvidiaEmbeddingAvailability>> = active && idle ? await nvidiaEmbeddingAvailability(owned) : { available: false, reason: 'OCR is idle or foreground inference is active' }
       if (this.stopped || this.foreground) { intel.available = false; nvidia.available = false }
       for (const lane of this.lanes.filter(lane => /^GPU|^CUDA/.test(lane.device.device))) {
+        if (lane.device.device.startsWith('CUDA') && lane.failed && (lane.retryAt ?? Infinity) <= Date.now()) { lane.failed = false; lane.device.qualified = false }
         const available = lane.device.device.startsWith('CUDA') ? nvidia.available && Number(lane.device.device.split(':')[1]) < this.gpuWorkers : intel.available
         if (!available && lane.enabled) await this.stopLane(lane)
         else if (available && !lane.failed) lane.enabled = true
@@ -109,39 +111,59 @@ export class OcrAcceleration {
       for (const device of receipt.devices as Device[]) {
         if (!device.qualified || !Number.isFinite(device.medianMs) || device.medianMs! <= 0) continue
         if (!(device.device === 'CPU' || /^NPU(?:\.\d+)?$/.test(device.device) || /^GPU(?:\.\d+)?$/.test(device.device) && /intel/i.test(device.name))) continue
-        const copies = device.device === 'CPU' ? Math.max(1, Math.min(4, Math.floor(availableParallelism() / 4), Math.floor(freemem() / (1024 ** 3)))) : 1
+        const copies = device.device === 'CPU' ? Math.max(1, Math.min(4, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (1024 ** 3)))) : 1
         for (let i = 0; i < copies; i++) this.lanes.push(this.makeLane(device))
       }
       if (!this.lanes.some(lane => lane.device.device === 'CPU')) throw new Error('No qualified CPU fallback')
       this.loadedRoot = this.root()
-      return { status: 'ready', message: 'OCR first; CPU/NPU plus available Intel/NVIDIA GPUs. Foreground inference reserves GPUs and limits OCR to four CPU threads.', devices: this.lanes.map(lane => lane.device) }
+      return { status: 'ready', message: 'OCR first; CPU/NPU plus available Intel/NVIDIA GPUs. Foreground inference reserves GPUs and limits OCR to eight CPU threads.', devices: this.lanes.map(lane => lane.device) }
     } catch { this.releaseWorkers(); return { status: 'not_installed', message: 'Using the standard CPU OCR engine. Download and calibrate optional acceleration to use Intel devices.', devices: [] } }
   }
   async recognize(png: Buffer): Promise<string | undefined> {
     if (this.stopped || (await this.status()).status !== 'ready') return undefined
     this.usedAt = Date.now()
     if (!this.timer) { this.timer = setInterval(() => { void this.updateDevices().catch(() => {}) }, 1000); this.timer.unref?.() }
-    const choices = this.lanes.filter(lane => !lane.failed && lane.enabled && lane.pending < 2)
-    choices.sort((a, b) => (a.pending + 1) * a.device.medianMs! - (b.pending + 1) * b.device.medianMs!)
-    const lane = choices[0]
-    if (!lane) return undefined
+    let lane: Lane | undefined
+    while (!lane) {
+      if(this.stopped)return undefined
+      const healthy=this.lanes.filter(lane=>!lane.failed&&lane.enabled&&(lane.retryAt??0)<=Date.now())
+      if(!healthy.length)return undefined
+      const choices=healthy.filter(lane=>lane.pending<2).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)
+      lane=choices[0]
+      // Busy is not failure. Backpressure avoids spawning extra CPU fallback
+      // workers alongside the foreground eight-thread CPU session.
+      if(!lane)await new Promise(resolve=>setTimeout(resolve,5))
+    }
     lane.pending++
     const task = async (): Promise<string | undefined> => {
       try {
-        if (this.stopped || lane.failed || !lane.enabled) return undefined
+        if (this.stopped) return undefined
+        if (lane.failed || !lane.enabled) return undefined
         const request = lane.process.request({ png: png.toString('base64') }, 300_000); lane.current = request
         const result = await request
         if (lane.device.device.startsWith('CUDA') && !lane.device.qualified) {
           if (result.provider !== 'CUDAExecutionProvider') throw new Error('OCR CUDA provider was not verified')
-          const reference = this.lanes.find(other => other.device.device === 'CPU' && !other.failed)
+          const reference = this.lanes.filter(other => other.device.device === 'CPU' && !other.failed && other.enabled).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)[0]
           if (!reference) throw new Error('No OCR CPU reference')
           // Serialize the comparison on the CPU lane; never overlap native sessions.
-          const check = reference.tail.then(() => reference.process.request({ png: png.toString('base64') }, 300_000))
+          reference.pending++
+          const check = reference.tail.then(() => {
+            if(this.stopped || !reference.enabled)throw new Error('OCR yielded before calibration')
+            const request=reference.process.request({png:png.toString('base64')},300_000);reference.current=request;return request
+          }).finally(()=>{reference.pending--})
           reference.tail = check.catch(() => {})
           const expected = await check
-          const normalize = (text: unknown) => String(text ?? '').replace(/\s/g, '').normalize('NFKC')
-          if (normalize(expected.text) !== normalize(result.text)) throw new Error('OCR CUDA text did not match CPU reference')
+          const agreement = ocrTextAgreement(String(expected.text ?? ''), String(result.text ?? ''))
+          if (agreement < MIN_OCR_AGREEMENT) {
+            // Retry this page on CPU. An ambiguous scan is not a broken device:
+            // keep the lane recoverable and qualify again on a later page.
+            lane.device.error = `OCR comparison ${Math.round(agreement * 100)}%; CPU used for this page; retrying GPU qualification after cooldown`
+            lane.retryAt = Date.now() + 10_000
+            lane.device.medianMs = typeof result.elapsedMs === 'number' ? result.elapsedMs : 100
+            return String(expected.text ?? '')
+          }
           lane.device.qualified = true
+          delete lane.device.error
         }
         if (typeof result.text !== 'string') throw new Error('Invalid OCR text response')
         if (lane.runs++ > 0 && typeof result.elapsedMs === 'number' && result.elapsedMs > 0) {
@@ -149,10 +171,14 @@ export class OcrAcceleration {
           const sorted = [...lane.samples].sort((a, b) => a - b); lane.device.medianMs = sorted[Math.floor(sorted.length / 2)]
         }
         return result.text
-      } catch (error) { if (lane.enabled) { lane.failed = true; lane.device.error = String(error).slice(-1000) }; lane.process.dispose(); return undefined }
+      } catch (error) { if (lane.enabled) { lane.failed = true; lane.device.error = String(error).slice(-1000); if(lane.device.device.startsWith('CUDA'))lane.retryAt=Date.now()+60_000 }; lane.process.dispose(); return undefined }
       finally { lane.pending-- }
     }
-    const result = lane.tail.then(task, task); lane.tail = result.catch(() => {}); return result
+    const result = lane.tail.then(task, task); lane.tail = result.catch(() => {})
+    // Release this serialized lane before retrying another: CPU qualification
+    // may itself be queued here, so retrying inside the tail can deadlock it.
+    const text = await result
+    return text === undefined && !this.stopped ? this.recognize(png) : text
   }
   private command(command: string, args: string[], timeout: number, env: NodeJS.ProcessEnv): Promise<void> {
     return new Promise((resolve, reject) => {

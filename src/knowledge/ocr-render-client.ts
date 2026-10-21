@@ -39,7 +39,7 @@ export async function streamOcrRasters(bytes:Uint8Array,pages:readonly number[]|
       })
       child.once('error',error=>{if(child.pid===undefined){settled=true;clearTimeout(timer);children.delete(child);reject(error)}else finish(error)})
       child.once('exit',(code,signal)=>{children.delete(child);if(!settled){settled=true;clearTimeout(timer);reject(Error(`OCR renderer exited (${signal??code})`))}})
-      child.send({type:'render',bytes,pages,...limits,window:Math.max(1,Math.min(8,limits.window))},error=>{if(error)finish(error)})
+      child.send({type:'render',bytes,pages,...limits,window:Math.max(1,Math.min(16,limits.window))},error=>{if(error)finish(error)})
     })
     return true
   }finally{running--;for(const wake of queued)wake()}

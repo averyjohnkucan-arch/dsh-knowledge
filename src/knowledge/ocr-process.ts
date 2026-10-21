@@ -37,7 +37,7 @@ async function getPaddle(modelDir: string): Promise<PaddleOcrServiceType> {
       }
       const mod = await import('ppu-paddle-ocr') as PaddleModule
       const service = new mod.PaddleOcrService({
-        session: { executionProviders: ['cpu'], intraOpNumThreads: 4, interOpNumThreads: 1 },
+        session: { executionProviders: ['cpu'], intraOpNumThreads: 8, interOpNumThreads: 1 },
         model: {
           detection: join(modelDir, 'ppocrv5_det.onnx'),
           recognition: join(modelDir, 'ppocrv5_rec.onnx'),
