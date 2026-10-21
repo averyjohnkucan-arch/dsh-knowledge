@@ -18,7 +18,7 @@ export declare class StructureV3Manager {
     status(): Promise<StructureStatus>;
     private run;
     prepare(): Promise<StructureStatus>;
-    extract(bytes: Uint8Array, fingerprint: string, charts: boolean, timeout: number, signal?: AbortSignal): Promise<ProcessingOutput>;
+    extract(bytes: Uint8Array, fingerprint: string, charts: boolean, timeout: number, signal?: AbortSignal, tablesOnly?: boolean): Promise<ProcessingOutput>;
     dispose(): void;
 }
 export declare const structureV3: StructureV3Manager;

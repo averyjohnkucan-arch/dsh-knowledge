@@ -13,6 +13,7 @@ export interface OcrAccelerationStatus {
     message: string;
     devices: Device[];
 }
+export declare function ocrDeviceWorkActive(foreground: number, usedAt: number, pending: number, now?: number): boolean;
 export declare function acceleratorEnvironment(root: string): NodeJS.ProcessEnv;
 /** Measured shortest-work queue across explicit devices; a failed device falls back to the existing CPU engine. */
 export declare class OcrAcceleration {

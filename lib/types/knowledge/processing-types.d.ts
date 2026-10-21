@@ -87,7 +87,7 @@ export interface DocumentSourceSpan {
     readonly assetIds?: readonly string[];
 }
 export interface ProcessingProgress {
-    readonly stage: 'queued' | 'checking' | 'uploading' | 'parsing' | 'downloading' | 'normalizing' | 'indexing' | 'completed' | 'failed' | 'canceled';
+    readonly stage: 'queued' | 'checking' | 'uploading' | 'parsing' | 'enriching' | 'downloading' | 'normalizing' | 'indexing' | 'completed' | 'failed' | 'canceled';
     readonly jobId?: string;
 }
 export interface ProcessorCapabilities {

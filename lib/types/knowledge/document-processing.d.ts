@@ -13,6 +13,8 @@ export declare function processorErrorCode(error: unknown): string;
 export declare function processorErrorMessage(error: unknown): string;
 export interface ProcessFileInput {
     readonly structureV3?: StructureV3Manager;
+    /** Gate parsing only; optional structure enrichment must not hold parser capacity. */
+    readonly runParsing?: <T>(task: () => Promise<T>) => Promise<T>;
     readonly baseId: string;
     readonly documentId: string;
     readonly fileName: string;
