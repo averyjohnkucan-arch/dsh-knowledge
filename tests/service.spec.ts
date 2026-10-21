@@ -1802,10 +1802,11 @@ describe('external folder knowledge', () => {
   })
 })
 
-it('overlaps file processing in bounded batches and combines base timestamp writes', async () => {
+it('overlaps file processing in a bounded rolling window and combines base timestamp writes', async () => {
   const service = await mountService()
   const root = await mkdtemp(join(tmpdir(), 'knowledge-batch-'))
   const privateService = service as unknown as { extractDocumentText(...args: unknown[]): Promise<unknown>; store: Store }
+  Object.assign(privateService, {processingConcurrency:4})
   const extract = privateService.extractDocumentText.bind(service)
   let active = 0, peak = 0
   const parser = vi.spyOn(privateService, 'extractDocumentText').mockImplementation(async (...args) => {
@@ -1843,4 +1844,33 @@ it('rebuilds an incomplete internal file even when live and stored bytes match',
     expect(store.getDocument(doc.id)?.incomplete).not.toBe(true)
     expect(service.getDocument(doc.id).rawText).toContain('Complete source')
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+
+it('keeps the shared file window busy across sibling folders while one earlier PDF is slow', async () => {
+  const service = await mountService()
+  const root = await mkdtemp(join(tmpdir(), 'knowledge-rolling-tree-'))
+  const internal = service as any
+  internal.processingConcurrency = 2
+  const extract = internal.extractDocumentText.bind(service)
+  let release!:()=>void, laterStarted = false
+  const gate = new Promise<void>(resolve=>{release=resolve})
+  const parser = vi.spyOn(internal, 'extractDocumentText').mockImplementation(async (input:any) => {
+    if(input.fileName==='00-slow.txt') await gate
+    if(input.fileName==='02-later.txt') laterStarted=true
+    return extract(input)
+  })
+  let pending:Promise<any>|undefined
+  try {
+    await mkdir(join(root,'a'));await mkdir(join(root,'b'))
+    await writeFile(join(root,'a','00-slow.txt'),'The deliberately slow source is still being parsed.')
+    await writeFile(join(root,'a','01-fast.txt'),'The second source finishes quickly.')
+    await writeFile(join(root,'b','02-later.txt'),'The next folder can already be processed.')
+    const base = await service.createBase({name:'Cross-folder window'})
+    pending=service.importDirectoryTree(base.id,root)
+    await vi.waitFor(()=>expect(laterStarted).toBe(true),{timeout:2000})
+    release();const result=await pending
+    expect(result.errors).toHaveLength(0);expect(result.imported).toBe(3)
+    expect(service.listDocuments(base.id).filter(doc=>doc.sourceType==='file')).toHaveLength(3)
+  } finally {release();await pending;parser.mockRestore();await rm(root,{recursive:true,force:true})}
 })

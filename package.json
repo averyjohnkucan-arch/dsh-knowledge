@@ -1,7 +1,7 @@
 {
   "name": "dsh-knowledge",
   "description": "Cherry Studio-style knowledge base system for DeepSeek Harness (DSH): bases, documents, chunking, embeddings (OpenAI-compatible / Ollama / local / lexical fallback), retrieval, model-facing tools, and a browser management panel",
-  "version": "0.5.16",
+  "version": "0.5.17",
   "packageManager": "pnpm@11.7.0",
   "license": "AGPL-3.0",
   "repository": {
@@ -94,7 +94,8 @@
     "smoke:local-rerank": "npm run build --silent && node scripts/smoke-local-rerank.mjs",
     "release:check": "node scripts/release-check.mjs",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
-    "prepack": "node build.mjs"
+    "prepack": "node build.mjs",
+    "benchmark:ocr": "node scripts/benchmark-ocr-corpus.mjs"
   },
   "keywords": [
     "dsh",

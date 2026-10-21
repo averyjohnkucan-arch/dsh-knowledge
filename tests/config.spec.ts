@@ -63,7 +63,7 @@ describe('resolveConfig', () => {
       structuredChunking: true,
       semanticChunkCandidateTokens: 128,
       injectUsagePrompt: true,
-      localOcrGpuWorkers: 2,
+      localOcrGpuWorkers: 8,
       localEmbeddingThreads: 0,
       localEmbeddingInstances: 0,
       localEmbeddingMicroBatchSize: 1,
@@ -196,4 +196,10 @@ describe('local model registry', () => {
       expect(() => validateHuggingFaceRepoId(value)).toThrow('invalid Hugging Face')
     }
   })
+})
+
+it('preserves smaller OCR worker overrides and bounds the throughput default', () => {
+  expect(configOverridesSchema.parse({localOcrGpuWorkers:8})).toEqual({localOcrGpuWorkers:8})
+  expect(resolveConfig(base,{localOcrGpuWorkers:2}).localOcrGpuWorkers).toBe(2)
+  expect(resolveConfig(base,{localOcrGpuWorkers:999}).localOcrGpuWorkers).toBe(8)
 })

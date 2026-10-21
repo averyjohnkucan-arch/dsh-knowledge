@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from 'node:fs'
-import { Worker } from 'node:worker_threads'
+import { PdfParserPool, type NativePdfResult } from './pdf-parser-pool.js'
 import { fileURLToPath } from 'node:url'
 
 /**
@@ -282,6 +282,7 @@ async function parsePdf(buffer: Uint8Array, ocrEnabled = true): Promise<string> 
     native = await parsePdfInWorker(buffer)
     text = native.text
   } catch (error) {
+    if ((error as {code?: string})?.code === 'plugin_stopped') throw error
     primaryError = error instanceof Error ? error : new Error(String(error))
   }
   if (text.trim().length > 0) {
@@ -500,73 +501,13 @@ function stripXmlText(xml: string, tag: string): string {
 // host process on every Node version, and gives each call a hard timeout so a
 // wedged parse cannot pin an import forever.
 
-/** Per-request ceiling; a PDF the engine cannot finish must not block an import. */
-const PDF_PARSE_WORKER_TIMEOUT_MS = 120_000
-
-interface NativePdfResult { text: string; pages?: string[]; scanned?: number[] }
-let pdfParseWorker: Worker | null = null
-let pdfParseRequestSeq = 0
-/** Set once the worker bundle is known to be absent (a partial install). */
 let pdfParseWorkerMissing = false
-const pdfParsePending = new Map<number, { resolve(text: NativePdfResult): void; reject(error: Error): void }>()
-
-function failAllPdfParsePending(error: Error): void {
-  for (const { reject } of pdfParsePending.values()) reject(error)
-  pdfParsePending.clear()
-}
-
-function ensurePdfParseWorker(): Worker {
-  if (pdfParseWorker !== null) return pdfParseWorker
-  const worker = new Worker(fileURLToPath(new URL('./pdf-parse-worker.mjs', import.meta.url)))
-  worker.on('message', (message: { id?: number; ok?: boolean; text?: string; pages?: string[]; scanned?: number[]; error?: string }): void => {
-    if (message.id === undefined) return
-    const pending = pdfParsePending.get(message.id)
-    if (pending === undefined) return
-    pdfParsePending.delete(message.id)
-    if (message.ok === true) pending.resolve({ text: message.text ?? '', pages: message.pages, scanned: message.scanned })
-    else pending.reject(new Error(message.error ?? 'pdf-parse worker failed'))
-    if (pdfParsePending.size === 0) worker.unref()
-  })
-  const onFailure = (error: Error): void => {
-    if (pdfParseWorker !== worker) return
-    failAllPdfParsePending(error)
-    pdfParseWorker = null
-  }
-  worker.on('error', error => onFailure(error instanceof Error ? error : new Error(String(error))))
-  worker.on('exit', () => onFailure(new Error('pdf-parse worker exited')))
-  worker.unref()
-  pdfParseWorker = worker
-  return worker
-}
-
-function postPdfParseRequest(bytes: Uint8Array): Promise<NativePdfResult> {
-  return new Promise((resolve, reject) => {
-    const id = ++pdfParseRequestSeq
-    const timer = setTimeout(() => {
-      pdfParsePending.delete(id)
-      const worker = pdfParseWorker
-      pdfParseWorker = null
-      failAllPdfParsePending(new Error('pdf-parse worker timed out'))
-      void worker?.terminate()
-      reject(new Error('PDF parsing failed: pdf-parse timed out'))
-    }, PDF_PARSE_WORKER_TIMEOUT_MS)
-    timer.unref?.()
-    pdfParsePending.set(id, {
-      resolve: text => { clearTimeout(timer); resolve(text) },
-      reject: error => { clearTimeout(timer); reject(error) },
-    })
-    try {
-      // postMessage structured-clones the bytes, so the caller's buffer stays
-      // usable (an import reuses the same bytes for raw storage and OCR).
-      const worker = ensurePdfParseWorker()
-      worker.ref()
-      worker.postMessage({ id, data: Uint8Array.from(bytes) })
-    } catch (error) {
-      pdfParsePending.delete(id)
-      clearTimeout(timer)
-      reject(error instanceof Error ? error : new Error(String(error)))
-    }
-  })
+let pdfParserPool = new PdfParserPool()
+/** Terminate native parser heaps when a plugin instance is unloaded. */
+export async function disposePdfParsers(): Promise<void> {
+  const previous = pdfParserPool
+  pdfParserPool = new PdfParserPool()
+  await previous.dispose()
 }
 
 /** Degraded path for an install with no worker bundle: parsing still works, but
@@ -582,7 +523,7 @@ async function parsePdfInWorker(bytes: Uint8Array): Promise<NativePdfResult> {
     pdfParseWorkerMissing = true
     console.warn('[dsh-knowledge] pdf-parse worker bundle is missing; parsing PDFs in-process')
   }
-  return pdfParseWorkerMissing ? parsePdfInProcess(bytes) : postPdfParseRequest(bytes)
+  return pdfParseWorkerMissing ? parsePdfInProcess(bytes) : pdfParserPool.parse(bytes)
 }
 
 async function loadMammoth(): Promise<{ extractRawText(input: { buffer: Buffer }): Promise<{ value?: string }> }> {

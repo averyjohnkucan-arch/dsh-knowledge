@@ -84,6 +84,7 @@ const hostExternal = [
 ]
 
 const hostEntries = [
+  ['benchmarks/ocr/replay.ts', 'lib/knowledge/benchmark-ocr.mjs'],
   ['src/index.ts', 'lib/index.js'],
   ['src/knowledge/index.ts', 'lib/knowledge/index.js'],
   // Managed MinerU deployment controller used by the local release smoke.

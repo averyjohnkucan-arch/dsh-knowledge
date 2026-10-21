@@ -476,8 +476,8 @@ export class KnowledgeApi {
     return this.call('DELETE', `/local-models/remove?model=${encodeURIComponent(id)}`)
   }
 
-  getOcrAcceleration(): Promise<{ status: string; message: string; devices: Array<{ device: string; name: string; qualified: boolean; medianMs?: number; error?: string }> }> { return this.call('GET', '/ocr-acceleration') }
-  prepareOcrAcceleration(): Promise<{ status: string; message: string; devices: Array<{ device: string; name: string; qualified: boolean; medianMs?: number; error?: string }> }> { return this.call('POST', '/ocr-acceleration', {}) }
+  getOcrAcceleration(): Promise<{ status: string; message: string; devices: Array<{ device: string; name: string; qualified: boolean; medianMs?: number; error?: string; enabled?: boolean; pending?: number; completed?: number }> }> { return this.call('GET', '/ocr-acceleration') }
+  prepareOcrAcceleration(): Promise<{ status: string; message: string; devices: Array<{ device: string; name: string; qualified: boolean; medianMs?: number; error?: string; enabled?: boolean; pending?: number; completed?: number }> }> { return this.call('POST', '/ocr-acceleration', {}) }
   getStructureStatus(): Promise<{ status: string; progress: number; message: string; device: string }> { return this.call('GET', '/structure-v3') }
   prepareStructure(): Promise<{ status: string; progress: number; message: string; device: string }> { return this.call('POST', '/structure-v3/prepare', {}) }
 

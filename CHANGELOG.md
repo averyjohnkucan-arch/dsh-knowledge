@@ -1,3 +1,11 @@
+## 0.5.17 — Higher-throughput PDF/OCR pipeline
+
+- Add lossless fast raster encoding and compact FP32 CUDA character outputs; preserve source pixels and model weights.
+- Pool native PDF parsers, pipeline a rolling file window across subfolders, and balance CPU work against the CUDA queue.
+- Default to up to eight idle CUDA workers within available VRAM; retain foreground GPU release and CPU/NPU fallback.
+- Share qualified backend comparisons only across verified model identities; expose current OCR activity and request counts.
+- Include a standalone read-only corpus benchmark. The fixed 250-PDF replay improved from 246.5 seconds to approximately 70 seconds with zero document failures. No embedding settings or DSH core changes.
+
 ## 0.5.16 — Tolerant GPU OCR qualification and foreground budgets
 
 - Admit healthy CUDA OCR with small transcription differences; retry ambiguous pages on CPU without permanently disabling the GPU.
