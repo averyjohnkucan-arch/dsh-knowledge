@@ -2064,3 +2064,14 @@ it('re-chunks surviving saved text when a parsing sidecar is missing, but reject
     await expect(service.reindexDocument(doc.id, { mode:'rechunk' })).rejects.toThrow('artifact checksum mismatch')
   } finally {load.mockRestore()}
 })
+
+it('does not resume source processing after its base is deleted', async () => {
+  const service=await mountService(),internal=service as any
+  const base=await service.createBase({name:'Recovery deletion guard'})
+  const doc=await service.addTextDocument({baseId:base.id,title:'Source',content:'Saved source available for recovery.'})
+  await service.deleteBase(base.id)
+  const rebuild=vi.spyOn(service,'reindexDocument')
+  await internal.resumeInterruptedDocuments([doc.id])
+  expect(rebuild).not.toHaveBeenCalled()
+  rebuild.mockRestore()
+})
