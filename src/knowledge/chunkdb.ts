@@ -367,7 +367,11 @@ export class ChunkDatabase implements RetrievalLane {
     `)
     this.db.exec(`CREATE TABLE IF NOT EXISTS knowledge_document (
       doc_id TEXT PRIMARY KEY, base_id TEXT NOT NULL, header TEXT NOT NULL, raw_text TEXT
-    ); CREATE INDEX IF NOT EXISTS knowledge_document_base ON knowledge_document(base_id);`)
+    ); CREATE INDEX IF NOT EXISTS knowledge_document_base ON knowledge_document(base_id);
+      CREATE TABLE IF NOT EXISTS knowledge_document_text (doc_id TEXT PRIMARY KEY, raw_text TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS knowledge_document_text_delete AFTER DELETE ON knowledge_document BEGIN
+        DELETE FROM knowledge_document_text WHERE doc_id=OLD.doc_id;
+      END;`)
     this.migrateEmbeddingHashColumn()
     this.migrateFtsRowidColumn()
     this.migrateEvidenceColumns()
@@ -485,28 +489,45 @@ export class ChunkDatabase implements RetrievalLane {
   putDocumentMetadata(document: KnowledgeDocument): void {
     const valid = documentSchema.parse(document)
     const { rawText, ...header } = valid
-    this.db.prepare(`INSERT INTO knowledge_document(doc_id, base_id, header, raw_text) VALUES (?, ?, ?, ?)
-      ON CONFLICT(doc_id) DO UPDATE SET base_id=excluded.base_id, header=excluded.header, raw_text=excluded.raw_text`)
-      .run(valid.id, valid.baseId, JSON.stringify(header), rawText ?? null)
+    // Keep large source text on separate pages from frequently changed status
+    // headers. Legacy inline text is moved lazily and atomically on first write.
+    this.db.exec('SAVEPOINT document_metadata_text')
+    try {
+      if (rawText !== undefined) this.db.prepare(`INSERT INTO knowledge_document_text(doc_id, raw_text) VALUES (?, ?)
+        ON CONFLICT(doc_id) DO UPDATE SET raw_text=excluded.raw_text WHERE raw_text IS NOT excluded.raw_text`).run(valid.id, rawText)
+      else this.db.prepare('DELETE FROM knowledge_document_text WHERE doc_id=?').run(valid.id)
+      this.db.prepare(`INSERT INTO knowledge_document(doc_id, base_id, header, raw_text) VALUES (?, ?, ?, NULL)
+        ON CONFLICT(doc_id) DO UPDATE SET base_id=excluded.base_id, header=excluded.header, raw_text=NULL
+        WHERE base_id IS NOT excluded.base_id OR header IS NOT excluded.header OR raw_text IS NOT NULL`)
+        .run(valid.id, valid.baseId, JSON.stringify(header))
+      this.db.exec('RELEASE document_metadata_text')
+    } catch (error) {
+      this.db.exec('ROLLBACK TO document_metadata_text')
+      this.db.exec('RELEASE document_metadata_text')
+      throw error
+    }
   }
 
   getDocumentMetadata(id: string): KnowledgeDocument | undefined {
-    const row = this.db.prepare('SELECT header, raw_text FROM knowledge_document WHERE doc_id=?').get(id) as { header: string; raw_text: string | null } | undefined
+    const row = this.db.prepare(`SELECT d.header, COALESCE(t.raw_text,d.raw_text) AS raw_text FROM knowledge_document d
+      LEFT JOIN knowledge_document_text t ON t.doc_id=d.doc_id WHERE d.doc_id=?`).get(id) as { header: string; raw_text: string | null } | undefined
     return row ? { ...JSON.parse(row.header), ...(row.raw_text !== null ? { rawText: row.raw_text } : {}) } : undefined
   }
 
   listDocumentMetadata(baseId?: string, includeRawText = true): KnowledgeDocument[] {
-    const columns = includeRawText ? 'header, raw_text' : 'header'
-    const rows = this.db.prepare(`SELECT ${columns} FROM knowledge_document${baseId !== undefined ? ' WHERE base_id=?' : ''}`)
+    const columns = includeRawText ? 'd.header, COALESCE(t.raw_text,d.raw_text) AS raw_text' : 'd.header'
+    const joinText = includeRawText ? ' LEFT JOIN knowledge_document_text t ON t.doc_id=d.doc_id' : ''
+    const rows = this.db.prepare(`SELECT ${columns} FROM knowledge_document d${joinText}${baseId !== undefined ? ' WHERE d.base_id=?' : ''}`)
       .all(...(baseId !== undefined ? [baseId] : [])) as Array<{ header: string; raw_text?: string | null }>
     return rows.map(row => ({ ...JSON.parse(row.header), ...(typeof row.raw_text === 'string' ? { rawText: row.raw_text } : {}) }))
   }
 
-  /** Check source availability in SQL without materializing the library's text. */
+  /** Check source availability without materializing the library's text. */
   hasDocumentsWithoutSource(baseId: string): boolean {
-    return this.db.prepare(`SELECT 1 FROM knowledge_document WHERE base_id=?
+    return this.db.prepare(`SELECT 1 FROM knowledge_document d WHERE base_id=?
       AND json_extract(header, '$.sourceType') != 'directory'
-      AND raw_text IS NULL AND json_extract(header, '$.rawFilePath') IS NULL LIMIT 1`).get(baseId) !== undefined
+      AND raw_text IS NULL AND json_extract(header, '$.rawFilePath') IS NULL
+      AND NOT EXISTS (SELECT 1 FROM knowledge_document_text t WHERE t.doc_id=d.doc_id) LIMIT 1`).get(baseId) !== undefined
   }
 
   deleteDocumentMetadata(id: string): boolean {
@@ -611,6 +632,11 @@ export class ChunkDatabase implements RetrievalLane {
       `SELECT ${ChunkDatabase.SELECT_COLUMNS} FROM chunk WHERE chunk_id = ?`,
     ).get(id) as unknown as ChunkRow | undefined
     return row === undefined ? undefined : rowToChunk(row)
+  }
+
+  listChunkIdentitiesByDoc(docId: string): Array<{ id: string; index: number; text: string; searchText: string }> {
+    return this.db.prepare(`SELECT chunk_id AS id, idx AS "index", text, search_text AS searchText
+      FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? ORDER BY idx`).all(docId) as Array<{ id: string; index: number; text: string; searchText: string }>
   }
 
   listChunksByDoc(docId: string, limit?: number, offset?: number): KnowledgeChunk[] {
@@ -753,7 +779,8 @@ export class ChunkDatabase implements RetrievalLane {
         this.db.prepare('DELETE FROM document_generation_chunk WHERE doc_id = ?').run(doc.id)
       }
       this.db.prepare(`INSERT INTO document_generation_stage(doc_id, base_id, revision, next_document) VALUES (?, ?, ?, ?)
-        ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, revision = excluded.revision, next_document = excluded.next_document`)
+        ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, revision = excluded.revision, next_document = excluded.next_document
+        WHERE base_id IS NOT excluded.base_id OR revision IS NOT excluded.revision OR next_document IS NOT excluded.next_document`)
         .run(doc.id, doc.baseId, revision, JSON.stringify(doc))
       const insert = this.db.prepare(`INSERT INTO document_generation_chunk(doc_id, chunk_id, chunk_json, embedding_text_hash, embedding_model, embedding)
         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(doc_id, chunk_id) DO UPDATE SET chunk_json = excluded.chunk_json,
@@ -828,28 +855,40 @@ export class ChunkDatabase implements RetrievalLane {
       return row.idx === chunk.index && row.text === chunk.text && row.search_text === searchTextOf(chunk)
         && (!oldPositions.has(chunk.id) || oldPositions.get(chunk.id) === index)
     })
+    const update = this.db.prepare(`UPDATE chunk SET chunk_id=?, heading=?, context=?, embedding=?, embedding_model=?,
+      embedding_text_hash=?, source_spans=?, processing_revision=? WHERE chunk_id=? AND doc_id=? AND base_id=?
+      AND (chunk_id IS NOT ? OR heading IS NOT ? OR context IS NOT ? OR embedding IS NOT ? OR embedding_model IS NOT ?
+        OR embedding_text_hash IS NOT ? OR source_spans IS NOT ? OR processing_revision IS NOT ?)`)
+    const updateMetadata = (chunk: KnowledgeChunk, previousId: string): void => {
+      const values = [chunk.id, chunk.heading ?? null, chunk.context ?? null,
+        chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null, chunk.embeddingModel ?? null,
+        chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
+        chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null]
+      update.run(...values, previousId, doc.id, doc.baseId, ...values)
+    }
     if (sameText) {
-      // ID/evidence/vector changes do not require trigram index tombstones.
-      const update = this.db.prepare(`UPDATE chunk SET chunk_id=?, heading=?, context=?, embedding=?, embedding_model=?,
-        embedding_text_hash=?, source_spans=?, processing_revision=? WHERE chunk_id=? AND doc_id=? AND base_id=?
-        AND (chunk_id IS NOT ? OR heading IS NOT ? OR context IS NOT ? OR embedding IS NOT ? OR embedding_model IS NOT ?
-          OR embedding_text_hash IS NOT ? OR source_spans IS NOT ? OR processing_revision IS NOT ?)`)
-      chunks.forEach((chunk, index) => {
-        const values = [chunk.id, chunk.heading ?? null, chunk.context ?? null,
-          chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null, chunk.embeddingModel ?? null,
-          chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
-          chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null]
-        update.run(...values, previous[index].chunk_id as string, doc.id, doc.baseId, ...values)
-      })
+      chunks.forEach((chunk, index) => updateMetadata(chunk, previous[index].chunk_id as string))
     } else {
-      this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ?').run(doc.id, doc.baseId)
+      // A changed paragraph must not delete/reinsert all of its unchanged
+      // neighbours and regenerate their trigram postings. Retain exact rows.
+      const oldById = new Map(previous.map(row => [row.chunk_id as string, row]))
+      const retained = new Set(chunks.filter(chunk => {
+        const old = oldById.get(chunk.id)
+        return old && old.idx === chunk.index && old.text === chunk.text && old.search_text === searchTextOf(chunk)
+      }).map(chunk => chunk.id))
+      const remove = this.db.prepare('DELETE FROM chunk WHERE chunk_id = ? AND doc_id = ? AND base_id = ?')
+      if (!retained.size) this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ?').run(doc.id, doc.baseId)
+      else for (const old of previous) if (!retained.has(old.chunk_id as string)) remove.run(old.chunk_id, doc.id, doc.baseId)
       const insert = this.db.prepare(`INSERT INTO chunk
         (chunk_id, doc_id, base_id, idx, text, search_text, heading, context, embedding, embedding_model, embedding_text_hash, source_spans, processing_revision)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      for (const chunk of chunks) insert.run(chunk.id, chunk.docId, chunk.baseId, chunk.index, chunk.text, searchTextOf(chunk),
-        chunk.heading ?? null, chunk.context ?? null, chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null,
-        chunk.embeddingModel ?? null, chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
-        chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null)
+      for (const chunk of chunks) {
+        if (retained.has(chunk.id)) updateMetadata(chunk, chunk.id)
+        else insert.run(chunk.id, chunk.docId, chunk.baseId, chunk.index, chunk.text, searchTextOf(chunk),
+          chunk.heading ?? null, chunk.context ?? null, chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null,
+          chunk.embeddingModel ?? null, chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
+          chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null)
+      }
     }
     if (atomicMetadata) {
       this.putDocumentMetadata(doc)

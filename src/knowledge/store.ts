@@ -22,6 +22,8 @@ import type {
   KnowledgeDocument,
 } from './types.js'
 
+export type ChunkIdentity = Pick<KnowledgeChunk, 'id' | 'index' | 'text'> & { searchText: string }
+
 export interface ChunkStats {
   documents?: {documentCount:number;storedDocCount:number;charCount:number;tokenCount:number}
 
@@ -149,6 +151,8 @@ export interface Store {
   listChunks(baseId: string): KnowledgeChunk[]
   getChunk(id: string): KnowledgeChunk | undefined
   listChunksByDoc(docId: string, limit?: number, offset?: number): KnowledgeChunk[]
+  /** Text identities only; avoids loading vectors merely to retain stable citation IDs. */
+  listChunkIdentitiesByDoc?(docId: string): ChunkIdentity[]
   /** Chunks of one document whose index falls in `[fromIdx, toIdx]` (sibling context around a search hit). */
   listChunksByIndexRange(docId: string, fromIdx: number, toIdx: number): KnowledgeChunk[]
   /** Several merged document ranges fetched as one storage operation. */
@@ -542,6 +546,10 @@ class DomainStore implements Store {
     return this.chunkDb.getChunk(id)
   }
 
+  listChunkIdentitiesByDoc(docId: string): ChunkIdentity[] {
+    return this.chunkDb.listChunkIdentitiesByDoc(docId)
+  }
+
   listChunksByDoc(docId: string, limit?: number, offset?: number): KnowledgeChunk[] {
     return this.chunkDb.listChunksByDoc(docId, limit, offset)
   }
@@ -871,6 +879,10 @@ class MemoryStore implements Store {
 
   getChunk(id: string): KnowledgeChunk | undefined {
     return this.chunks.get(id)
+  }
+
+  listChunkIdentitiesByDoc(docId: string): ChunkIdentity[] {
+    return this.listChunksByDoc(docId).map(chunk => ({ id: chunk.id, index: chunk.index, text: chunk.text, searchText: searchTextOf(chunk) }))
   }
 
   listChunksByDoc(docId: string, limit?: number, offset?: number): KnowledgeChunk[] {

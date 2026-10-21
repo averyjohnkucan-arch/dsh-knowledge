@@ -1,3 +1,12 @@
+## 0.5.22 — Reduce rebuild write amplification
+
+- Retain passage IDs for identical indexed text, avoiding unnecessary row and primary-key rewrites.
+- Keep unchanged neighbour rows and FTS postings during partial document changes.
+- Separate source text from frequently updated document headers; convert legacy inline text lazily in a savepoint and clean it up on document deletion.
+- Skip identical source-body/staging-metadata updates and empty pre-rebuild staging copies; keep actual embedding checkpoints durable.
+- Re-chunk surviving saved text when an optional parsing sidecar is missing; corrupt evidence still fails explicitly.
+- Add regression coverage for stable IDs, partial updates, legacy text conversion, source availability, deletion, and rollback.
+
 ## 0.5.21 — Folder rebuild progress and bounded producers
 
 - Report a dedicated re-chunk/reparse run across all nested source documents, with completed, running, queued, failures, and the existing rolling two-minute ETA.

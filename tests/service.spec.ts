@@ -2033,3 +2033,34 @@ it('limits folder rebuild producers while reporting queued and running documents
     expect(service.processingSummary()).toEqual([expect.objectContaining({ total: 7, processed: 7, completed: 7, active: false })])
   } finally { release(); await running.catch(() => {}); attempt.mockRestore() }
 })
+
+it('retains passage IDs across unchanged re-chunking and replaces IDs when indexed text changes', async () => {
+  const service = await mountService()
+  const base = await service.createBase({ name: 'Stable passage citations' })
+  const doc = await service.addTextDocument({ baseId: base.id, title: 'Original title', content: 'Stable passage content with evidence for retrieval.' })
+  const before = service.listChunks(doc.id)
+  await service.reindexDocument(doc.id, { mode: 'rechunk' })
+  expect(service.listChunks(doc.id).map(chunk => chunk.id)).toEqual(before.map(chunk => chunk.id))
+  await service.renameDocument(doc.id, 'Changed title')
+  await service.reindexDocument(doc.id, { mode: 'rechunk' })
+  expect(service.listChunks(doc.id)[0].id).not.toBe(before[0].id)
+  expect(service.listChunks(doc.id)[0].context).toContain('Changed title')
+})
+
+it('re-chunks surviving saved text when a parsing sidecar is missing, but rejects corrupt evidence', async () => {
+  const service = await mountService(), internal = service as any
+  const base = await service.createBase({ name: 'Missing parsing sidecar' })
+  const doc = await service.addFileDocument({ baseId: base.id, title: 'Saved text', fileName: 'source.txt',
+    contentBase64: Buffer.from('Saved source text remains available even if its parsing sidecar is missing.').toString('base64') })
+  await service.waitForIdle()
+  const load = vi.spyOn(internal.artifacts, 'load').mockRejectedValue(Object.assign(new Error('missing file'), { code: 'ENOENT' }))
+  try {
+    const rebuilt = await service.reindexDocument(doc.id, { mode: 'rechunk' })
+    expect(service.listChunks(doc.id).map(chunk => chunk.text).join(' ')).toContain('Saved source text remains available')
+    expect(rebuilt.processing).toBeUndefined()
+    const stored = internal.store.getDocument(doc.id)
+    await internal.store.putDocument({...stored,processing:doc.processing ?? { revision:'test', artifactId:'test', sourceHash:'test',provider:'builtin',optionsFingerprint:'test',parsedAt:1,completeness:'unknown',warnings:[] }})
+    load.mockRejectedValue(new Error('artifact checksum mismatch'))
+    await expect(service.reindexDocument(doc.id, { mode:'rechunk' })).rejects.toThrow('artifact checksum mismatch')
+  } finally {load.mockRestore()}
+})
