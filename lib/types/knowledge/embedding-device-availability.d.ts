@@ -1,3 +1,5 @@
+export declare function registerBackgroundDevices(owner: () => readonly (number | undefined)[]): () => void;
+export declare function backgroundDevicePids(local?: ReadonlySet<number>): Set<number>;
 export interface DeviceAvailability {
     available: boolean;
     reason: string;

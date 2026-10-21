@@ -196,6 +196,11 @@ export declare class KnowledgeService extends Service {
     restoreBase(sourceBaseId: string, name: string, config?: BaseConfig): Promise<KnowledgeBase>;
     deleteBase(id: string): Promise<void>;
     renameBase(id: string, request: UpdateBaseRequest): Promise<KnowledgeBase>;
+    private readonly vectorPhaseDocuments;
+    private readonly parseEpochs;
+    private readonly deferredVectorDocuments;
+    private hasParsingWork;
+    private waitForParsing;
     private readonly embeddingBackfills;
     /** Explicit full vector pass, separate from sync, parsing and chunking. */
     revectorizeBase(baseId: string): {

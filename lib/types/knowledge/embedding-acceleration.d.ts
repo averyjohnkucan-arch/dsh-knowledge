@@ -17,7 +17,9 @@ export interface EmbeddingAccelerationStatus {
 }
 export declare class EmbeddingAcceleration {
     private readonly fp16;
+    private unregisterDevices?;
     constructor(fp16?: boolean);
+    private registerDevices;
     private cache;
     private lanes;
     private ready?;

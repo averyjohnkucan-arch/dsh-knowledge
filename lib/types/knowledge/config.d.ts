@@ -103,6 +103,7 @@ export interface Config {
      */
     localEmbeddingIgpuIdle?: boolean;
     localEmbeddingMainGpuIdle?: boolean;
+    localOcrGpuWorkers?: number;
     localEmbeddingThreads?: number;
     localEmbeddingInstances?: number;
     localEmbeddingMicroBatchSize?: number;

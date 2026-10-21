@@ -19,6 +19,22 @@ export declare class OcrAcceleration {
     private preparation?;
     private setupChild?;
     private stopped;
+    private foreground;
+    private usedAt;
+    private polling;
+    private timer?;
+    private readonly intelAvailability;
+    private unregisterDevices;
+    private gpuRetryAt;
+    private gpuWorkers;
+    configure(options?: {
+        localOcrGpuWorkers?: number;
+    }): void;
+    private gpuPython;
+    private makeLane;
+    private stopLane;
+    enterForeground(): Promise<() => void>;
+    private updateDevices;
     root(): string;
     python(): string;
     get concurrency(): number;

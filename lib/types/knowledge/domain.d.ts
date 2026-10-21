@@ -160,6 +160,7 @@ export declare const documentSchema: z.ZodObject<{
     tokenCount: z.ZodOptional<z.ZodNumber>;
     chunkCount: z.ZodNumber;
     incomplete: z.ZodOptional<z.ZodBoolean>;
+    semanticChunkingPending: z.ZodOptional<z.ZodBoolean>;
     vectorizationRevision: z.ZodOptional<z.ZodString>;
     embeddingError: z.ZodOptional<z.ZodString>;
     errorCode: z.ZodOptional<z.ZodEnum<{
@@ -250,6 +251,7 @@ export declare const configOverridesSchema: z.ZodObject<{
     localModelCacheDir: z.ZodOptional<z.ZodString>;
     localEmbeddingIgpuIdle: z.ZodOptional<z.ZodBoolean>;
     localEmbeddingMainGpuIdle: z.ZodOptional<z.ZodBoolean>;
+    localOcrGpuWorkers: z.ZodOptional<z.ZodNumber>;
     localEmbeddingThreads: z.ZodOptional<z.ZodNumber>;
     localEmbeddingInstances: z.ZodOptional<z.ZodNumber>;
     localEmbeddingMicroBatchSize: z.ZodOptional<z.ZodNumber>;
@@ -306,6 +308,7 @@ export interface ConfigOverrides {
     localModelCacheDir?: string;
     localEmbeddingIgpuIdle?: boolean;
     localEmbeddingMainGpuIdle?: boolean;
+    localOcrGpuWorkers?: number;
     localEmbeddingThreads?: number;
     localEmbeddingInstances?: number;
     localEmbeddingMicroBatchSize?: number;
@@ -394,6 +397,7 @@ export declare const knowledgeDomainSpec: {
                 localModelCacheDir: z.ZodOptional<z.ZodString>;
                 localEmbeddingIgpuIdle: z.ZodOptional<z.ZodBoolean>;
                 localEmbeddingMainGpuIdle: z.ZodOptional<z.ZodBoolean>;
+                localOcrGpuWorkers: z.ZodOptional<z.ZodNumber>;
                 localEmbeddingThreads: z.ZodOptional<z.ZodNumber>;
                 localEmbeddingInstances: z.ZodOptional<z.ZodNumber>;
                 localEmbeddingMicroBatchSize: z.ZodOptional<z.ZodNumber>;

@@ -6,6 +6,7 @@ export interface ProcessingFailure {
     message: string;
 }
 export interface ProcessingSnapshot {
+    waitingReason?: string;
     failures?: ProcessingFailure[];
     id: string;
     baseId: string;
