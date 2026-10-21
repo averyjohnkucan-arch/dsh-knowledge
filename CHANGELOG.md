@@ -1,3 +1,10 @@
+## 0.5.19 — Reconcile settings without repeated OCR or metadata writes
+
+- Reuse saved parsing evidence for unchanged sources when only indexing settings change; changed source bytes or parser options still trigger reparse.
+- Coalesce manual folder reconciliation behind active imports; preserve overlap protection for different source roots.
+- Queue an external-folder reconciliation after saving per-base settings.
+- Persist the deferred-vector marker only when it is not already set, avoiding one full metadata-domain write per imported document.
+
 ## 0.5.18 — Prevent structure enrichment from stalling imports
 
 - Release the shared parser gate before optional table/chart enrichment; unrelated bases can continue parsing while structure jobs wait.

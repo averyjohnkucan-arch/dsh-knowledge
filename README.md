@@ -95,7 +95,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.18.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.19.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -286,6 +286,10 @@ Filters apply only to the current request. No database migration, reindex, or do
 - After changing chunk or embedding settings, rebuild one document or the entire base from the panel or model tools.
 
 ---
+
+## v0.5.19 highlights
+
+Settings-only reconciliation reuses saved parser/OCR evidence. Repeated Sync requests queue behind active folder work, and deferred vectorization no longer rewrites an already-set base marker for every document.
 
 ## v0.5.18 highlights
 

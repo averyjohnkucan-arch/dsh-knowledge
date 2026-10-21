@@ -26,7 +26,7 @@ import { chunkText, createSemanticMerger, refineChunksByTokenLimit, splitSemanti
 import type { ChunkPiece } from './chunk.js'
 import { chunkParsedDocument } from './structured-chunk.js'
 import { ArtifactRepository } from './artifacts.js'
-import { processDocumentFile, processorErrorCode, processorErrorMessage, type ProcessedFile } from './document-processing.js'
+import { processDocumentFile, processorFingerprint, processorErrorCode, processorErrorMessage, type ProcessedFile } from './document-processing.js'
 import { probeMineruLocal } from './mineru-local.js'
 import { MineruDeployment } from './mineru-deployment.js'
 import type { DocumentEvidence, ProcessingProgress } from './processing-types.js'
@@ -899,6 +899,7 @@ export class KnowledgeService extends Service {
           throw new Error('Some documents have no saved source text, so their embeddings cannot be generated. Re-add the affected documents from their originals')
         }
         await store.putBase(next)
+        this.externalFolders?.request(id, true)
         const baseId = id
         void this.backfillBaseEmbeddings(baseId).catch((error: unknown) => {
           this.ctx.logger.warn(`knowledge: in-place embedding backfill failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -907,6 +908,7 @@ export class KnowledgeService extends Service {
       }
     }
     await store.putBase(next)
+    if (patch !== undefined) this.externalFolders?.request(id, true)
     if (patch !== undefined && ('embeddingProvider' in patch || 'embeddingModel' in patch)) {
       const effective = this.getConfigFor(id)
       if (effective.embeddingProvider !== 'none' && effective.embeddingModel.trim() !== '') {
@@ -2261,17 +2263,18 @@ export class KnowledgeService extends Service {
     return { ...current, sync }
   }
 
+  private readonly folderSyncAgain = new Set<string>()
   private folderSyncJobs=new Map<string,{jobId:string;sourceId:string;baseId:string;state:'running'|'complete'|'failed';result?:DirectorySyncResult;error?:string}>()
   startFolderSync(sourceId:string):{jobId:string}{
     const store=this.requireStore(),document=store.getDocument(sourceId)
     if(!document||!store.getBase(document.baseId))throw new NotFoundError('folder not found')
     if(document.sourceType!=='directory'||!document.sourcePath)throw new DirectorySourceError('source_path_conflict','Sync requires a folder with a source path')
     const existing=[...this.folderSyncJobs.values()].find(job=>job.sourceId===sourceId&&job.state==='running')
-    if(existing)return {jobId:existing.jobId}
-    if(this.syncingRoots.has(sourceId))throw new DirectorySourceError('source_path_conflict','This source folder is already synchronizing')
+    if(existing){this.folderSyncAgain.add(sourceId);return {jobId:existing.jobId}}
     for(const [key,job] of this.folderSyncJobs)if(this.folderSyncJobs.size>=64&&job.state!=='running')this.folderSyncJobs.delete(key)
     if(this.folderSyncJobs.size>=64)throw new DirectorySourceError('source_path_conflict','Too many active folder sync jobs; wait for one to finish')
     for(const activeId of this.syncingRoots){
+      if(activeId===sourceId)continue
       const active=store.getDocument(activeId)
       if(active?.baseId!==document.baseId||!active.sourcePath)continue
       const inside=(parent:string,child:string)=>{const path=relative(parent,child);return path===''||!isAbsolute(path)&&!/^\.\.(?:[\\/]|$)/.test(path)}
@@ -2279,9 +2282,21 @@ export class KnowledgeService extends Service {
     }
     const jobId=crypto.randomUUID(),job:{jobId:string;sourceId:string;baseId:string;state:'running'|'complete'|'failed';result?:DirectorySyncResult;error?:string}={jobId,sourceId,baseId:document.baseId,state:'running'}
     this.folderSyncJobs.set(jobId,job)
-    void this.syncDirectorySource(document,document.sourcePath,'synced',true).then(result=>{
-      job.result={...result,items:result.items.filter(item=>item.action==='failed').slice(0,1000)};job.state='complete'
-    }).catch(error=>{job.error=error instanceof Error?error.message:String(error);job.state='failed'})
+    void (async () => {
+      // Join an automatic/current import instead of canceling or duplicating it.
+      while (this.syncingRoots.has(sourceId)) {
+        if(this.shuttingDown || !store.getBase(document.baseId))throw new Error('Folder synchronization stopped')
+        await new Promise(resolve=>setTimeout(resolve,100))
+      }
+      do {
+        this.folderSyncAgain.delete(sourceId)
+        if(this.shuttingDown || !store.getBase(document.baseId))throw new Error('Folder synchronization stopped')
+        const result=await this.syncDirectorySource(document,document.sourcePath!,'synced',true)
+        job.result={...result,items:result.items.filter(item=>item.action==='failed').slice(0,1000)}
+      } while(this.folderSyncAgain.has(sourceId))
+      job.state='complete'
+    })().catch(error=>{job.error=error instanceof Error?error.message:String(error);job.state='failed'})
+      .finally(()=>this.folderSyncAgain.delete(sourceId))
     return {jobId}
   }
   folderSyncStatus(jobId:string){
@@ -2690,6 +2705,12 @@ export class KnowledgeService extends Service {
     const stored = bound.rawFilePath !== undefined ? await store.raw?.read(bound.rawFilePath) : undefined
     const unchanged = stored !== undefined && stored !== null && stored.byteLength > 0 ? Buffer.from(stored).equals(buffer) : bound.processing?.sourceHash === createHash('sha256').update(buffer).digest('hex')
     if (settingsMatch && unchanged && !bound.incomplete && !bound.embeddingError) return finish(bound === document ? 'unchanged' : 'updated')
+    if (unchanged && bound.processing?.optionsFingerprint === processorFingerprint(config)) {
+      // A settings-only reconciliation reuses validated parser/OCR evidence.
+      // Chunking and vectors are rebuilt under the current settings below.
+      await this.reindexDocument(bound.id, { mode: 'rechunk' })
+      return finish('updated')
+    }
     // The unified source reader validates and parses once. A changed live
     // source must not silently fall back to the previous snapshot.
     await this.reindexDocument(bound.id, { mode: 'reparse', strictSource: true })
@@ -4384,7 +4405,7 @@ export class KnowledgeService extends Service {
       const deferred = this.deferredVectorDocuments.get(document.id)
       if (deferred !== undefined) {
         const base = this.requireStore().getBase(document.baseId)
-        if (base) await this.requireStore().putBase({ ...base, embeddingBackfillPending: true })
+        if (base && !base.embeddingBackfillPending) await this.requireStore().putBase({ ...base, embeddingBackfillPending: true })
       }
       await this.requireStore().commitDocumentGeneration({...rest,
         ...(deferred !== undefined ? { semanticChunkingPending: deferred } : {}),
