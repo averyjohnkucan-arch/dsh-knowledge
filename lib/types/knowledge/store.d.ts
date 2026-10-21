@@ -71,6 +71,13 @@ export declare class RawFileStorage implements RawFileStore {
 }
 export interface Store {
     listBases(): KnowledgeBase[];
+    writeDiagnostics?(): {
+        batches: number;
+        documents: number;
+        batchSizes: Record<string, number>;
+        pendingDocuments: number;
+        pendingEstimatedBytes: number;
+    };
     getBase(id: string): KnowledgeBase | undefined;
     putBase(base: KnowledgeBase): Promise<void>;
     deleteBase(id: string): Promise<void>;

@@ -110,6 +110,13 @@ export declare class KnowledgeService extends Service {
     private readonly jobs;
     readonly ocrAcceleration: OcrAcceleration;
     private readonly processingMeter;
+    storageWriteDiagnostics(): {
+        batches: number;
+        documents: number;
+        batchSizes: Record<string, number>;
+        pendingDocuments: number;
+        pendingEstimatedBytes: number;
+    } | null;
     processingSummary(): import("./processing-meter.js").ProcessingSnapshot[];
     private readonly indexing;
     /**
