@@ -1,4 +1,5 @@
 import React from 'react'
+import { DisclosureRow, IconBrowseOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Only producer-owned user/message events are claimed; ordinary chat stays with DSH. */
 interface RetrievalEvent {
@@ -43,13 +44,16 @@ export function parseRetrievalPassages(text: string) {
   })
 }
 
-export function KnowledgeRetrieval({ node }: { node: { data: ReturnType<typeof retrievalRecord> } }) {
+export function KnowledgeRetrieval({ node, useDisclosure }: { node: { data: ReturnType<typeof retrievalRecord> }; useDisclosure: () => { expanded: boolean; toggle: () => void } }) {
+  const { expanded, toggle } = useDisclosure()
   const { text, count } = node.data
   const passages = parseRetrievalPassages(text)
   const linkStyle = { color: 'var(--dsw-alias-brand-primary, #80b6ff)' }
-  return <details data-knowledge-retrieval style={{ color: 'var(--dsw-alias-label-secondary, #aaa)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)', margin: '4px 0 8px' }}>
-    <summary style={{ cursor: 'pointer', lineHeight: '24px' }}>Automatic knowledge retrieval — {count} {count === 1 ? 'passage' : 'passages'}</summary>
-    <div style={{ marginLeft: 20 }}>
+  return <div data-knowledge-retrieval>
+    <style>{`.kb-native-title{font-weight:400}.kb-native-sep{background:var(--dsw-alias-label-caption);border-radius:1px;flex:none;width:2px;height:2px;margin:0 8px}.kb-native-summary{color:var(--dsw-alias-label-secondary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px))}`}</style>
+    <DisclosureRow icon={<IconBrowseOutlineRegular size={14} />} title="Automatic knowledge retrieval" titleClassName="kb-native-title" open={expanded} expandable expandOnRowClick keepContentWhenOpen onToggle={toggle}
+      collapsedContent={<><span className="kb-native-sep" aria-hidden /><span className="kb-native-summary">{count} {count === 1 ? 'passage' : 'passages'}</span></>}>
+    {expanded && <div style={{ marginLeft: 20, color: 'var(--dsw-alias-label-secondary)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)' }}>
       <p style={{ margin: '6px 0 10px', lineHeight: 1.6 }}>These passages were found automatically and may or may not be relevant to your message.</p>
       {passages.length > 0 && <nav aria-label="Retrieved sources" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, margin: '6px 0 12px' }}>
         {passages.filter(p => p.documentId).map((p, index) => <a key={`${p.documentId}:${p.chunkId}:${index}`} title={p.title} href={`/knowledge/documents/${encodeURIComponent(p.documentId)}/raw?inline=1`} target="_blank" rel="noreferrer" style={linkStyle}>Original {index + 1}</a>)}
@@ -62,6 +66,7 @@ export function KnowledgeRetrieval({ node }: { node: { data: ReturnType<typeof r
         </article>)}
         {passages.length === 0 && <p style={{ lineHeight: 1.6 }}>{count === 0 ? 'No new passages were supplied for this question.' : 'This older retrieval has no readable source frames.'}</p>}
       </div>
-    </div>
-  </details>
+    </div>}
+    </DisclosureRow>
+  </div>
 }
