@@ -4,6 +4,7 @@ export declare function useOcrAcceleration(value: OcrAcceleration | undefined): 
 /** Four threads per CPU session; a shared gate caps foreground OCR to one session. */
 export declare class OcrPool {
     constructor();
+    private stopped;
     private clients;
     private readonly cpuConcurrency;
     get concurrency(): number;
