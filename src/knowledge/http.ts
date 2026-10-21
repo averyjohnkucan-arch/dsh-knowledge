@@ -56,7 +56,7 @@ async function handleRequest(service: KnowledgeService, req: IncomingMessage, re
     })
     const method = (req.method ?? 'GET').toUpperCase()
 
-    if (segments[0] === 'embedding-acceleration' || segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
+    if (segments[0] === 'storage-writes' || segments[0] === 'embedding-acceleration' || segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
 
     if(method==='GET'&&segments[0]==='documents'&&segments[2]==='markdown'&&segments.length===4){
       const revision=segments[3],chunk=queryChunk(url.searchParams)
@@ -345,6 +345,7 @@ async function route(
   if (segments[0] === 'folder-picker' && method === 'POST') return service.pickSourceFolder()
 
   if (segments[0] === 'processing-summary' && method === 'GET') return service.processingSummary()
+  if (segments[0] === 'storage-writes' && method === 'GET') return service.storageWriteDiagnostics()
 
   if(segments[0]==='folder-sync'&&segments.length===2&&method==='GET')return service.folderSyncStatus(segments[1])
   if(segments[0]==='documents'&&segments.length===3&&segments[2]==='sync'&&method==='POST')return service.startFolderSync(segments[1])

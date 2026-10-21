@@ -131,6 +131,7 @@ export class RawFileStorage implements RawFileStore {
 
 export interface Store {
   listBases(): KnowledgeBase[]
+  writeDiagnostics?(): { batches: number; documents: number; batchSizes: Record<string, number>; pendingDocuments: number; pendingEstimatedBytes: number }
   getBase(id: string): KnowledgeBase | undefined
   putBase(base: KnowledgeBase): Promise<void>
   deleteBase(id: string): Promise<void>
@@ -320,6 +321,10 @@ export async function openStore(
 
 class DomainStore implements Store {
   private pendingPublications: Array<{ doc: KnowledgeDocument; chunks: KnowledgeChunk[]; bytes: number; resolve(): void; reject(error: unknown): void }> = []
+  private publicationBatches = 0
+  private publicationDocuments = 0
+  private publicationBatchSizes: Record<string, number> = {}
+  writeDiagnostics() { return { batches: this.publicationBatches, documents: this.publicationDocuments, batchSizes: { ...this.publicationBatchSizes }, pendingDocuments: this.pendingPublications.length, pendingEstimatedBytes: this.publicationBytes } }
   private publicationBytes = 0
   private publicationTimer?: ReturnType<typeof setTimeout>
   private publicationFlush?: Promise<void>
@@ -336,8 +341,8 @@ class DomainStore implements Store {
       this.pendingPublications.push({ doc, chunks, bytes, resolve, reject })
       this.publicationBytes += bytes
     })
-    if (this.pendingPublications.length >= 64 || this.publicationBytes >= 8 * 1024 ** 2) void this.flushPublications()
-    else if (!this.publicationTimer && !this.publicationFlush) this.publicationTimer = setTimeout(() => { void this.flushPublications() }, 10)
+    if (this.pendingPublications.length >= 32 || this.publicationBytes >= 8 * 1024 ** 2) void this.flushPublications()
+    else if (!this.publicationTimer && !this.publicationFlush) this.publicationTimer = setTimeout(() => { void this.flushPublications() }, 50)
     return result
   }
 
@@ -363,6 +368,12 @@ class DomainStore implements Store {
         } else valid.push(item)
       }
       const errors = this.chunkDb.publishDocumentGenerations(valid.map(item => ({ doc: item.doc, chunks: item.chunks, previousCreatedAt: item.doc.createdAt, atomicMetadata: true })))
+      const successful = valid.filter((_, index) => !errors[index]).length
+      if (successful) {
+        this.publicationBatches++
+        this.publicationDocuments += successful
+        this.publicationBatchSizes[successful] = (this.publicationBatchSizes[successful] ?? 0) + 1
+      }
       valid.forEach((item, index) => { if (errors[index]) item.reject(errors[index]); else item.resolve() })
     }).catch(error => { for (const item of batch) item.reject(error) })
     this.publicationFlush = flush

@@ -1,3 +1,11 @@
+## 0.5.23 — Batch fresh-import index writes
+
+- Insert new chunk rows in SQL groups of at most 64 while preserving atomic document rollback and full-text indexing.
+- Collect completed documents for up to 50 ms, flushing at 32 pending documents or the existing 8 MiB target; keep the existing 64-document / 64-MiB pending bound.
+- Allow up to four times the parser concurrency in lightweight source read-ahead (32 on this machine), restricted to text formats at most 1 MiB; retain the previous heavy-file window and shared parser/OCR gate.
+- Expose local-management-only write-batch counters for verifying actual batch fullness.
+- Add a reproducible isolated fresh-import storage benchmark and regression coverage for multi-row rollback, retrieval integrity, and read-ahead bounds.
+
 ## 0.5.22 — Reduce rebuild write amplification
 
 - Retain passage IDs for identical indexed text, avoiding unnecessary row and primary-key rewrites.

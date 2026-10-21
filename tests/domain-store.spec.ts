@@ -1514,6 +1514,7 @@ it('collects concurrent completed documents in RAM and commits before acknowledg
     await Promise.all(jobs)
     expect(publish).toHaveBeenCalledOnce();expect(publish.mock.calls[0][0]).toHaveLength(8)
     expect(store.listChunks('b')).toHaveLength(8)
+    expect(store.writeDiagnostics?.()).toEqual({batches:1,documents:8,batchSizes:{'8':1},pendingDocuments:0,pendingEstimatedBytes:0})
     publish.mockRestore()
   } finally {await store.close();await rm(root,{recursive:true,force:true})}
 })

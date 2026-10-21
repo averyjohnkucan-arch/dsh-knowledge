@@ -879,15 +879,22 @@ export class ChunkDatabase implements RetrievalLane {
       const remove = this.db.prepare('DELETE FROM chunk WHERE chunk_id = ? AND doc_id = ? AND base_id = ?')
       if (!retained.size) this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ?').run(doc.id, doc.baseId)
       else for (const old of previous) if (!retained.has(old.chunk_id as string)) remove.run(old.chunk_id, doc.id, doc.baseId)
-      const insert = this.db.prepare(`INSERT INTO chunk
-        (chunk_id, doc_id, base_id, idx, text, search_text, heading, context, embedding, embedding_model, embedding_text_hash, source_spans, processing_revision)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      const insertRows: KnowledgeChunk[] = []
       for (const chunk of chunks) {
         if (retained.has(chunk.id)) updateMetadata(chunk, chunk.id)
-        else insert.run(chunk.id, chunk.docId, chunk.baseId, chunk.index, chunk.text, searchTextOf(chunk),
+        else insertRows.push(chunk)
+      }
+      // A single SQL statement owns each group of fresh rows, so the FTS
+      // trigger can accumulate postings rather than sync after every insert.
+      for (let offset = 0; offset < insertRows.length; offset += 64) {
+        const batch = insertRows.slice(offset, offset + 64)
+        const insert = this.db.prepare(`INSERT INTO chunk
+          (chunk_id, doc_id, base_id, idx, text, search_text, heading, context, embedding, embedding_model, embedding_text_hash, source_spans, processing_revision)
+          VALUES ${batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',')}`)
+        insert.run(...batch.flatMap(chunk => [chunk.id, chunk.docId, chunk.baseId, chunk.index, chunk.text, searchTextOf(chunk),
           chunk.heading ?? null, chunk.context ?? null, chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null,
           chunk.embeddingModel ?? null, chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
-          chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null)
+          chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null]))
       }
     }
     if (atomicMetadata) {

@@ -105,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.22.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.23.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -297,7 +297,9 @@ Filters apply only to the current request. No database migration, reindex, or do
 
 ---
 
-## v0.5.22 highlights
+## v0.5.23 highlights
+
+Fresh imports use grouped SQL inserts and fuller bounded RAM publications. Small text files have a larger read-ahead window; PDFs and large sources retain the existing processing limit. See [the fresh-import write benchmark](docs/releases/v0.5.23.md) for measured volume and limits.
 
 Unchanged passages retain their IDs and full-text rows. Partial rebuilds update only changed passages. Large saved text is stored separately from frequently updated status headers, with a lazy transactional conversion of existing inline text. Empty rebuild staging copies are eliminated.
 

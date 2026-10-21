@@ -299,6 +299,7 @@ export class KnowledgeService extends Service {
   private readonly jobs = new Map<string, BackgroundJob>()
   readonly ocrAcceleration = new OcrAcceleration()
   private readonly processingMeter = new ProcessingMeter()
+  storageWriteDiagnostics() { return this.requireStore().writeDiagnostics?.() ?? null }
   processingSummary() {
     const parsing = this.hasParsingWork()
     return this.processingMeter.snapshots().map(row => row.active && row.id.startsWith('embedding:') && parsing
@@ -2454,6 +2455,7 @@ export class KnowledgeService extends Service {
         childrenByParent,
         items,
         fileJobs,
+        heavyJobs: new Set<Promise<void>>(),
       })
       await Promise.all(fileJobs)
       const current = store.getDocument(root.id)
@@ -2533,8 +2535,9 @@ export class KnowledgeService extends Service {
     childrenByParent: Map<string, KnowledgeDocument[]>
     items: DirectorySyncItem[]
     fileJobs: Set<Promise<void>>
+    heavyJobs: Set<Promise<void>>
   }): Promise<void> {
-    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items, checkLegacySettings, fileJobs } = args
+    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items, checkLegacySettings, fileJobs, heavyJobs } = args
     const store = this.requireStore()
     if (this.shuttingDown || !store.getBase(directory.baseId)) throw new Error('Folder synchronization stopped')
     if (store.getBase(directory.baseId)?.storageMode === 'external') await readableRoot(rootPath)
@@ -2626,7 +2629,7 @@ export class KnowledgeService extends Service {
           const childIndex = children.findIndex(candidate => candidate.id === child!.id)
           if (childIndex >= 0) children[childIndex] = bound
           items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
-          await this.syncDirectoryNode({ meterId, checkLegacySettings, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items, fileJobs })
+          await this.syncDirectoryNode({ meterId, checkLegacySettings, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items, fileJobs, heavyJobs })
         } catch (error) {
           items.push({ relativePath, kind: 'directory', action: 'failed', error: this.directoryItemError(error) })
         }
@@ -2643,6 +2646,11 @@ export class KnowledgeService extends Service {
         })
         continue
       }
+      const lightFormat = /\.(?:md|markdown|txt|csv|json|html?|xml)$/i.test(entry.name)
+      const lightweight = lightFormat && (await stat(fullPath).catch(() => ({ size: Infinity }))).size <= 1024 ** 2
+      // More lightweight producers can fill RAM write batches while the shared
+      // parser gate retains its existing CPU/OCR limit. Heavy files stay capped.
+      if (!lightweight) while (heavyJobs.size >= this.processingConcurrency) await Promise.race(heavyJobs)
       const fileJob = (async () => {
         this.processingMeter.begin(meterId)
         let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
@@ -2686,10 +2694,11 @@ export class KnowledgeService extends Service {
         this.processingMeter.settle(meterId, outcome)
       })()
       fileJobs.add(fileJob)
-      void fileJob.finally(() => fileJobs.delete(fileJob)).catch(() => {})
+      if (!lightweight) heavyJobs.add(fileJob)
+      void fileJob.finally(() => { fileJobs.delete(fileJob); heavyJobs.delete(fileJob) }).catch(() => {})
       // Replace each finished file immediately. A long scan must not stall
       // the other slots at an artificial batch boundary.
-      if (fileJobs.size >= this.processingConcurrency) await Promise.race(fileJobs)
+      if (fileJobs.size >= this.processingConcurrency * 4) await Promise.race(fileJobs)
     }
   }
 
