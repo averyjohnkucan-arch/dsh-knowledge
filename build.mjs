@@ -100,6 +100,7 @@ const hostEntries = [
   ['src/knowledge/rerank-process.ts', 'lib/knowledge/rerank-process.mjs'],
   // OCR inference process: native ONNX/V8 fatals require process isolation.
   ['src/knowledge/ocr-process.ts', 'lib/knowledge/ocr-process.mjs'],
+  ['src/knowledge/ocr-render-process.ts', 'lib/knowledge/ocr-render-process.mjs'],
   // pdf-parse worker: pdf-parse v1 leaks an unhandled rejection when a document
   // fails to load (its unawaited doc.destroy() never runs), which Node 22
   // escalates to a host-level unhandled rejection on every scanned/corrupt PDF.

@@ -1,3 +1,9 @@
+## 0.5.15 — Isolated streaming PDF rendering
+
+- Overlap isolated MuPDF rendering with OCR and keep DSH's event loop responsive. Bound raster queues, contain crashes/timeouts and stop renderers on unload.
+- Remove redundant pdf.js image decoding for textless-page detection and route verified scans directly to installed OCR.
+- Prevent disposed OCR requests from restarting native sessions. All changes remain in the plugin.
+
 ## 0.5.14 — OCR first and available NVIDIA acceleration
 
 - Prioritize parsing/OCR across all KBs before bulk vectorization; commit lexical chunks first, then resume vectorization and deferred semantic merging from saved text.

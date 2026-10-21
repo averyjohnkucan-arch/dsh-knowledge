@@ -318,6 +318,12 @@ async function parsePdf(buffer: Uint8Array, ocrEnabled = true): Promise<string> 
     }
     return text
   }
+  // A verified textless document goes straight to the installed OCR engine;
+  // do not parse/decode it a second time through a generic Markdown converter.
+  if (ocrEnabled && native?.scanned?.length) {
+    const recognized = await ocrFallback(buffer)
+    if (recognized.trim()) return recognized
+  }
   try {
     const anydoc = await loadAnydoc()
     const markdown = (await anydoc.toMarkdownBytes(Buffer.from(buffer))).trim()
