@@ -28,6 +28,7 @@ import type {
   LocalModelStatus,
   SearchHit,
   SearchMode,
+  SearchResult,
   RerankStatus,
 } from './api.js'
 import { C, PANEL_CSS, avatarColor, formatRelativeTime, formatSize, style } from './theme.js'
@@ -188,7 +189,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
   const [stats, setStats] = useState<BaseStats | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[]>([])
-  const [searchMeta, setSearchMeta] = useState<{ reranked: boolean; elapsedMs: number; rerank?: RerankStatus } | null>(null)
+  const [searchMeta, setSearchMeta] = useState<{ reranked: boolean; elapsedMs: number; rerank?: RerankStatus; retrieval?: SearchResult['retrieval'] } | null>(null)
   const [busy, setBusy] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [dialog, setDialog] = useState<DialogState>(null)
@@ -1151,7 +1152,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
       const result = await api.search({ query: trimmed, baseId: selectedBaseId ?? undefined })
       if (seq !== searchSeq.current) return
       setHits(result.hits)
-      setSearchMeta({ reranked: result.reranked, elapsedMs: result.elapsedMs, ...(result.rerank !== undefined ? { rerank: result.rerank } : {}) })
+      setSearchMeta({ reranked: result.reranked, elapsedMs: result.elapsedMs, retrieval: result.retrieval, ...(result.rerank !== undefined ? { rerank: result.rerank } : {}) })
       setRecallHistory(prev => [{ id: Date.now(), query: trimmed, time: Date.now() }, ...prev].slice(0, 20))
     })
   }, [api, run, selectedBaseId])
@@ -2222,7 +2223,7 @@ function RecallPanel(props: {
   busy: boolean
   searchQuery: string
   hits: SearchHit[]
-  searchMeta: { reranked: boolean; elapsedMs: number; rerank?: RerankStatus } | null
+  searchMeta: { reranked: boolean; elapsedMs: number; rerank?: RerankStatus; retrieval?: SearchResult['retrieval'] } | null
   history: readonly RecallEntry[]
   onQueryChange: (value: string) => void
   onSearch: (query: string) => void
@@ -2293,6 +2294,11 @@ function RecallPanel(props: {
         </div>
       ) : (
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }} className="kb-scroll">
+          {props.searchMeta.retrieval?.vector.errorCode && props.searchMeta.retrieval.lexical.succeeded && (
+            <div role="status" style={{marginBottom:10,color:C.text,fontSize:12}}>
+              Vector retrieval unavailable ({props.searchMeta.retrieval.vector.errorCode}); showing keyword search results.
+            </div>
+          )}
           {props.searchMeta.rerank?.status === 'degraded' && (
             <div style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 8, border: '1px solid #d9a441', background: 'color-mix(in srgb, #d9a441 12%, transparent)', color: C.text, fontSize: 12, lineHeight: 1.5 }}>
               ⚠ {props.searchMeta.rerank.error?.message ?? 'Rerank unavailable; using the original retrieval order.'}

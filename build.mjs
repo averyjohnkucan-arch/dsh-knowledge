@@ -107,6 +107,7 @@ const hostEntries = [
   // the same relative URL has to resolve in src/ (tests) and lib/ (runtime).
   ['src/knowledge/pdf-parse-worker.mjs', 'lib/knowledge/pdf-parse-worker.mjs'],
   ['src/knowledge/chunk-read-worker.mjs', 'lib/knowledge/chunk-read-worker.mjs'],
+  ['src/knowledge/vector-search-worker.mjs', 'lib/knowledge/vector-search-worker.mjs'],
 ]
 
 for (const [entry, outfile] of hostEntries) {

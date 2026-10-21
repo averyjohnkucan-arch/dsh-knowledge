@@ -3633,6 +3633,7 @@ export class KnowledgeService extends Service {
 
       let queryVector: number[] | undefined
       if ((requestedMode === 'vector' || requestedMode === 'hybrid' || requestedMode === 'auto') && config.embeddingProvider !== 'none') {
+        const embeddingBudget=AbortSignal.timeout(2500)
         try {
           const [vector] = await embedTexts(
             config.embeddingProvider,
@@ -3640,7 +3641,7 @@ export class KnowledgeService extends Service {
             config.embeddingModel,
             config.embeddingApiKey,
             [query],
-            signal,
+            signal?AbortSignal.any([signal,embeddingBudget]):embeddingBudget,
           )
           throwIfAborted(signal)
           queryVector = vector
@@ -3652,7 +3653,7 @@ export class KnowledgeService extends Service {
           // is on). A model whose files ARE on disk but whose binding/worker
           // reload failed ("Module did not self-register") is a runtime error,
           // not a missing download — say so instead of sending them to re-download.
-          if (config.embeddingProvider === 'local') {
+          if (config.embeddingProvider === 'local' && !embeddingBudget.aborted) {
             throw await localEmbeddingError(config, error)
           }
           this.ctx.logger.warn(`knowledge: embedding failed, using lexical retrieval: ${error instanceof Error ? error.message : String(error)}`)

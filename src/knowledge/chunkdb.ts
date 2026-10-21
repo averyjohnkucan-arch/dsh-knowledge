@@ -1191,6 +1191,24 @@ export class ChunkDatabase implements RetrievalLane {
     const scope = [...baseIds]
     if (scope.length === 0) return { total: 0, hits: [] }
     if (filter?.docIds !== undefined && filter.docIds.length === 0) return { total: 0, hits: [] }
+    if(this.path!==':memory:'){
+      const end=Math.min(deadlineAt??Infinity,Date.now()+3000)
+      if(this.summaryWorkers.size>=6)throw new Error('Knowledge search readers are busy; retry shortly')
+      return await new Promise<LaneResult>((resolve,reject)=>{
+        const worker=new Worker(new URL('./vector-search-worker.mjs',import.meta.url),{workerData:{path:this.path,embedding,baseIds,limit,filter,deadlineAt:end},execArgv:[]})
+        this.summaryWorkers.add(worker)
+        const timeout=()=>new DOMException('knowledge vector search deadline exceeded','TimeoutError')
+        const timer=setTimeout(()=>{reject(timeout());void worker.terminate()},Math.max(1,end-Date.now()))
+        worker.once('message',(message:{ok:boolean;value:{total:number;hits:Array<{row:ChunkRow;score:number}>};error?:string})=>{
+          clearTimeout(timer)
+          if(message.ok)resolve({total:message.value.total,hits:message.value.hits.map(hit=>({...rowToChunk(hit.row),score:hit.score}))})
+          else reject(Date.now()>=end||message.error?.includes('deadline')?timeout():new Error(message.error))
+          void worker.terminate()
+        })
+        worker.once('error',reject)
+        worker.once('exit',()=>{clearTimeout(timer);this.summaryWorkers.delete(worker);reject(new Error('Knowledge vector search worker stopped'))})
+      })
+    }
     const query = embedding.length > 0 ? Float32Array.from(embedding) : null
     const allowed = filter?.docIds !== undefined ? new Set(filter.docIds) : undefined
     const excluded = new Set(filter?.excludeDocIds)

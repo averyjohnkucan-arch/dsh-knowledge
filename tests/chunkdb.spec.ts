@@ -361,3 +361,17 @@ describe('streaming-safe UI reads and vector publication',()=>{
   }finally{db.close();await rm(root,{recursive:true,force:true})}
  })
 })
+
+
+it('file-backed vector search runs outside the event loop and preserves filters and updates',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'knowledge-vector-worker-'));const db=new ChunkDatabase(join(dir,'chunks.sqlite'));
+ try{
+  db.putChunkBatch([{id:'one',docId:'d1',baseId:'b',index:0,text:'IBM evidence',embedding:[1,0],embeddingModel:'m'},{id:'two',docId:'d2',baseId:'b',index:0,text:'other evidence',embedding:[0,1],embeddingModel:'m'}]);
+  let ticked=false;const tick=setTimeout(()=>{ticked=true},0);const result=await db.vector([1,0],['b'],1,{embeddingModel:'m'});clearTimeout(tick);
+  expect(ticked).toBe(true);expect(result.total).toBe(2);expect(result.hits[0].id).toBe('one');
+  expect((await db.vector([1,0],['b'],2,{excludeDocIds:['d1']})).hits.map(x=>x.id)).toEqual(['two']);
+  db.putChunkBatch([{id:'one',docId:'d1',baseId:'b',index:0,text:'updated',embedding:[0,1],embeddingModel:'new'}]);
+  expect((await db.vector([1,0],['b'],2,{embeddingModel:'m'})).hits.map(x=>x.id)).toEqual(['two']);
+  await expect(db.vector([1,0],['b'],1,undefined,Date.now()-1)).rejects.toThrow(/deadline/);
+ }finally{db.close();await rm(dir,{recursive:true,force:true})}
+},15000)
