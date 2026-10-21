@@ -39,4 +39,12 @@ describe('durable knowledge retrieval disclosure', () => {
     expect(render({ count: 0, text: 'No new passages supplied.' })).toContain('No new passages were supplied for this question.')
     expect(retrievalRecord({ ...event, data: { ...event.data, source: { kind: 'dsh-knowledge' } } }).count).toBe(1)
   })
+  it('offers saved passage highlighting and refuses external URLs in source frames', () => {
+    const local='/knowledge/documents/doc1/markdown/revision1?chunk=chunk1&view=1#citation'
+    const text=(url:string)=>`[source: Library; docId=doc1; chunkId=chunk1; title=Test; indexedMarkdown=${url}] Evidence`
+    expect(render({count:1,text:text(local)})).toContain(local.replaceAll('&','&'))
+    expect(render({count:1,text:text(local)})).toContain('View indexed passage')
+    expect(render({count:1,text:text('https://external.example/')})).not.toContain('https://external.example/')
+  })
+
 })

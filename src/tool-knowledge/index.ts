@@ -416,6 +416,7 @@ export function apply(ctx: Context): void {
               type: 'object',
               additionalProperties: false,
               properties: {
+                indexedMarkdownUrl: { type: 'string', description: 'Saved indexed passage with verified highlighting, when retained.' },
                 chunkId: { type: 'string', required: true },
                 docId: { type: 'string', required: true },
                 baseId: { type: 'string', required: true },
@@ -2098,7 +2099,7 @@ function sourceLabel(hit: SearchHit, baseName?: string): string {
   const title = safeLabelValue(hit.documentTitle)
   const base = baseName === undefined ? `baseId=${baseId}` : `${safeLabelValue(baseName)}; baseId=${baseId}`
   const heading = hit.heading !== undefined && hit.heading.length > 0 ? `; heading=${safeLabelValue(hit.heading)}` : ''
-  return `[source: ${base}; docId=${docId}; chunkId=${chunkId}; chunkIndex=${hit.index}; title=${title}${heading}]`
+  return `[source: ${base}; docId=${docId}; chunkId=${chunkId}; chunkIndex=${hit.index}; title=${title}${heading}${hit.indexedMarkdownUrl&&/^\/knowledge\/documents\/[A-Za-z0-9_-]+\/markdown\/[A-Za-z0-9_-]+\?chunk=[A-Za-z0-9_-]+&view=1#citation$/.test(hit.indexedMarkdownUrl)?`; indexedMarkdown=${hit.indexedMarkdownUrl}`:''}]`
 }
 
 /** Keep untrusted source metadata on one bounded line inside the reference frame. */

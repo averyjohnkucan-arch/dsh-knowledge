@@ -1,3 +1,5 @@
+import { MarkdownSnapshots } from './markdown-snapshots.js'
+import { indexingSettingsFingerprint } from './indexing-settings.js'
 import { canMigrateQwenVectors } from './qwen-embedding-variants.js'
 import { orderedEmbeddingLanes } from './embedding-tuning.js'
 import { embeddingAcceleration, embeddingFp16Acceleration, FP16_EMBEDDING_MODEL } from './embedding-acceleration.js'
@@ -314,6 +316,7 @@ export class KnowledgeService extends Service {
   private readonly baseWriteChains = new Map<string, Promise<unknown>>()
   /** Last rerank failure code per model; only state transitions are logged. */
   private readonly rerankLogState = new Map<string, string>()
+  private markdownSnapshots = new MarkdownSnapshots()
   private artifacts = new ArtifactRepository()
   private externalFolders?: ExternalFolders
   private syncingRoots = new Set<string>()
@@ -359,6 +362,7 @@ export class KnowledgeService extends Service {
     this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
     this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
     if (store === undefined) { this.resolveStore(); return }
+    this.markdownSnapshots = new MarkdownSnapshots(store.raw !== undefined ? join(dirname(resolveChunkStorePath(this.baseConfig.chunkStorePath)), 'knowledge-markdown') : undefined)
     this.artifacts = new ArtifactRepository(store.raw !== undefined
       ? join(dirname(resolveChunkStorePath(this.baseConfig.chunkStorePath)), 'knowledge-artifacts')
       : undefined)
@@ -592,11 +596,11 @@ export class KnowledgeService extends Service {
       controller.signal.throwIfAborted()
       if (result.embeddingError !== undefined && previous.chunkCount > 0) throw new Error('embedding recovery failed; previous generation preserved')
       const { incomplete: _incomplete, embeddingError: _error, errorCode: _code, ...rest } = candidate
-      await store.commitDocumentGeneration({ ...rest, processing: processed.processing, rawText: processed.text,
+      await this.commitIndexedGeneration({ ...rest, processing: processed.processing, rawText: processed.text,
         contentHash: sha256(processed.text), charCount: processed.text.length, tokenCount: estimateTokens(processed.text),
         chunkCount: result.chunks.length, updatedAt: Date.now(),
         ...(result.embeddingError !== undefined ? { embeddingError: result.embeddingError, errorCode: result.embeddingErrorCode } : {}),
-      }, result.chunks)
+      }, result.chunks, processed.text, config, controller.signal)
     } finally { this.indexing.delete(previous.id); this.processingProgress.delete(previous.id) }
   }
 
@@ -825,6 +829,7 @@ export class KnowledgeService extends Service {
       store.deleteChunksByBase(id),
       store.raw?.deleteBase(id),
       this.artifacts.deleteBase(id),
+      this.markdownSnapshots.removeBase(id),
     ])
     // Do not scan other KBs or VACUUM the shared SQLite database in this
     // request. Its reusable free pages are reclaimed by normal maintenance.
@@ -1854,6 +1859,7 @@ export class KnowledgeService extends Service {
       }
     }
     if (existing.rawFilePath !== undefined) await store.raw?.delete(existing.rawFilePath)
+    await this.markdownSnapshots.removeDocument(existing.baseId, id)
     await store.deleteChunks(id, existing.baseId)
     await store.deleteDocument(id)
     await this.artifacts.deleteDocument(existing.baseId, id)
@@ -2003,7 +2009,7 @@ export class KnowledgeService extends Service {
         await discardCandidate()
         return document
       }
-      await store.commitDocumentGeneration(next, chunks)
+      await this.commitIndexedGeneration(next, chunks, rebuilt.text, config, controller.signal)
       candidateCommitted = true
 
       if (rebuilt.previousRawFilePath !== undefined && rebuilt.previousRawFilePath !== rebuilt.rawFilePath) {
@@ -2210,6 +2216,35 @@ export class KnowledgeService extends Service {
     return { ...current, sync }
   }
 
+  private folderSyncJobs=new Map<string,{jobId:string;sourceId:string;baseId:string;state:'running'|'complete'|'failed';result?:DirectorySyncResult;error?:string}>()
+  startFolderSync(sourceId:string):{jobId:string}{
+    const store=this.requireStore(),document=store.getDocument(sourceId)
+    if(!document||!store.getBase(document.baseId))throw new NotFoundError('folder not found')
+    if(document.sourceType!=='directory'||!document.sourcePath)throw new DirectorySourceError('source_path_conflict','Sync requires a folder with a source path')
+    const existing=[...this.folderSyncJobs.values()].find(job=>job.sourceId===sourceId&&job.state==='running')
+    if(existing)return {jobId:existing.jobId}
+    if(this.syncingRoots.has(sourceId))throw new DirectorySourceError('source_path_conflict','This source folder is already synchronizing')
+    for(const [key,job] of this.folderSyncJobs)if(this.folderSyncJobs.size>=64&&job.state!=='running')this.folderSyncJobs.delete(key)
+    if(this.folderSyncJobs.size>=64)throw new DirectorySourceError('source_path_conflict','Too many active folder sync jobs; wait for one to finish')
+    for(const activeId of this.syncingRoots){
+      const active=store.getDocument(activeId)
+      if(active?.baseId!==document.baseId||!active.sourcePath)continue
+      const inside=(parent:string,child:string)=>{const path=relative(parent,child);return path===''||!isAbsolute(path)&&!/^\.\.(?:[\\/]|$)/.test(path)}
+      if(inside(active.sourcePath,document.sourcePath)||inside(document.sourcePath,active.sourcePath))throw new DirectorySourceError('source_path_conflict','An overlapping source folder is already synchronizing')
+    }
+    const jobId=crypto.randomUUID(),job:{jobId:string;sourceId:string;baseId:string;state:'running'|'complete'|'failed';result?:DirectorySyncResult;error?:string}={jobId,sourceId,baseId:document.baseId,state:'running'}
+    this.folderSyncJobs.set(jobId,job)
+    void this.syncDirectorySource(document,document.sourcePath,'synced',true).then(result=>{
+      job.result={...result,items:result.items.filter(item=>item.action==='failed').slice(0,1000)};job.state='complete'
+    }).catch(error=>{job.error=error instanceof Error?error.message:String(error);job.state='failed'})
+    return {jobId}
+  }
+  folderSyncStatus(jobId:string){
+    const job=this.folderSyncJobs.get(jobId)
+    if(!job||!this.requireStore().getBase(job.baseId))throw new NotFoundError('folder sync job not found')
+    return structuredClone(job)
+  }
+
   private readonly directoryWriteBatches = new Map<string, number>()
 
   /** Synchronize a single source-root against disk. Root validation happens
@@ -2219,11 +2254,12 @@ export class KnowledgeService extends Service {
     root: KnowledgeDocument,
     sourcePath: string,
     mode: 'created' | 'synced',
+    checkLegacySettings = false,
   ): Promise<DirectorySyncResult> {
     if (this.syncingRoots.has(root.id)) throw new Error('Source folder is already synchronizing')
     this.syncingRoots.add(root.id)
     this.directoryWriteBatches.set(root.baseId, (this.directoryWriteBatches.get(root.baseId) ?? 0) + 1)
-    try { return await this.performDirectorySync(root, sourcePath, mode) }
+    try { return await this.performDirectorySync(root, sourcePath, mode, checkLegacySettings) }
     finally {
       this.syncingRoots.delete(root.id)
       const remaining = (this.directoryWriteBatches.get(root.baseId) ?? 1) - 1
@@ -2232,7 +2268,7 @@ export class KnowledgeService extends Service {
     }
   }
 
-  private async performDirectorySync(root: KnowledgeDocument, sourcePath: string, mode: 'created' | 'synced'): Promise<DirectorySyncResult> {
+  private async performDirectorySync(root: KnowledgeDocument, sourcePath: string, mode: 'created' | 'synced', checkLegacySettings = false): Promise<DirectorySyncResult> {
     const store = this.requireStore()
     if (root.sourceType !== 'directory') throw new Error('directory sync requires a directory source')
     const canonicalSource = await this.canonicalDirectoryPath(sourcePath)
@@ -2276,6 +2312,7 @@ export class KnowledgeService extends Service {
       })
       await this.syncDirectoryNode({
         meterId: root.id,
+        checkLegacySettings,
         rootPath: canonicalSource,
         diskPath: canonicalSource,
         directory: boundRoot,
@@ -2350,6 +2387,7 @@ export class KnowledgeService extends Service {
   }
 
   private async syncDirectoryNode(args: {
+    checkLegacySettings?: boolean
     meterId: string
     rootPath: string
     diskPath: string
@@ -2358,7 +2396,7 @@ export class KnowledgeService extends Service {
     childrenByParent: Map<string, KnowledgeDocument[]>
     items: DirectorySyncItem[]
   }): Promise<void> {
-    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items } = args
+    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items, checkLegacySettings } = args
     const store = this.requireStore()
     if (this.shuttingDown || !store.getBase(directory.baseId)) throw new Error('Folder synchronization stopped')
     if (store.getBase(directory.baseId)?.storageMode === 'external') await readableRoot(rootPath)
@@ -2452,7 +2490,7 @@ export class KnowledgeService extends Service {
             const childIndex = children.findIndex(candidate => candidate.id === child!.id)
             if (childIndex >= 0) children[childIndex] = bound
             items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
-            await this.syncDirectoryNode({ meterId, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items })
+            await this.syncDirectoryNode({ meterId, checkLegacySettings, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items })
           } catch (error) {
             items.push({ relativePath, kind: 'directory', action: 'failed', error: this.directoryItemError(error) })
           }
@@ -2484,7 +2522,7 @@ export class KnowledgeService extends Service {
                 children.push(document)
                 childrenByParent.set(directory.id, children)
               } else {
-                action = await this.syncDirectoryFile(document, fullPath, entry.name)
+                action = await this.syncDirectoryFile(document, fullPath, entry.name, checkLegacySettings)
                 const refreshed = this.requireStore().getDocument(document.id)
                 if (refreshed !== undefined) {
                   const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
@@ -2572,18 +2610,21 @@ export class KnowledgeService extends Service {
    * snapshot. A changed source is parsed once up front so an invalid on-disk
    * replacement cannot be silently treated as a successful old-snapshot
    * rebuild. */
-  private async syncDirectoryFile(document: KnowledgeDocument, sourcePath: string, fileName: string): Promise<'updated' | 'unchanged'> {
+  private async syncDirectoryFile(document: KnowledgeDocument, sourcePath: string, fileName: string, checkLegacySettings = false): Promise<'updated' | 'unchanged'> {
     if (this.indexing.has(document.id)) throw new Error(`"${document.title}" is still being indexed — try again when it finishes`)
     const store = this.requireStore()
     const fileStat = await stat(sourcePath)
     const signature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
     const isExternal = store.getBase(document.baseId)?.storageMode === 'external'
-    if (isExternal && document.sourceSignature === signature && !document.incomplete && !document.embeddingError) return 'unchanged'
+    const config=this.getConfigFor(document.baseId)
+    let settingsMatch=document.indexingSettingsFingerprint!==undefined ? document.indexingSettingsFingerprint===indexingSettingsFingerprint(config) : !checkLegacySettings&&!(config.keepInternalMarkdown&&!document.markdownRevision)
+    if(settingsMatch&&config.keepInternalMarkdown&&(!document.markdownRevision||!await this.markdownSnapshots.has(document.baseId,document.id,document.markdownRevision)))settingsMatch=false
+    if (settingsMatch && isExternal && document.sourceSignature === signature && !document.incomplete && !document.embeddingError) return 'unchanged'
     const buffer = await readFile(sourcePath)
     const bound = await this.bindDocumentSourcePath(document, sourcePath)
     const stored = bound.rawFilePath !== undefined ? await store.raw?.read(bound.rawFilePath) : undefined
-    const unchanged = stored !== undefined && stored !== null && stored.byteLength > 0 && Buffer.from(stored).equals(buffer)
-    if (unchanged && !bound.incomplete && !bound.embeddingError) return bound === document ? 'unchanged' : 'updated'
+    const unchanged = stored !== undefined && stored !== null && stored.byteLength > 0 ? Buffer.from(stored).equals(buffer) : bound.processing?.sourceHash === createHash('sha256').update(buffer).digest('hex')
+    if (settingsMatch && unchanged && !bound.incomplete && !bound.embeddingError) return bound === document ? 'unchanged' : 'updated'
     // The unified source reader validates and parses once. A changed live
     // source must not silently fall back to the previous snapshot.
     await this.reindexDocument(bound.id, { mode: 'reparse', strictSource: true })
@@ -2925,6 +2966,7 @@ export class KnowledgeService extends Service {
         else if (embedded) status = 'completed'
       }
       return {
+        ...(doc.markdownRevision?{markdownRevision:doc.markdownRevision}:{}),
         id: doc.id,
         baseId: doc.baseId,
         title: doc.title,
@@ -3371,6 +3413,7 @@ export class KnowledgeService extends Service {
     const rawTextLimit = clampRawTextLimit(opts?.rawTextLimit)
     const truncated = rawText !== undefined && rawTextLimit !== undefined && rawText.length > rawTextLimit
     return {
+      ...(doc.markdownRevision?{markdownRevision:doc.markdownRevision}:{}),
       id: doc.id,
       baseId: doc.baseId,
       title: doc.title,
@@ -4258,10 +4301,32 @@ export class KnowledgeService extends Service {
         : {}),
       updatedAt: Date.now(),
     }
-    await store.commitDocumentGeneration(document, chunks)
+    await this.commitIndexedGeneration(document, chunks, input.text, config, signal)
     this.indexing.delete(half.id)
     await this.touchBase(input.baseId)
     return document
+  }
+
+  private async commitIndexedGeneration(document:KnowledgeDocument,chunks:KnowledgeChunk[],text:string,config:KnowledgeConfig,signal?:AbortSignal):Promise<void>{
+    const {markdownRevision:_previous,...rest}=document
+    let revision:string|undefined
+    try{
+      if(config.keepInternalMarkdown)revision=await this.markdownSnapshots.save(document,text,chunks)
+      signal?.throwIfAborted()
+      this.assertIndexTargetAlive(document.id,document.baseId)
+      await this.requireStore().commitDocumentGeneration({...rest,indexingSettingsFingerprint:indexingSettingsFingerprint(config),...(revision?{markdownRevision:revision}:{})},chunks)
+    }catch(error){
+      if(revision&&(error as {published?:boolean}).published!==true)await this.markdownSnapshots.removeRevision(document.baseId,document.id,revision).catch(()=>{})
+      throw error
+    }
+  }
+  async getMarkdownSnapshot(documentId:string,revision:string){
+    const store=this.requireStore(),document=store.getDocument(documentId)
+    if(!document||!store.getBase(document.baseId))throw new NotFoundError('document not found')
+    const snapshot=await this.markdownSnapshots.load(document.baseId,documentId,revision)
+    if(!store.getDocument(documentId)||!store.getBase(document.baseId))throw new NotFoundError('document no longer exists')
+    if(!snapshot)throw new NotFoundError('saved Markdown revision not found')
+    return snapshot
   }
 
   private processingChunks(processed: ProcessedFile | undefined, config: KnowledgeConfig): readonly ChunkPiece[] | undefined {
@@ -4753,7 +4818,9 @@ function rerankEvidenceText(hit: SearchHit): string {
 
 function searchHitOf(store: Store, chunk: KnowledgeChunk | undefined, hit: RankedHit): SearchHit | undefined {
   if (chunk === undefined) return undefined
+  const document=store.getDocument(chunk.docId)
   return {
+    ...(document?.markdownRevision?{indexedMarkdownUrl:`/knowledge/documents/${encodeURIComponent(chunk.docId)}/markdown/${encodeURIComponent(document.markdownRevision)}?chunk=${encodeURIComponent(chunk.id)}&view=1#citation`}:{}),
     chunkId: chunk.id,
     docId: chunk.docId,
     baseId: chunk.baseId,

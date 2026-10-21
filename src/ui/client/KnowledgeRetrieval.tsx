@@ -38,9 +38,11 @@ export function parseRetrievalPassages(text: string) {
     const value = (name: string) => fields.find(field => field.startsWith(name + '='))?.slice(name.length + 1) ?? ''
     const title = value('title') || 'Retrieved passage'
     const heading = value('heading')
+    const saved=value('indexedMarkdown')
+    const indexedMarkdownUrl=/^\/knowledge\/documents\/[A-Za-z0-9_-]+\/markdown\/[A-Za-z0-9_-]+\?chunk=[A-Za-z0-9_-]+&view=1#citation$/.test(saved)?saved:undefined
     let excerpt = text.slice(frame.index! + frame[0].length, frames[index + 1]?.index ?? text.length).trim()
     for (const label of new Set([title, heading].filter(Boolean))) excerpt = excerpt.split(`[${label}] `).join('')
-    return { title, heading, base: fields[0].startsWith('baseId=') ? 'Knowledge base' : fields[0], documentId: value('docId'), chunkId: value('chunkId'), excerpt }
+    return { title, heading, indexedMarkdownUrl, base: fields[0].startsWith('baseId=') ? 'Knowledge base' : fields[0], documentId: value('docId'), chunkId: value('chunkId'), excerpt }
   })
 }
 
@@ -60,6 +62,7 @@ export function KnowledgeRetrieval({ node, useDisclosure }: { node: { data: Retu
       </nav>}
       <div style={{ maxHeight: 420, overflow: 'auto', padding: '0 12px 0 0' }}>
         {passages.map((p, index) => <article key={`${p.documentId}:${p.chunkId}:${index}`} style={{ padding: '12px 0', borderTop: '1px solid var(--dsw-alias-border-l2, #3a3a3a)' }}>
+          {p.indexedMarkdownUrl && <a href={p.indexedMarkdownUrl} target="_blank" rel="noreferrer" style={linkStyle}>View indexed passage</a>}
           <strong style={{ color: 'var(--dsw-alias-label-primary, #ddd)', fontSize: 14 }}>{p.title}</strong>
           <div style={{ fontSize: 12, marginTop: 3, opacity: .8 }}>{p.base}{p.heading && p.heading !== p.title ? ` · ${p.heading}` : ''}</div>
           {p.excerpt.split(/\n\s*\n/).map((paragraph, i) => <p key={i} style={{ margin: '8px 0', lineHeight: 1.65, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', ...(paragraph.startsWith('>>> ') ? { borderLeft: '2px solid var(--dsw-alias-brand-primary, #80b6ff)', paddingLeft: 10 } : {}) }}>{paragraph.replace(/^>>> /gm, '')}</p>)}

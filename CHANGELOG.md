@@ -1,3 +1,12 @@
+## 0.5.12 — saved Markdown citations and settings-aware folder sync
+
+- Optional Keep internal Markdown saves immutable derived `.md` revisions for future imports, reindexing and syncs. Saving the setting alone does not rewrite existing documents.
+- Citation links open the saved indexed text and highlight verified source ranges with line numbers. Old versions remain readable across reindexing; unmapped transformed passages are explicitly labeled. Original PDF/page references remain available.
+- Folder menus offer Sync as the fourth action. Nonblocking, deduplicated jobs detect source edits and relevant parser/chunking/embedding/retention setting changes, preserve unchanged work, and report itemized failures.
+- Source removal during sync deletes its KB records and saved Markdown revisions. Removing KB copies never deletes original source files. Deletion waits for pending snapshot writes and stale indexing cannot resurrect deleted documents.
+- Contain worker stdin broken-pipe errors during shutdown or runtime failure.
+- Includes the Recall, accelerator recovery and failure reporting changes from 0.5.11. Plugin only; no DSH core changes.
+
 ## 0.5.11 — Recall feedback, recoverable accelerators and failure details
 
 - Recall has its own loading state and displays request errors inside the panel instead of borrowing unrelated operation state.

@@ -23,6 +23,7 @@ export interface Config {
   rerankApiKey: string
   /** Total local rerank budget, including queue wait (10–300 seconds). */
   localRerankTimeoutMs: number
+  keepInternalMarkdown?: boolean
   smartChunk: boolean
   chunkSeparator: string
   chunkSize: number
@@ -121,6 +122,7 @@ export const Config: Schema<Config> = Schema.object({
   rerankBaseUrl: Schema.string().default(''),
   rerankApiKey: Schema.string().default(''),
   localRerankTimeoutMs: Schema.number().default(60000),
+  keepInternalMarkdown: Schema.boolean().default(false),
   smartChunk: Schema.boolean().default(true),
   chunkSeparator: Schema.string().default('\n\n'),
   chunkSize: Schema.number().default(1024),
@@ -189,6 +191,7 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     rerankBaseUrl: overrides.rerankBaseUrl ?? config.rerankBaseUrl,
     rerankApiKey,
     localRerankTimeoutMs: clampInt(overrides.localRerankTimeoutMs ?? config.localRerankTimeoutMs, 10_000, 300_000, 60_000),
+    keepInternalMarkdown: overrides.keepInternalMarkdown ?? config.keepInternalMarkdown ?? false,
     smartChunk: overrides.smartChunk ?? config.smartChunk,
     chunkSeparator: overrides.chunkSeparator ?? config.chunkSeparator,
     chunkSize,
@@ -257,6 +260,7 @@ export function resolveConfigFor(config: Config, overrides: ConfigOverrides, bas
     rerankBaseUrl: baseConfig.rerankBaseUrl ?? resolved.rerankBaseUrl,
     rerankApiKey: baseConfig.rerankApiKey ?? resolved.rerankApiKey,
     localRerankTimeoutMs: clampInt(baseConfig.localRerankTimeoutMs ?? resolved.localRerankTimeoutMs, 10_000, 300_000, 60_000),
+    keepInternalMarkdown: baseConfig.keepInternalMarkdown ?? resolved.keepInternalMarkdown ?? false,
     smartChunk: baseConfig.smartChunk ?? resolved.smartChunk,
     chunkSeparator: baseConfig.chunkSeparator ?? resolved.chunkSeparator,
     chunkSize,

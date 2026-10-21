@@ -7,6 +7,7 @@ import { MODEL_SUGGESTIONS, localEmbeddingErrorText } from '../src/knowledge/ind
 import { baseConfigSchema, configOverridesSchema } from '../src/knowledge/domain.js'
 
 const base: Config = {
+  keepInternalMarkdown: false,
   embeddingProvider: 'none',
   embeddingBaseUrl: '',
   embeddingModel: '',

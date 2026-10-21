@@ -105,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.11.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.12.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -297,7 +297,15 @@ Filters apply only to the current request. No database migration, reindex, or do
 
 ---
 
-## v0.5.11 highlights
+## v0.5.12 highlights
+
+Enable **Keep internal Markdown** in a base's settings → Advanced to save future indexed text revisions for citation highlighting. The setting is off by default and does not rewrite existing documents when saved. Use a folder's fourth **Sync** menu action to apply changed source files and processing settings. Unchanged work is reused. Saved passage links preserve their indexed revision; original-source links remain available.
+
+Deleting a source and syncing removes its KB data and retained Markdown. Removing an internal copy never removes the original source. Automatic folder sync can reimport originals that remain on disk.
+
+[Read the v0.5.12 release notes](./docs/releases/v0.5.12.md)
+
+### Previous update: v0.5.11
 
 - Recall uses its own loading state and displays errors inside the panel.
 - NPU query requests have bounded priority waits and CPU fallback; failed accelerators must pass revalidation before reuse.
