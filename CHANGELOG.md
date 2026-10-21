@@ -1,3 +1,10 @@
+## 0.5.18 — Prevent structure enrichment from stalling imports
+
+- Release the shared parser gate before optional table/chart enrichment; unrelated bases can continue parsing while structure jobs wait.
+- Use the same PP-DocLayout model to identify candidate pages, retaining their original pixels and page numbers. Run PP-Structure only where tables/charts are detected; preserve regular parser/OCR text.
+- Keep OCR devices warm for five minutes and while pages are pending, while retaining foreground GPU handoff.
+- Display a separate table/chart extraction stage instead of reporting all work as parsing.
+
 ## 0.5.17 — Higher-throughput PDF/OCR pipeline
 
 - Add lossless fast raster encoding and compact FP32 CUDA character outputs; preserve source pixels and model weights.

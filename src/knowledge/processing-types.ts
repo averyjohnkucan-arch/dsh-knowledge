@@ -93,7 +93,7 @@ export interface DocumentSourceSpan {
 }
 
 export interface ProcessingProgress {
-  readonly stage: 'queued' | 'checking' | 'uploading' | 'parsing' | 'downloading' | 'normalizing' | 'indexing' | 'completed' | 'failed' | 'canceled'
+  readonly stage: 'queued' | 'checking' | 'uploading' | 'parsing' | 'enriching' | 'downloading' | 'normalizing' | 'indexing' | 'completed' | 'failed' | 'canceled'
   readonly jobId?: string
 }
 

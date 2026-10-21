@@ -3,6 +3,7 @@ import argparse, json, os, sys, pathlib, contextlib, time
 
 _engine = None
 _engine_charts = False
+_layout = None
 
 def pipeline(charts=True):
     global _engine, _engine_charts
@@ -21,24 +22,56 @@ def pipeline(charts=True):
     _engine_charts = charts
     return _engine
 
-def extract(source, charts):
+def layout_pipeline():
+    global _layout
+    if _layout is None:
+        from paddleocr import LayoutDetection
+        _layout = LayoutDetection(model_name='PP-DocLayout_plus-L', device='cpu',
+            enable_mkldnn=os.environ.get('DSH_STRUCTURE_MKLDNN') == '1',
+            cpu_threads=int(os.environ.get('DSH_STRUCTURE_CPU_THREADS', '8')))
+    return _layout
+
+def structure_inputs(source, charts, tables_only):
+    """Use the same layout model and PDF rasterizer; skip OCR on text-only pages.
+
+    Caption enrichment needs tables/charts only. Ordinary text is already
+    extracted by the regular parser / accelerated OCR before this stage.
+    """
+    if not tables_only:
+        yield None, source, True
+        return
+    labels = {'table', 'chart'} if charts else {'table'}
+    for page, result in enumerate(layout_pipeline().predict(input=source)):
+        selected = any(box.get('label') in labels for box in result['boxes'])
+        # Original page pixels and page order are retained, including blank pages.
+        yield page, result['input_img'] if selected else None, selected
+
+def extract(source, charts, tables_only=False):
     import tempfile
     output = []
-    engine = pipeline(charts)
     page_count = 0
     with tempfile.TemporaryDirectory(prefix='structure-result-') as folder:
-        for page, result in enumerate(engine.predict(input=source, use_chart_recognition=charts)):
-            page_count = page + 1
-            # Official JSON exporter handles numpy values and result wrappers.
-            path = pathlib.Path(folder) / f'{page}.json'
-            result.save_to_json(save_path=str(path))
-            value = json.loads(path.read_text(encoding='utf-8'))
-            value = value.get('res', value)
-            blocks = value.get('parsing_res_list', [])
-            for block in blocks:
-                text = str(block.get('block_content') or '').strip()
-                if text:
-                    output.append({'page': page+1, 'type': str(block.get('block_label') or 'text'), 'text': text})
+        for source_page, image, selected in structure_inputs(source, charts, tables_only):
+            if source_page is not None:
+                page_count = source_page + 1
+            if not selected:
+                continue
+            for page, result in enumerate(pipeline(charts).predict(input=image, use_chart_recognition=charts)):
+                page_number = source_page + 1 if source_page is not None else page + 1
+                page_count = max(page_count, page_number)
+                # Official JSON exporter handles numpy values and result wrappers.
+                path = pathlib.Path(folder) / 'page.json'
+                result.save_to_json(save_path=str(path))
+                value = json.loads(path.read_text(encoding='utf-8'))
+                value = value.get('res', value)
+                blocks = value.get('parsing_res_list', [])
+                for block in blocks:
+                    label = str(block.get('block_label') or 'text')
+                    if tables_only and label not in ('table', 'chart'):
+                        continue
+                    text = str(block.get('block_content') or '').strip()
+                    if text:
+                        output.append({'page': page_number, 'type': label, 'text': text})
     return {'blocks': output, 'pageCount': page_count}
 
 if __name__ == '__main__':
@@ -56,7 +89,7 @@ if __name__ == '__main__':
                 request = json.loads(line)
                 started = time.perf_counter()
                 with contextlib.redirect_stdout(sys.stderr):
-                    result = extract(request['input'], request.get('charts', True))
+                    result = extract(request['input'], request.get('charts', True), request.get('tablesOnly', False))
                     pathlib.Path(request['output']).write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
                 response = {'id': request['id'], 'ok': True, 'seconds': time.perf_counter() - started}
             except Exception as error:

@@ -15,7 +15,7 @@ export type KnowledgeKey =
   | 'evidenceBack' | 'evidenceRetry' | 'mineruDeployTitle' | 'mineruDeployDescription' | 'mineruDeployRoot' | 'mineruDeployExisting' | 'mineruDeployBrowse' | 'mineruDeployCheck' | 'mineruDeployChecking' | 'mineruDeployTotal' | 'mineruDeployReuse' | 'mineruDeployRemaining' | 'mineruDeployUnknownRuntime' | 'mineruDeployIncomplete' | 'mineruDeploySpace' | 'mineruDeployPreflightOnly' | 'mineruDownloadSource' | 'mineruPythonSource' | 'mineruPythonSourceHint' | 'mineruSaveSource' | 'mineruCurrentInstall'
   | 'mineruPhaseAbsent' | 'mineruPhaseEnvironment' | 'mineruPhaseProbe' | 'mineruPhaseReady' | 'mineruPhaseInterrupted' | 'mineruServiceRunning' | 'mineruServiceStarting' | 'mineruServiceStopping' | 'mineruServiceError' | 'mineruServiceStopped' | 'mineruCancelTask' | 'mineruStart' | 'mineruStop' | 'mineruUse' | 'mineruApplied' | 'mineruExternalCopy' | 'mineruPrepare' | 'mineruManagedPreview' | 'mineruConfirmPreparation' | 'mineruNotNow' | 'mineruConfirm'
   | 'sourcePage' | 'sourceBlock' | 'sourceRegion' | 'sourceAsset' | 'sourceUnavailable'
-  | 'stageQueued' | 'stageChecking' | 'stageUploading' | 'stageParsing' | 'stageDownloading'
+  | 'stageQueued' | 'stageChecking' | 'stageUploading' | 'stageParsing' | 'stageEnriching' | 'stageDownloading'
   | 'stageNormalizing' | 'stageIndexing' | 'stageCompleted' | 'stageFailed' | 'stageCanceled'
   | 'nav'
   | 'newBase'
@@ -411,7 +411,7 @@ export const zh: Record<KnowledgeKey, string> = {
   mineruDeploySpace: '可用空间不足以完成模型下载与暂存。',
   mineruDeployPreflightOnly: '部署准备会在独立目录创建 Python 环境、安装 MinerU 并下载模型。知识库当前使用的解析器不会自动切换。',
   sourcePage: '原文第 {page} 页', sourceBlock: '块', sourceRegion: '块区域（归一化坐标）', sourceAsset: '查看附件', sourceUnavailable: '原文位置未知',
-  stageQueued: '排队中', stageChecking: '检查服务', stageUploading: '上传至配置服务', stageParsing: '解析中',
+  stageQueued: '排队中', stageChecking: '检查服务', stageUploading: '上传至配置服务', stageParsing: '解析中', stageEnriching: 'Extracting tables / charts',
   stageDownloading: '下载解析结果', stageNormalizing: '整理结构证据', stageIndexing: '建立索引', stageCompleted: '处理完成', stageFailed: '处理失败', stageCanceled: '已取消',
   nav: '知识库',
   newBase: '新建知识库',
@@ -805,7 +805,7 @@ export const en: Record<KnowledgeKey, string> = {
   mineruDeploySpace: 'Insufficient space for model downloads and staging.',
   mineruDeployPreflightOnly: 'Preparation creates a Python environment in the dedicated directory, installs MinerU, and downloads its models. The parser currently used by your knowledge base will not switch automatically.',
   sourcePage: 'Source page {page}', sourceBlock: 'Block', sourceRegion: 'Block region (normalized coordinates)', sourceAsset: 'View asset', sourceUnavailable: 'Source location unknown',
-  stageQueued: 'Queued', stageChecking: 'Checking service', stageUploading: 'Uploading to configured service', stageParsing: 'Parsing',
+  stageQueued: 'Queued', stageChecking: 'Checking service', stageUploading: 'Uploading to configured service', stageParsing: 'Parsing', stageEnriching: 'Extracting tables / charts',
   stageDownloading: 'Downloading results', stageNormalizing: 'Normalizing evidence', stageIndexing: 'Indexing', stageCompleted: 'Completed', stageFailed: 'Failed', stageCanceled: 'Canceled',
   nav: 'Knowledge',
   newBase: 'New base',

@@ -95,7 +95,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.17.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.18.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -286,6 +286,10 @@ Filters apply only to the current request. No database migration, reindex, or do
 - After changing chunk or embedding settings, rebuild one document or the entire base from the panel or model tools.
 
 ---
+
+## v0.5.18 highlights
+
+Parsing capacity is released before optional chart/table enrichment, so long structure jobs cannot block unrelated imports. The local structure enricher checks layout first and runs full structure OCR only on pages with detected tables/charts. OCR devices stay warm for five minutes between requests and still yield to foreground inference.
 
 ## v0.5.17 highlights
 

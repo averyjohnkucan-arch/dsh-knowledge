@@ -54,7 +54,7 @@ const CAPTION_PROMPT = 'Describe this image or chart concisely in English. Expla
 export async function captionPdfImages(bytes: Uint8Array, config: CaptionConfig): Promise<string> {
   if (config.provider === 'off') return ''
   if (config.provider === 'paddle') {
-    const output = await (config.structureV3 ?? structureV3).extract(bytes, 'chart-caption', config.charts !== false, 1800000, config.signal)
+    const output = await (config.structureV3 ?? structureV3).extract(bytes, 'chart-caption', config.charts !== false, 1800000, config.signal, true)
     return output.document.blocks.filter(block => block.type === 'table').map(block => `Chart/table data · page ${(block.pageIndex ?? 0) + 1}:\n${block.text}`).join('\n\n')
   }
   const model = config.model.trim()

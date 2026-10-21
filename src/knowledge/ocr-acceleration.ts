@@ -16,6 +16,9 @@ interface Device { device: string; name: string; qualified: boolean; medianMs?: 
 export interface OcrAccelerationStatus { status: 'not_installed' | 'installing' | 'ready' | 'error'; message: string; devices: Device[] }
 interface Lane { device: Device; process: StructureProcess; pending: number; tail: Promise<unknown>; samples: number[]; runs: number; failed: boolean; enabled: boolean; current?: Promise<unknown>; retryAt?: number; completed?: number }
 const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, import.meta.url))
+export function ocrDeviceWorkActive(foreground: number, usedAt: number, pending: number, now = Date.now()): boolean {
+  return foreground === 0 && (now - usedAt < 300_000 || pending > 0)
+}
 export function acceleratorEnvironment(root: string): NodeJS.ProcessEnv {
   const env = { ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '', PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
   if (process.platform === 'linux') {
@@ -82,7 +85,8 @@ export class OcrAcceleration {
     if (this.stopped || this.polling || !this.loadedRoot) return
     this.polling = true
     try {
-      const active = !this.foreground && Date.now() - this.usedAt < 30_000
+      // Keep models warm across PDF rendering / structure gaps; foreground still wins.
+      const active = ocrDeviceWorkActive(this.foreground, this.usedAt, this.lanes.reduce((sum, lane) => sum + lane.pending, 0))
       const idle = process.platform === 'linux' ? true : (await desktopIdle()).idleSeconds! >= 300
       const owned = () => backgroundDevicePids(new Set(this.lanes.flatMap(lane => lane.process.pid ? [lane.process.pid] : [])))
       const intel = active && idle ? await this.intelAvailability.sample(owned()) : { available: false }
