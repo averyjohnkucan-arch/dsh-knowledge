@@ -191,6 +191,8 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
   const [hits, setHits] = useState<SearchHit[]>([])
   const [searchMeta, setSearchMeta] = useState<{ reranked: boolean; elapsedMs: number; rerank?: RerankStatus; retrieval?: SearchResult['retrieval'] } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [dialog, setDialog] = useState<DialogState>(null)
   const [recallHistory, setRecallHistory] = useState<RecallEntry[]>([])
@@ -335,6 +337,9 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
     setChunks([])
     setRawText(null)
     setRawTextTruncated(false)
+    ++searchSeq.current
+    setSearchBusy(false)
+    setSearchError(null)
     setHits([])
     setSearchMeta(null)
     setRagOpen(false)
@@ -1148,14 +1153,20 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
     if (trimmed === '') return
     const seq = ++searchSeq.current
     setSearchQuery(trimmed)
-    await run(async () => {
+    setSearchBusy(true)
+    setSearchError(null)
+    try {
       const result = await api.search({ query: trimmed, baseId: selectedBaseId ?? undefined })
       if (seq !== searchSeq.current) return
       setHits(result.hits)
       setSearchMeta({ reranked: result.reranked, elapsedMs: result.elapsedMs, retrieval: result.retrieval, ...(result.rerank !== undefined ? { rerank: result.rerank } : {}) })
       setRecallHistory(prev => [{ id: Date.now(), query: trimmed, time: Date.now() }, ...prev].slice(0, 20))
-    })
-  }, [api, run, selectedBaseId])
+    } catch (error) {
+      if (seq === searchSeq.current) setSearchError(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (seq === searchSeq.current) setSearchBusy(false)
+    }
+  }, [api, selectedBaseId])
 
   const removeRecallHistory = useCallback((id: number): void => {
     setRecallHistory(prev => prev.filter(entry => entry.id !== id))
@@ -1517,7 +1528,17 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                   {row.id.startsWith('embedding:') && <strong>Vectorization</strong>}
                   <span>{row.completed.toLocaleString()} / {row.total.toLocaleString()} documents</span>
-                  <span>{row.processed.toLocaleString()} processed · {row.skipped.toLocaleString()} unchanged · {row.failed.toLocaleString()} failed</span>
+                  <span>{row.processed.toLocaleString()} processed · {row.skipped.toLocaleString()} unchanged</span>
+                  {row.failed > 0 ? <details>
+                    <summary style={{ cursor: 'pointer', color: C.danger }}>{row.failed.toLocaleString()} failed — show details</summary>
+                    <ul style={{ paddingLeft: 18, maxHeight: 240, overflow: 'auto', overflowWrap: 'anywhere' }}>
+                      {(row.failures ?? []).map((failure, index) => <li key={index}>
+                        <strong>{failure.title}</strong>{failure.code ? ` (${failure.code})` : ''}: {failure.message}
+                      </li>)}
+                      {!row.failures?.length && <li>Details were not recorded by this running version. Check the failed document rows; subsequent runs will include their errors here.</li>}
+                      {(row.failures?.length ?? 0) < row.failed && !!row.failures?.length && <li>Showing the first {row.failures!.length.toLocaleString()} failures.</li>}
+                    </ul>
+                  </details> : <span>0 failed</span>}
                   {row.active && <span>{row.queued.toLocaleString()} queued · {row.running} running</span>}
                   <span>{row.discovering ? 'Discovering files…' : !row.active ? (row.completed >= row.total ? 'Finished' : 'Stopped before completion') : row.etaSeconds === null ? 'Estimating time remaining…' : `About ${row.etaSeconds < 60 ? `${row.etaSeconds}s` : `${Math.ceil(row.etaSeconds / 60)} min`} remaining`}</span>
                 </div>
@@ -1927,7 +1948,8 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
           <SidePanel title={t('recallTest')} onClose={() => setRecallOpen(false)} width={sidePanelWidth} onResizeWidth={onSideResizeStart}>
             <RecallPanel
               t={t}
-              busy={busy}
+              busy={searchBusy}
+              searchError={searchError}
               searchQuery={searchQuery}
               hits={hits}
               searchMeta={searchMeta}
@@ -2221,6 +2243,7 @@ function sameSet(a: Set<string>, b: Set<string>): boolean {
 function RecallPanel(props: {
   t: Translate
   busy: boolean
+  searchError: string | null
   searchQuery: string
   hits: SearchHit[]
   searchMeta: { reranked: boolean; elapsedMs: number; rerank?: RerankStatus; retrieval?: SearchResult['retrieval'] } | null
@@ -2281,6 +2304,7 @@ function RecallPanel(props: {
         )}
       </div>
 
+      {props.searchError && <div role="alert" style={{ color: C.danger, overflowWrap: 'anywhere' }}>{props.searchError}</div>}
       {/* body */}
       {props.busy ? (
         <div style={{ ...style.empty, flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8 }}>

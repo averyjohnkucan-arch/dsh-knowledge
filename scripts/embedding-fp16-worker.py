@@ -56,6 +56,7 @@ def encode(texts,device):
  elif device=='NPU':bucket=256
  else:bucket=next((n for n in (32,64,128,256,512) if width<=n),width)
  if device=='NPU' and width>256:raise RuntimeError('NPU_LONG_INPUT: use CPU for more than 256 tokens')
+ if device.startswith('GPU') and width>512:raise RuntimeError('IGPU_LONG_INPUT: use CPU for more than 512 tokens')
  if device!='CUDA' and len(ids)!=1:raise RuntimeError('Intel embedding requests require one text')
  # Right padding avoids all-masked leading queries on Intel devices. Pool
  # the last real token, never the padded tail, on every backend.
