@@ -529,6 +529,7 @@ export class KnowledgeApi {
    * Embed one probe text through the given (or current) embedding config and
    * return the vector width (Cherry's dimension probe, run before a save).
    */
+  baseLive(baseId:string):Promise<{updatedAt:number;syncStatus?:BaseSummary['syncStatus'];stats:BaseStats}>{return this.call('GET',`/bases/${encodeURIComponent(baseId)}/live`)}
   getEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('GET',`/embedding-acceleration${model ? `?model=${encodeURIComponent(model)}` : ''}`) }
   prepareEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus> { return this.call('POST',`/embedding-acceleration${model ? `?model=${encodeURIComponent(model)}` : ''}`,{}) }
 
@@ -718,6 +719,8 @@ export class KnowledgeApi {
   }>> {
     return this.call('GET', '/indexing-status')
   }
+
+  documentStatus(id:string):Promise<Pick<DocumentSummary,'status'|'embedded'|'chunkCount'|'charCount'|'tokenCount'|'updatedAt'|'embeddingError'|'errorCode'|'indexingPhase'|'indexingProgress'>>{return this.call('GET',`/documents/${encodeURIComponent(id)}/status`)}
 
   getDocument(documentId: string, opts?: { rawTextLimit?: number }): Promise<DocumentDetail> {
     const query = opts?.rawTextLimit !== undefined

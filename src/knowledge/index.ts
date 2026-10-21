@@ -2883,6 +2883,17 @@ export class KnowledgeService extends Service {
     return [...selected].filter(id => known.has(id) && !inner.has(id))
   }
 
+  documentStatus(id:string){
+    const store=this.requireStore(),doc=store.getDocument(id)
+    if(!doc||!store.getBase(doc.baseId))throw new NotFoundError('document not found')
+    const active=this.indexing.get(id),key=embeddingKey(this.getConfigFor(doc.baseId))
+    const counts=store.docEmbeddingStatus?.(id,key)
+    const chunks=counts?[]:store.listChunksByDoc(id)
+    const count=counts?.count??chunks.length,embeddedCount=counts?.embeddedCount??chunks.filter(chunk=>chunk.embedding!==undefined&&(!key||chunk.embeddingModel===key)).length
+    return {embedded:count>0&&count===embeddedCount,status:doc.embeddingError?'failed':active?'processing':count>0&&count===embeddedCount?'completed':'pending',
+      chunkCount:doc.chunkCount,charCount:doc.charCount,tokenCount:doc.tokenCount,updatedAt:doc.updatedAt,
+      embeddingError:doc.embeddingError,errorCode:doc.errorCode,indexingPhase:active?.phase,indexingProgress:active?.progress}
+  }
   async listDocumentsForUi(baseId:string):Promise<DocumentSummary[]> {
     const store=this.requireStore(),key=embeddingKey(this.getConfigFor(baseId))
     const summary=await (store.docChunkStatusAsync?.(baseId,key)??store.docChunkStatus(baseId,key))
@@ -3492,6 +3503,11 @@ export class KnowledgeService extends Service {
 
   // ── statistics ────────────────────────────────────────────────────────────
 
+  async baseLive(baseId:string){
+    const base=this.requireStore().getBase(baseId)
+    if(!base)throw new NotFoundError('knowledge base not found')
+    return {updatedAt:base.updatedAt,syncStatus:this.externalFolders?.states.get(baseId),stats:await this.statsForUi(baseId)}
+  }
   async statsForUi(baseId?:string):Promise<BaseStats>{
     const store=this.requireStore()
     if(baseId!==undefined&&!store.getBase(baseId))throw new NotFoundError(`knowledge base not found: ${baseId}`)
@@ -3507,9 +3523,10 @@ export class KnowledgeService extends Service {
       throw new NotFoundError(`knowledge base not found: ${baseId}`)
     }
     const bases = baseId !== undefined ? store.listBases().filter(base => base.id === baseId) : store.listBases()
-    const documents = bases.flatMap(base => store.listDocuments(base.id, { includeRawText: false }))
-    const charCount = documents.reduce((sum, doc) => sum + doc.charCount, 0)
-    const tokenCount = documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
+    const totals=summary?.documents
+    const documents = totals?[]:bases.flatMap(base => store.listDocuments(base.id, { includeRawText: false }))
+    const charCount = totals?.charCount??documents.reduce((sum, doc) => sum + doc.charCount, 0)
+    const tokenCount = totals?.tokenCount??documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
     const chunkStats = summary ?? store.chunkStats(bases.map(base => base.id))
     // Staleness: an embedded chunk is stale when it was produced by a different
     // embedding source than the base's currently resolved configuration.
@@ -3525,8 +3542,8 @@ export class KnowledgeService extends Service {
     }
     return {
       ...(baseId !== undefined ? { baseId } : {}),
-      documentCount: documents.length,
-      storedDocCount: documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined ? 1 : 0), 0),
+      documentCount: totals?.documentCount??documents.length,
+      storedDocCount: totals?.storedDocCount??documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined ? 1 : 0), 0),
       chunkCount: chunkStats.count,
       charCount,
       tokenCount,

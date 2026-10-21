@@ -297,6 +297,9 @@ describe('KnowledgeService', () => {
     expect(stats.chunkCount).toBe(2)
     expect(stats.charCount).toBeGreaterThan(0)
     expect(stats.tokenCount).toBeGreaterThan(0)
+    expect(await service.statsForUi(base.id)).toEqual(stats)
+    const live=await service.baseLive(base.id);expect(live.stats).toEqual(stats);expect(live.updatedAt).toBeGreaterThanOrEqual(base.updatedAt)
+    for(const doc of service.listDocuments(base.id)){const status=service.documentStatus(doc.id);expect(status.chunkCount).toBe(doc.chunkCount);expect(status.charCount).toBe(doc.charCount)}
   })
 
   it('rejects stats for an unknown base instead of returning zeros', async () => {

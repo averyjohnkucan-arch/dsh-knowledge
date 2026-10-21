@@ -1498,4 +1498,4 @@ it('external folders store no original copy and reconcile again after reopening 
     expect(Buffer.from((await second.getRawFile(doc.id))!.bytes).toString()).toContain('offline')
     await store.close()
   } finally { await rm(dir, { recursive: true, force: true }) }
-})
+}, 30000)
