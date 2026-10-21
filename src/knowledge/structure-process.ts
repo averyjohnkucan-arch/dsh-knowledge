@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline'
 /** One serialized request per persistent process; bounded diagnostics, no document text over stdout. */
 export class StructureProcess {
   private child?: ChildProcessWithoutNullStreams
+  private closing = new Set<ChildProcessWithoutNullStreams>()
   private pending?: { id: number; resolve(result: Record<string, unknown>): void; reject(error: Error): void }
   private get label(): string { return this.prefix === 'DSH_EMBED_RESULT ' ? 'Embedding' : 'PP-StructureV3' }
   private sequence = 0
@@ -13,7 +14,7 @@ export class StructureProcess {
     const child = this.child; this.child = undefined
     const pending = this.pending; this.pending = undefined
     pending?.reject(error)
-    child?.kill('SIGKILL')
+    if (child) { this.closing.add(child); child.once('exit', () => this.closing.delete(child)); child.kill('SIGKILL') }
   }
   private start(): ChildProcessWithoutNullStreams {
     if (this.child) return this.child
@@ -59,14 +60,17 @@ export class StructureProcess {
   }
   get pid(): number | undefined { return this.child?.pid }
   async stopAndWait(): Promise<void> {
-    const child = this.child
-    if (!child) return
-    const closed = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Inference worker did not release its device')), 1000)
-      child.once('close', () => { clearTimeout(timer); resolve() })
-    })
+    const children = new Set(this.closing)
+    if (this.child) children.add(this.child)
+    const closed = [...children].map(child => new Promise<void>((resolve, reject) => {
+      if (child.exitCode !== null || child.signalCode !== null) { resolve(); return }
+      const done = () => { clearTimeout(timer); resolve() }
+      const timer = setTimeout(() => { child.removeListener('exit', done); reject(new Error('Inference worker did not release its device')) }, 10_000)
+      child.once('exit', done)
+    }))
     this.stop(new Error('Background inference yielded to foreground work'))
-    await closed
+    await Promise.all(closed)
   }
+
   dispose(): void { this.stop(new Error('Knowledge plugin stopped')) }
 }

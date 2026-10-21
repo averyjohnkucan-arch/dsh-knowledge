@@ -404,3 +404,19 @@ describe('model-facing knowledge tool contracts', () => {
     expect(rendered).toContain('charEnd=')
   })
 })
+
+it('registers an optional scheduler memory guard and removes it on service detach', async () => {
+  const { ctx, knowledge } = await mountHarness()
+  let guard: (() => Promise<() => void>) | undefined, releases = 0, detached = false
+  const original = knowledge.enterEmbeddingForeground.bind(knowledge)
+  knowledge.enterEmbeddingForeground = async () => () => { releases++ }
+  try {
+    const remove = ctx.provide('modelScheduler' as never, { registerResourceGuard: (id: string, enter: () => Promise<() => void>) => {
+      expect(id).toBe('dsh-knowledge'); guard = enter; return () => { detached = true }
+    } } as never)
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(guard).toBeTypeOf('function')
+    const release = await guard!(); release(); expect(releases).toBe(1)
+    await remove(); expect(detached).toBe(true)
+  } finally { knowledge.enterEmbeddingForeground = original; await ctx.fiber.dispose() }
+})

@@ -281,6 +281,13 @@ export function apply(ctx: Context): void {
     return document
   }
 
+  // Reserve devices before an engine's load/preflight, including image-to-chat restoration.
+  // Optional public Cordis service: neither engine plugin needs to know Knowledge exists.
+  ctx.inject(['modelScheduler'], scope => {
+    const scheduler = scope.get('modelScheduler') as unknown as { registerResourceGuard?: (id: string, enter: () => Promise<() => void>) => () => void }
+    if (scheduler.registerResourceGuard) scope.effect(() => scheduler.registerResourceGuard!('dsh-knowledge', () => knowledge.enterEmbeddingForeground()))
+  })
+
   ctx.on('llm/stream', function (_options, next) {
     return (async function* () {
       const release = await knowledge.enterEmbeddingForeground()
