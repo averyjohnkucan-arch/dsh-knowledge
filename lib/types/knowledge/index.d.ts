@@ -128,6 +128,8 @@ export declare class KnowledgeService extends Service {
     private artifacts;
     private externalFolders?;
     private syncingRoots;
+    private foregroundReservations;
+    private applyEmbeddingCpuTuning;
     private shuttingDown;
     private readonly processingQueue;
     private readonly processingProgress;

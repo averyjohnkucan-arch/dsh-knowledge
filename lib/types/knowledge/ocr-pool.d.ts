@@ -1,7 +1,7 @@
 import type { OcrAcceleration } from './ocr-acceleration.js';
 export declare function enterOcrPoolForeground(): Promise<() => void>;
 export declare function useOcrAcceleration(value: OcrAcceleration | undefined): void;
-/** Four threads per CPU session; a shared gate caps foreground OCR to one session. */
+/** Eight threads per CPU session; a shared gate caps foreground OCR to one session. */
 export declare class OcrPool {
     constructor();
     private stopped;
