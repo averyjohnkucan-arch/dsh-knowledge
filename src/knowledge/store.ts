@@ -138,6 +138,7 @@ export interface Store {
 
   listDocuments(baseId: string, options?: { includeRawText?: boolean }): KnowledgeDocument[]
   getDocument(id: string): KnowledgeDocument | undefined
+  findDocumentByContentHash?(baseId: string, contentHash: string, excludeId?: string): KnowledgeDocument | undefined
   hasDocumentsWithoutSource(baseId: string): boolean
   putDocument(doc: KnowledgeDocument): Promise<void>
   deleteDocument(id: string): Promise<void>
@@ -341,9 +342,14 @@ class DomainStore implements Store {
       this.pendingPublications.push({ doc, chunks, bytes, resolve, reject })
       this.publicationBytes += bytes
     })
-    if (this.pendingPublications.length >= 32 || this.publicationBytes >= 8 * 1024 ** 2) void this.flushPublications()
-    else if (!this.publicationTimer && !this.publicationFlush) this.publicationTimer = setTimeout(() => { void this.flushPublications() }, 50)
+    this.schedulePublications()
     return result
+  }
+
+  private schedulePublications(): void {
+    if (!this.pendingPublications.length || this.publicationFlush) return
+    if (this.closing || this.pendingPublications.length >= 32 || this.publicationBytes >= 8 * 1024 ** 2) void this.flushPublications()
+    else if (!this.publicationTimer) this.publicationTimer = setTimeout(() => { void this.flushPublications() }, 50)
   }
 
   private flushPublications(): Promise<void> {
@@ -379,7 +385,7 @@ class DomainStore implements Store {
     this.publicationFlush = flush
     void flush.finally(() => {
       if (this.publicationFlush === flush) this.publicationFlush = undefined
-      if (this.pendingPublications.length) void this.flushPublications()
+      this.schedulePublications()
     })
     return flush
   }
@@ -434,6 +440,11 @@ class DomainStore implements Store {
       return next !== undefined && next.previousCreatedAt === value.createdAt && next.document.baseId === value.baseId
         ? next.document : value
     }).filter(doc => doc.baseId === baseId)
+  }
+
+  findDocumentByContentHash(baseId: string, contentHash: string, excludeId?: string): KnowledgeDocument | undefined {
+    if (this.sqliteDocuments) return this.chunkDb.findDocumentByContentHash(baseId, contentHash, excludeId)
+    return this.listDocuments(baseId, { includeRawText: false }).find(doc => doc.id !== excludeId && doc.contentHash === contentHash)
   }
 
   hasDocumentsWithoutSource(baseId: string): boolean {

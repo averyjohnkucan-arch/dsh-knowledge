@@ -791,7 +791,9 @@ export class KnowledgeService extends Service {
       group: source.group,
       config: config ?? source.config,
     })
-    for (const doc of store.listDocuments(sourceBaseId)) {
+    for (const header of store.listDocuments(sourceBaseId, { includeRawText: false })) {
+      const doc = store.getDocument(header.id)
+      if (!doc) continue
       if (doc.sourceType === 'directory') continue
       const text = doc.rawText ?? reconstructFromChunks(store.listChunksByDoc(doc.id))
       if (text.trim().length === 0) continue
@@ -822,7 +824,7 @@ export class KnowledgeService extends Service {
   async deleteBase(id: string): Promise<void> {
     const store = this.requireStore()
     if (store.getBase(id) === undefined) throw new Error(`knowledge base not found: ${id}`)
-    for (const doc of store.listDocuments(id)) {
+    for (const doc of store.listDocuments(id, { includeRawText: false })) {
       this.processingControllers.get(doc.id)?.abort()
       this.processingProgress.delete(doc.id)
     }
@@ -1707,7 +1709,7 @@ export class KnowledgeService extends Service {
       // import then fails closed with `ambiguous_source` for both, and a rescan of
       // the repointed root matches no child by path, so every file is re-created
       // and rejected as a duplicate — a `partial` sync whose items are all failed.
-      const conflict = store.listDocuments(baseId).find(document =>
+      const conflict = store.listDocuments(baseId, { includeRawText: false }).find(document =>
         document.id !== source.id
         && document.sourceType === 'directory'
         && document.sourcePath !== undefined
@@ -4402,11 +4404,11 @@ export class KnowledgeService extends Service {
       if (input.placeholderId !== undefined && store.getDocument(input.placeholderId) === undefined) {
         throw new Error('document no longer exists (deleted while indexing)')
       }
-      for (const doc of store.getBase(input.baseId)?.storageMode === 'external' ? [] : store.listDocuments(input.baseId)) {
-        if (doc.id === input.placeholderId) continue
-        if (doc.contentHash === contentHash) {
-          throw new Error(`duplicate document: "${doc.title}" already contains identical content`)
-        }
+      if (store.getBase(input.baseId)?.storageMode !== 'external') {
+        const duplicate = store.findDocumentByContentHash
+          ? store.findDocumentByContentHash(input.baseId, contentHash, input.placeholderId)
+          : store.listDocuments(input.baseId, { includeRawText: false }).find(doc => doc.id !== input.placeholderId && doc.contentHash === contentHash)
+        if (duplicate) throw new Error(`duplicate document: "${duplicate.title}" already contains identical content`)
       }
       const docId = input.placeholderId ?? input.documentId ?? crypto.randomUUID()
       const prior = input.placeholderId !== undefined ? store.getDocument(docId) : undefined
