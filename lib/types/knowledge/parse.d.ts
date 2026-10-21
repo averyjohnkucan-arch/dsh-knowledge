@@ -44,4 +44,6 @@ export declare function extractHtmlDocument(html: string): Promise<{
  * needs coordinate reassembly, or needs OCR instead. Exported for tests.
  */
 export declare function averageLineLength(text: string): number;
+/** Terminate native parser heaps when a plugin instance is unloaded. */
+export declare function disposePdfParsers(): Promise<void>;
 //# sourceMappingURL=parse.d.ts.map

@@ -131,6 +131,7 @@ export declare class KnowledgeService extends Service {
     private foregroundReservations;
     private applyEmbeddingCpuTuning;
     private shuttingDown;
+    private readonly processingConcurrency;
     private readonly processingQueue;
     private readonly processingProgress;
     private readonly processingControllers;

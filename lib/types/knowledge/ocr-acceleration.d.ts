@@ -4,6 +4,9 @@ interface Device {
     qualified: boolean;
     medianMs?: number;
     error?: string;
+    enabled?: boolean;
+    pending?: number;
+    completed?: number;
 }
 export interface OcrAccelerationStatus {
     status: 'not_installed' | 'installing' | 'ready' | 'error';
@@ -15,6 +18,9 @@ export declare function acceleratorEnvironment(root: string): NodeJS.ProcessEnv;
 export declare class OcrAcceleration {
     private lanes;
     private loadedRoot?;
+    private modelHash?;
+    private cudaQualifiedHash?;
+    private cudaQualification?;
     private state?;
     private preparation?;
     private setupChild?;
@@ -34,6 +40,7 @@ export declare class OcrAcceleration {
     private makeLane;
     private stopLane;
     enterForeground(): Promise<() => void>;
+    private balanceCpu;
     private updateDevices;
     root(): string;
     python(): string;

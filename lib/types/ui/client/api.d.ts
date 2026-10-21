@@ -421,6 +421,9 @@ export declare class KnowledgeApi {
             qualified: boolean;
             medianMs?: number;
             error?: string;
+            enabled?: boolean;
+            pending?: number;
+            completed?: number;
         }>;
     }>;
     prepareOcrAcceleration(): Promise<{
@@ -432,6 +435,9 @@ export declare class KnowledgeApi {
             qualified: boolean;
             medianMs?: number;
             error?: string;
+            enabled?: boolean;
+            pending?: number;
+            completed?: number;
         }>;
     }>;
     getStructureStatus(): Promise<{
