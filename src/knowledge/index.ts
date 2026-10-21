@@ -324,6 +324,10 @@ export class KnowledgeService extends Service {
   private artifacts = new ArtifactRepository()
   private externalFolders?: ExternalFolders
   private syncingRoots = new Set<string>()
+  private foregroundReservations = 0
+  private applyEmbeddingCpuTuning(config: KnowledgeConfig): void {
+    setLocalEmbeddingTuning(this.foregroundReservations ? { ...config, localEmbeddingThreads: Math.min(8, config.localEmbeddingThreads || 8), localEmbeddingInstances: 1 } : config)
+  }
   private shuttingDown = false
   private readonly processingQueue = new ProcessingQueue()
   private readonly processingProgress = new Map<string, ProcessingProgress>()
@@ -393,7 +397,7 @@ export class KnowledgeService extends Service {
     setLocalModelCacheDir(resolved.localModelCacheDir)
     await this.ocrAcceleration.status()
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
-    setLocalEmbeddingTuning(resolved)
+    this.applyEmbeddingCpuTuning(resolved)
     this.ocrAcceleration.configure(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
     embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
@@ -670,7 +674,7 @@ export class KnowledgeService extends Service {
     setHfEndpoint(resolved.hfEndpoint)
     setLocalModelCacheDir(resolved.localModelCacheDir)
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
-    setLocalEmbeddingTuning(resolved)
+    this.applyEmbeddingCpuTuning(resolved)
     this.ocrAcceleration.configure(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
     embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
@@ -3210,10 +3214,12 @@ export class KnowledgeService extends Service {
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
   async enterEmbeddingForeground() {
+    this.foregroundReservations++; this.applyEmbeddingCpuTuning(this.getConfig())
     const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(), embeddingFp16Acceleration.enterForeground(), this.ocrAcceleration.enterForeground(), enterOcrPoolForeground()])
     const failed = releases.find(result => result.status === 'rejected')
-    if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); throw failed.reason }
-    return () => { for (const result of releases) if (result.status === 'fulfilled') result.value() }
+    if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); this.foregroundReservations--;this.applyEmbeddingCpuTuning(this.getConfig());throw failed.reason }
+    let done=false
+    return () => { if(done)return;done=true;for (const result of releases) if (result.status === 'fulfilled') result.value();this.foregroundReservations--;this.applyEmbeddingCpuTuning(this.getConfig()) }
   }
   embeddingAccelerationStatus(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).status() }
   prepareEmbeddingAcceleration(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).prepare() }

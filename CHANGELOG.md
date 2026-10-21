@@ -1,3 +1,10 @@
+## 0.5.16 — Tolerant GPU OCR qualification and foreground budgets
+
+- Admit healthy CUDA OCR with small transcription differences; retry ambiguous pages on CPU without permanently disabling the GPU.
+- Recover failed CUDA lanes after cooldown and stop busy-queue CPU oversubscription. Prefetch enough pages to feed newly available accelerators.
+- Foreground inference releases iGPU/NVIDIA workers and keeps one eight-thread CPU OCR worker, one CPU embedding worker capped at eight threads, and NPU work. Extra CPU lanes resume while idle.
+- Validated on real archival scan pages and native CUDA handoff; all changes are plugin-only.
+
 ## 0.5.15 — Isolated streaming PDF rendering
 
 - Overlap isolated MuPDF rendering with OCR and keep DSH's event loop responsive. Bound raster queues, contain crashes/timeouts and stop renderers on unload.

@@ -39,8 +39,55 @@ describe('OCR foreground resource handoff',()=>{
   })
   it('falls back instead of dropping a page when an accelerator fails',async()=>{
     const {manager,cuda}=fixture();cuda.process.request.mockRejectedValueOnce(Error('device reset'))
-    expect(await manager.recognize(Buffer.from('png'))).toBeUndefined()
+    expect(await manager.recognize(Buffer.from('png'))).toBe('OCR evidence')
     expect(cuda.failed).toBe(true)
     expect(await manager.recognize(Buffer.from('png'))).toBe('OCR evidence')
   })
+})
+
+describe('CUDA OCR admission',()=>{
+ const evidence='The archival correspondence records committee proceedings and the meeting date in December. '.repeat(10)
+ it('admits a healthy GPU despite a small OCR transcription difference',async()=>{
+  const {manager,cpu,cuda}=fixture();cuda.device.qualified=false
+  cpu.process.request.mockResolvedValue({text:evidence,elapsedMs:100})
+  cuda.process.request.mockResolvedValue({text:evidence.replace('committee','commitee'),elapsedMs:20,provider:'CUDAExecutionProvider'} as never)
+  expect(await manager.recognize(Buffer.from('scan'))).toContain('commitee')
+  expect(cuda.device.qualified).toBe(true);expect(cuda.failed).toBe(false)
+ })
+ it('uses CPU for a bad qualification page and retries the GPU on a later page',async()=>{
+  vi.useFakeTimers();const {manager,cpu,cuda}=fixture();cuda.device.qualified=false
+  cpu.process.request.mockResolvedValue({text:evidence,elapsedMs:100})
+  cuda.process.request.mockResolvedValueOnce({text:'Unrelated output',elapsedMs:20,provider:'CUDAExecutionProvider'} as never)
+  expect(await manager.recognize(Buffer.from('scan'))).toBe(evidence)
+  expect(cuda.failed).toBe(false);expect(cuda.device.qualified).toBe(false)
+  await vi.advanceTimersByTimeAsync(10001)
+  cuda.process.request.mockResolvedValue({text:evidence,elapsedMs:20,provider:'CUDAExecutionProvider'} as never)
+  expect(await manager.recognize(Buffer.from('next scan'))).toBe(evidence)
+  expect(cuda.device.qualified).toBe(true)
+ })
+})
+
+
+describe('OCR queue backpressure',()=>{
+ it('waits for healthy lanes instead of spilling busy pages into extra CPU workers',async()=>{
+  const {manager,cpu,npu}=fixture();const release=await manager.enterForeground()
+  let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve})
+  for(const lane of [cpu,npu])lane.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:10}})
+  const jobs=Array.from({length:12},()=>manager.recognize(Buffer.from('page')))
+  await new Promise(resolve=>setTimeout(resolve,20))
+  expect(cpu.process.request).toHaveBeenCalledTimes(1);expect(npu.process.request).toHaveBeenCalledTimes(1)
+  finish();expect(await Promise.all(jobs)).toEqual(Array(12).fill('OCR evidence'));release()
+ })
+})
+
+
+it('reroutes queued GPU pages through the bounded CPU/NPU lanes during foreground handoff',async()=>{
+ const {manager,cuda}=fixture();let finish!:()=>void
+ const gate=new Promise<void>(resolve=>{finish=resolve})
+ cuda.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:20}})
+ const jobs=[manager.recognize(Buffer.from('a')),manager.recognize(Buffer.from('b'))]
+ await new Promise<void>(resolve=>setImmediate(resolve))
+ const handoff=manager.enterForeground();finish();const release=await handoff
+ expect(await Promise.all(jobs)).toEqual(['OCR evidence','OCR evidence'])
+ expect(cuda.process.request).toHaveBeenCalledTimes(1);release()
 })

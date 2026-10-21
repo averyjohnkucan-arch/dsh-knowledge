@@ -673,6 +673,6 @@ File parsing, imports and individual document rebuilds use three total attempts,
 
 Cancellation stops immediately. Uncertain remote submissions are not resubmitted automatically; their saved jobs remain available for reconciliation. Crash-recovery attempts remain bounded across restarts. Sync also rebuilds incomplete or errored files even when their stored bytes have not changed.
 
-### OCR-first background processing (0.5.14)
+### OCR-first background processing (0.5.16)
 
-Queued parsing/OCR across all KBs finishes before bulk vectorization. Saved text is searchable immediately; semantic merging and vectors follow without another OCR pass. Local Models offers one or two optional NVIDIA OCR workers. CPU/NPU work continues while GPUs are free; foreground inference releases GPU workers and limits CPU OCR to four threads. See [release notes and measured limits](docs/releases/v0.5.14.md).
+Queued parsing/OCR across all KBs finishes before bulk vectorization. Saved text is searchable immediately; semantic merging and vectors follow without another OCR pass. Local Models offers one or two optional NVIDIA OCR workers. CPU/NPU work continues while GPUs are free; foreground inference releases GPU workers and keeps one eight-thread CPU OCR worker, one CPU embedding worker capped at eight threads, and NPU work. Small OCR decoder differences are tolerated; ambiguous qualification pages retry on CPU without permanently disabling CUDA. See [release notes and measured limits](docs/releases/v0.5.16.md).

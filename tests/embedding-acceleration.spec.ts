@@ -98,3 +98,15 @@ describe('embedding device fallback and yielding',()=>{
  })
 
 })
+
+describe('foreground embedding CPU budget',()=>{
+ it('keeps one CPU lane and NPU while releasing extra CPU/GPU workers, then resumes CPU lanes',async()=>{
+  const {manager,cpu,npu}=fixture();npu.worker.request.mockResolvedValue({vector:vector(),elapsedMs:100} as never)
+  const extra={...cpu,worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})},batcher:{pause:vi.fn(),resume:vi.fn()}}
+  Object.assign(manager,{lanes:[cpu,extra,npu]})
+  const release=await manager.enterForeground()
+  expect(cpu.enabled).toBe(true);expect(npu.enabled).toBe(true);expect(extra.enabled).toBe(false)
+  expect(extra.worker.stopAndWait).toHaveBeenCalledOnce()
+  release();release();expect(extra.enabled).toBe(true);expect(extra.batcher.resume).toHaveBeenCalledOnce();manager.dispose()
+ })
+})

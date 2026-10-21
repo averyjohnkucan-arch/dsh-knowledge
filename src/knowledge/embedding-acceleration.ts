@@ -14,7 +14,7 @@ import { desktopIdle } from './resource-policy.js'
 export const FP16_EMBEDDING_MODEL = 'dsh-local/Qwen3-Embedding-0.6B-FP16-Accelerated'
 export const OPENVINO_EMBEDDING_MODEL = 'OpenVINO/Qwen3-Embedding-0.6B-int8-ov'
 interface Device { maxTokens?: number; device: string; name?: string; qualified: boolean; medianMs?: number; minimumCosine?: number; error?: string; blockedReason?: string }
-interface Lane { extraWorkers?: StructureProcess[]; qualified?: boolean; device: string; worker: StructureProcess; pending: number; enabled: boolean; tail: Promise<unknown>; current?: Promise<unknown>; milliseconds: number; batcher?: EmbeddingBatcher; jobs?: Set<Promise<unknown>> }
+interface Lane { cpuThreads?: number; extraWorkers?: StructureProcess[]; qualified?: boolean; device: string; worker: StructureProcess; pending: number; enabled: boolean; tail: Promise<unknown>; current?: Promise<unknown>; milliseconds: number; batcher?: EmbeddingBatcher; jobs?: Set<Promise<unknown>> }
 export interface EmbeddingAccelerationStatus { status: 'not_installed'|'installing'|'ready'|'error'; message: string; devices: Device[] }
 const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, import.meta.url))
 const exec = promisify(execFile)
@@ -55,11 +55,12 @@ export class EmbeddingAcceleration {
     }
     return env
   }
-  private lane(device: string, ms: number, main = false): Lane {
+  private lane(device: string, ms: number, main = false, threadLimit = this.threads): Lane {
+    const cpuThreads = device === 'CPU' && this.foreground ? Math.min(8, threadLimit) : threadLimit
     const python = this.fp16 && main ? join(this.cache,'embedding-gpu-runtime','venv',process.platform==='win32'?'Scripts/python.exe':'bin/python') : this.python()
-    const makeWorker = () => new StructureProcess(python,[script(this.fp16 ? 'embedding-fp16-worker.py' : 'embedding-accelerator-worker.py'),'--models',this.models(),'--device',this.fp16 && main ? 'CUDA' : device,'--threads',String(this.threads),...(device.startsWith('GPU')?['--vendor',main?'nvidia':'intel']:[])],this.environment(main),'DSH_EMBED_RESULT ')
+    const makeWorker = () => new StructureProcess(python,[script(this.fp16 ? 'embedding-fp16-worker.py' : 'embedding-accelerator-worker.py'),'--models',this.models(),'--device',this.fp16 && main ? 'CUDA' : device,'--threads',String(cpuThreads),...(device.startsWith('GPU')?['--vendor',main?'nvidia':'intel']:[])],this.environment(main),'DSH_EMBED_RESULT ')
     const worker=makeWorker()
-    const lane: Lane = { device, pending:0, enabled:true, milliseconds:ms, tail:Promise.resolve(), worker }
+    const lane: Lane = { cpuThreads, device, pending:0, enabled:true, milliseconds:ms, tail:Promise.resolve(), worker }
     lane.extraWorkers=this.fp16&&main?Array.from({length:this.mainGpuCopies-1},makeWorker):[]
     const workers=[worker,...lane.extraWorkers]
     lane.jobs = new Set()
@@ -80,6 +81,7 @@ export class EmbeddingAcceleration {
       const receipt=JSON.parse(await readFile(join(this.root(),'ready.json'),'utf8')) as {schema:number;format?:string;modelId:string;devices:Device[]}
       if(receipt.schema!==1||this.fp16&&receipt.format!=='canonical-fp16-v1'||receipt.modelId!==(this.fp16 ? FP16_EMBEDDING_MODEL : OPENVINO_EMBEDDING_MODEL)||!receipt.devices.some(d=>d.device==='CPU'&&d.qualified))throw Error('Missing qualified CPU fallback')
       this.lanes=receipt.devices.filter(d=>d.qualified&&['CPU','NPU'].includes(d.device)).flatMap(d=>Array.from({length:d.device==='CPU'?this.cpuInstances:1},()=>this.lane(d.device,d.medianMs??150)))
+      if (this.foreground) { for (const lane of this.lanes.filter(lane => lane.device === 'CPU').slice(1)) { lane.enabled=false;lane.batcher?.pause() } }
       this.ready={status:'ready',message:this.fp16 ? 'One FP16 vector space across CPU, NPU, Intel iGPU and optional NVIDIA CUDA. GPU workers yield for foreground inference.' : 'OpenVINO CPU/NPU model; separate vector space from the ONNX model. GPU workers require verified idle state and matching vectors.',devices:receipt.devices}
       return this.ready
     } catch {return {status:'not_installed',message:'Download and validate the separate OpenVINO embedding model to enable NPU execution.',devices:[]}}
@@ -132,7 +134,7 @@ export class EmbeddingAcceleration {
     this.warming=(async()=>{
       if((await this.status()).status!=='ready')throw Error('Embedding model is not installed and validated')
       const text='A telescope collects light from distant stars and records scientific observations. '.repeat(10)
-      await Promise.all(this.lanes.filter(l=>!l.device.startsWith('GPU')).map(async lane=>{
+      await Promise.all(this.lanes.filter(l=>l.enabled&&!l.device.startsWith('GPU')).map(async lane=>{
         try {await this.run(lane,text);await this.run(lane,text)}
         catch(error){if(lane.device==='CPU')throw error;lane.enabled=false;lane.qualified=false;lane.batcher?.pause();lane.worker.dispose();this.gpuRetryAt.set(lane.device,Date.now()+60_000);const state=this.ready?.devices.find(d=>d.device===lane.device);if(state){state.qualified=false;state.error=`Device warmup failed; CPU fallback active: ${String(error).slice(-1500)}`}}
       }))
@@ -207,7 +209,20 @@ export class EmbeddingAcceleration {
     let timer:ReturnType<typeof setTimeout>|undefined
     try{await Promise.race([lane.current??Promise.resolve(),new Promise<void>(resolve=>{timer=setTimeout(resolve,10_000)})]).catch(()=>{})}finally{if(timer)clearTimeout(timer);await Promise.all([lane.worker,...lane.extraWorkers??[]].map(worker=>worker.stopAndWait()))}
   }
-  async enterForeground():Promise<()=>void>{this.foreground++;try{await Promise.all(this.lanes.filter(l=>l.device.startsWith('GPU')).map(l=>this.stopGpu(l)))}catch(error){this.foreground--;throw error}let done=false;return()=>{if(!done){done=true;this.foreground--}}}
+  async enterForeground():Promise<()=>void>{
+    this.foreground++
+    const cpus=this.lanes.filter(lane=>lane.device==='CPU'),first=cpus[0]
+    try {
+      await Promise.all(this.lanes.filter(lane=>lane.device.startsWith('GPU') || lane.device==='CPU' && lane!==first).map(lane=>this.stopGpu(lane)))
+      if(first && (first.cpuThreads ?? this.threads)>8){
+        await this.stopGpu(first)
+        const replacement=this.lane('CPU',first.milliseconds,false,8)
+        this.lanes[this.lanes.indexOf(first)]=replacement
+      }
+    }catch(error){this.foreground--;throw error}
+    let done=false
+    return()=>{if(!done){done=true;this.foreground--;if(!this.foreground)for(const lane of this.lanes.filter(lane=>lane.device==='CPU'&&lane.qualified!==false)){lane.enabled=true;lane.batcher?.resume()}}}
+  }
   private async updateGpus():Promise<void>{
     if(this.stopped||!this.used||this.ready?.status!=='ready')return
     void this.revalidateNpu()

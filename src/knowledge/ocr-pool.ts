@@ -4,7 +4,7 @@ import { OcrProcessClient } from './ocr-process-client.js'
 let foreground = 0
 let cpuRunning = 0
 const waiters = new Set<() => void>()
-const idleCpuWorkers = Math.max(1, Math.min(4, Math.floor(availableParallelism() / 4), Math.floor(freemem() / (1024 ** 3))))
+const idleCpuWorkers = Math.max(1, Math.min(4, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (1024 ** 3))))
 const pools = new Set<OcrPool>()
 export async function enterOcrPoolForeground(): Promise<() => void> {
   foreground++
@@ -18,7 +18,7 @@ export async function enterOcrPoolForeground(): Promise<() => void> {
 let acceleration: OcrAcceleration | undefined
 export function useOcrAcceleration(value: OcrAcceleration | undefined): void { acceleration = value }
 
-/** Four threads per CPU session; a shared gate caps foreground OCR to one session. */
+/** Eight threads per CPU session; a shared gate caps foreground OCR to one session. */
 export class OcrPool {
   constructor() { pools.add(this) }
   private stopped = false
