@@ -72,9 +72,13 @@ export declare function parseRetrievalPassages(text: string): {
     chunkId: string;
     excerpt: string;
 }[];
-export declare function KnowledgeRetrieval({ node }: {
+export declare function KnowledgeRetrieval({ node, useDisclosure }: {
     node: {
         data: ReturnType<typeof retrievalRecord>;
+    };
+    useDisclosure: () => {
+        expanded: boolean;
+        toggle: () => void;
     };
 }): React.JSX.Element;
 export {};
