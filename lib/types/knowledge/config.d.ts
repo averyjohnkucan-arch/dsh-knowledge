@@ -21,6 +21,7 @@ export interface Config {
     rerankApiKey: string;
     /** Total local rerank budget, including queue wait (10–300 seconds). */
     localRerankTimeoutMs: number;
+    keepInternalMarkdown?: boolean;
     smartChunk: boolean;
     chunkSeparator: string;
     chunkSize: number;

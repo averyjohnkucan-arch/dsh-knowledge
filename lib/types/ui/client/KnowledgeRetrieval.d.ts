@@ -67,6 +67,7 @@ export declare const retrievalDefinition: {
 export declare function parseRetrievalPassages(text: string): {
     title: string;
     heading: string;
+    indexedMarkdownUrl: string | undefined;
     base: string;
     documentId: string;
     chunkId: string;

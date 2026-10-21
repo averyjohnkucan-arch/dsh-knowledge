@@ -17,7 +17,7 @@ import type { LocalModelSummary } from './localModels.js';
 import { type OcrModelStatus } from './ocr.js';
 import type { Store } from './store.js';
 import { type OllamaPullStatus } from './ollama.js';
-import type { AddFileDocumentRequest, AddFilesRequest, AddFilesResult, AddTextDocumentRequest, BaseConfig, BaseStats, BaseSummary, CreateBaseRequest, ContextWindow, DeleteImpact, DocumentDetail, DocumentSourceType, DocumentSummary, DirectoryImportResult, DirectorySyncItem, EmbeddingProvider, ImportDirectoryRequest, ImportUrlRequest, KnowledgeBase, KnowledgeChunk, KnowledgeConfig, KnowledgeDocument, SearchRequest, SearchResult, PathImportResult, ReindexDocumentResult, ReindexDocumentsResult, UpdateBaseRequest } from './types.js';
+import type { AddFileDocumentRequest, AddFilesRequest, AddFilesResult, AddTextDocumentRequest, BaseConfig, BaseStats, BaseSummary, CreateBaseRequest, ContextWindow, DeleteImpact, DocumentDetail, DocumentSourceType, DocumentSummary, DirectoryImportResult, DirectorySyncItem, DirectorySyncResult, EmbeddingProvider, ImportDirectoryRequest, ImportUrlRequest, KnowledgeBase, KnowledgeChunk, KnowledgeConfig, KnowledgeDocument, SearchRequest, SearchResult, PathImportResult, ReindexDocumentResult, ReindexDocumentsResult, UpdateBaseRequest } from './types.js';
 export type * from './types.js';
 export { Config } from './config.js';
 export { openStore, StorageUnavailableError } from './store.js';
@@ -124,6 +124,7 @@ export declare class KnowledgeService extends Service {
     private readonly baseWriteChains;
     /** Last rerank failure code per model; only state transitions are logged. */
     private readonly rerankLogState;
+    private markdownSnapshots;
     private artifacts;
     private externalFolders?;
     private syncingRoots;
@@ -344,6 +345,18 @@ export declare class KnowledgeService extends Service {
     /** Reindexing a tracked directory is the same operation as re-importing its
      * source: one source identity, one diff engine, and one truthful result. */
     private rescanDirectory;
+    private folderSyncJobs;
+    startFolderSync(sourceId: string): {
+        jobId: string;
+    };
+    folderSyncStatus(jobId: string): {
+        jobId: string;
+        sourceId: string;
+        baseId: string;
+        state: "running" | "complete" | "failed";
+        result?: DirectorySyncResult;
+        error?: string;
+    };
     private readonly directoryWriteBatches;
     /** Synchronize a single source-root against disk. Root validation happens
      * before any write; child failures are preserved as itemized `partial`
@@ -654,6 +667,8 @@ export declare class KnowledgeService extends Service {
      */
     waitForIdle(timeoutMs?: number): Promise<void>;
     private ingestDocument;
+    private commitIndexedGeneration;
+    getMarkdownSnapshot(documentId: string, revision: string): Promise<import("./markdown-snapshots.js").MarkdownSnapshot>;
     private processingChunks;
     private buildChunks;
     /** Embed one batch through the configured provider (empty input → empty output). */

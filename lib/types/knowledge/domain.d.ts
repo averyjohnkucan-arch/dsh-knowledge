@@ -23,6 +23,7 @@ export declare const baseConfigSchema: z.ZodObject<{
     rerankBaseUrl: z.ZodOptional<z.ZodString>;
     rerankApiKey: z.ZodOptional<z.ZodString>;
     localRerankTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    keepInternalMarkdown: z.ZodOptional<z.ZodBoolean>;
     smartChunk: z.ZodOptional<z.ZodBoolean>;
     chunkSeparator: z.ZodOptional<z.ZodString>;
     chunkSize: z.ZodOptional<z.ZodNumber>;
@@ -109,6 +110,8 @@ export declare const documentProcessingInfoSchema: z.ZodObject<{
     reused: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const documentSchema: z.ZodObject<{
+    markdownRevision: z.ZodOptional<z.ZodString>;
+    indexingSettingsFingerprint: z.ZodOptional<z.ZodString>;
     id: z.ZodString;
     baseId: z.ZodString;
     title: z.ZodString;
@@ -183,6 +186,7 @@ export declare const configOverridesSchema: z.ZodObject<{
     rerankBaseUrl: z.ZodOptional<z.ZodString>;
     rerankApiKey: z.ZodOptional<z.ZodString>;
     localRerankTimeoutMs: z.ZodOptional<z.ZodNumber>;
+    keepInternalMarkdown: z.ZodOptional<z.ZodBoolean>;
     smartChunk: z.ZodOptional<z.ZodBoolean>;
     chunkSeparator: z.ZodOptional<z.ZodString>;
     chunkSize: z.ZodOptional<z.ZodNumber>;
@@ -253,6 +257,7 @@ export declare const configOverridesSchema: z.ZodObject<{
 }, z.core.$strip>;
 /** Partial runtime config stored in the domain global slot. */
 export interface ConfigOverrides {
+    keepInternalMarkdown?: boolean;
     embeddingProvider?: KnowledgeConfig['embeddingProvider'];
     embeddingBaseUrl?: string;
     embeddingModel?: string;
@@ -325,6 +330,7 @@ export declare const knowledgeDomainSpec: {
                 rerankBaseUrl: z.ZodOptional<z.ZodString>;
                 rerankApiKey: z.ZodOptional<z.ZodString>;
                 localRerankTimeoutMs: z.ZodOptional<z.ZodNumber>;
+                keepInternalMarkdown: z.ZodOptional<z.ZodBoolean>;
                 smartChunk: z.ZodOptional<z.ZodBoolean>;
                 chunkSeparator: z.ZodOptional<z.ZodString>;
                 chunkSize: z.ZodOptional<z.ZodNumber>;
