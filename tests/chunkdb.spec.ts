@@ -379,3 +379,36 @@ it('file-backed vector search runs outside the event loop and preserves filters 
   await expect(db.vector([1,0],['b'],1,{embeddingModel:'m'})).rejects.toThrow(/invalid persisted source spans/);
  }finally{db.close();await rm(dir,{recursive:true,force:true})}
 },15000)
+
+it('batches publications in one WAL transaction and isolates invalid documents with savepoints', async () => {
+  const db=open(),raw=(db as unknown as {db:DatabaseSync}).db
+  const exec=vi.spyOn(raw,'exec')
+  try {
+    const doc=(id:string)=>({id,baseId:'b',title:id,sourceType:'text' as const,charCount:10,chunkCount:1,createdAt:1,updatedAt:2})
+    const chunks=(id:string)=>[{id:'c-'+id,docId:id,baseId:'b',index:0,text:'source '+id}]
+    const errors=db.publishDocumentGenerations([
+      {doc:doc('one'),chunks:chunks('one'),previousCreatedAt:1,atomicMetadata:true},
+      {doc:doc('bad'),chunks:chunks('wrong-document'),previousCreatedAt:1,atomicMetadata:true},
+      {doc:doc('two'),chunks:chunks('two'),previousCreatedAt:1,atomicMetadata:true},
+    ])
+    expect(errors[0]).toBeUndefined();expect(errors[1]).toBeInstanceOf(Error);expect(errors[2]).toBeUndefined()
+    expect(exec.mock.calls.filter(([sql])=>sql==='BEGIN IMMEDIATE')).toHaveLength(1)
+    expect(exec.mock.calls.filter(([sql])=>sql==='COMMIT')).toHaveLength(1)
+    expect(db.getDocumentMetadata('bad')).toBeUndefined()
+    expect((await db.lexical('source',['b'],10)).hits.map(hit=>hit.docId).sort()).toEqual(['one','two'])
+  } finally {exec.mockRestore();db.close()}
+})
+
+it('preserves full-text rows when rechunking only replaces IDs and evidence', async () => {
+  const db=openSeeded(),raw=(db as unknown as {db:DatabaseSync}).db
+  try {
+    const before=raw.prepare('SELECT fts_rowid FROM chunk WHERE chunk_id=?').get('c1')
+    raw.exec("CREATE TRIGGER forbid_text_rebuild BEFORE DELETE ON chunk BEGIN SELECT RAISE(ABORT,'text index rebuild'); END")
+    const chunks=db.listChunksByDoc('d1').map(chunk=>({...chunk,id:'regenerated-id',embedding:[1,0],embeddingModel:'new-model',processingRevision:'new-evidence'}))
+    db.publishDocumentGeneration({id:'d1',baseId:'b1',title:'doc',sourceType:'text',charCount:24,chunkCount:1,createdAt:1,updatedAt:2,processing:{revision:'new-evidence',artifactId:'b1/d1/new-evidence',sourceHash:'source',provider:'builtin',optionsFingerprint:'same',parsedAt:2,completeness:'complete',warnings:[]}},chunks,1)
+    expect(raw.prepare('SELECT fts_rowid FROM chunk WHERE chunk_id=?').get('regenerated-id')).toEqual(before)
+    expect(db.getChunk('c1')).toBeUndefined()
+    expect((await db.lexical('hello',['b1'],10)).hits[0].id).toBe('regenerated-id')
+    expect(db.getChunk('regenerated-id')?.processingRevision).toBe('new-evidence')
+  } finally {db.close()}
+})

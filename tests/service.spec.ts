@@ -1949,3 +1949,22 @@ it('queues one reconciliation behind a running folder import without canceling i
     expect(parser).toHaveBeenCalledOnce()
   } finally {release();await running;parser.mockRestore();await rm(root,{recursive:true,force:true})}
 })
+
+
+it('joins repeated folder re-chunk requests instead of launching duplicate passes', async () => {
+  const service=await mountService(),internal=service as any
+  const base=await service.createBase({name:'Shared rebuild'})
+  const root=await service.createDirectory(base.id,'Folder')
+  let release!:()=>void
+  const gate=new Promise<void>(resolve=>{release=resolve})
+  const attempt=vi.spyOn(internal,'reindexDocumentAttempt').mockImplementation(async()=>{await gate;return root})
+  try {
+    const one=service.reindexDocument(root.id,{mode:'rechunk'})
+    const two=service.reindexDocument(root.id,{mode:'rechunk'})
+    expect(attempt).toHaveBeenCalledOnce()
+    await expect(service.reindexDocument(root.id,{mode:'reparse'})).rejects.toThrow('different options')
+    release();expect(await one).toBe(root);expect(await two).toBe(root)
+    internal.shuttingDown=true
+    await expect(service.reindexDocument(root.id,{mode:'rechunk'})).rejects.toMatchObject({name:'AbortError'})
+  } finally {release();internal.shuttingDown=false;attempt.mockRestore()}
+})

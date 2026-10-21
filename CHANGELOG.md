@@ -1,3 +1,12 @@
+## 0.5.20 — RAM-buffered publication and fewer index rewrites
+
+- Join repeated folder rebuild requests and stop directory iteration on unload.
+
+- Batch completed SQLite document publications for up to 10 ms, targeting 8 MiB / 64 documents per transaction with bounded pending-buffer backpressure.
+- Isolate per-document errors with savepoints, acknowledge only after commit, and drain buffered work on shutdown.
+- Preserve FTS rows when canonical text is unchanged despite regenerated chunk IDs or evidence; avoid no-op vector-row updates.
+- Use RAM temporary storage, an adaptive single-writer page cache capped at 4 GiB, and a 32 MiB automatic WAL checkpoint threshold at the default 4 KiB page size.
+
 ## 0.5.19 — Reconcile settings without repeated OCR or metadata writes
 
 - Reuse saved parsing evidence for unchanged sources when only indexing settings change; changed source bytes or parser options still trigger reparse.
