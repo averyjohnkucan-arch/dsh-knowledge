@@ -95,7 +95,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.20.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.21.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -287,7 +287,7 @@ Filters apply only to the current request. No database migration, reindex, or do
 
 ---
 
-## v0.5.20 highlights
+## v0.5.21 highlights
 
 Completed document writes collect briefly in bounded RAM batches before one WAL commit. Unchanged text keeps its full-text index rows even if chunk IDs or evidence change. An adaptive writer page cache uses available RAM, capped at 4 GiB. Pending batches drain on shutdown.
 
