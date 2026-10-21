@@ -23,6 +23,8 @@ import type {
 } from './types.js'
 
 export interface ChunkStats {
+  documents?: {documentCount:number;storedDocCount:number;charCount:number;tokenCount:number}
+
   count: number
   embedded: boolean
   embeddedCount: number
@@ -172,6 +174,7 @@ export interface Store {
   /** Actual chunk count per document, for reconciling stale document metadata. */
   chunkCountsByDoc(baseIds: readonly string[]): Map<string, number>
   /** Per-doc chunk presence + embedding coverage in one pass (document lists). */
+  docEmbeddingStatus?(docId:string,expectedModel?:string):{count:number;embeddedCount:number}
   docChunkStatus(baseId: string, expectedModel?: string): { withChunks: Set<string>; missingEmbedding: Set<string> }
   /**
    * Startup self-healing, returning:
@@ -623,6 +626,8 @@ class DomainStore implements Store {
   }
   chunkStatsAsync(baseIds:readonly string[]):Promise<ChunkStats>{return this.chunkDb.chunkStatsAsync(baseIds)}
   docChunkStatusAsync(baseId:string,expectedModel?:string){return this.chunkDb.docChunkStatusAsync(baseId,expectedModel)}
+
+  docEmbeddingStatus(docId:string,expectedModel?:string){return this.chunkDb.docEmbeddingStatus(docId,expectedModel)}
 
   async reconcileOrphanChunks(): Promise<number> {
     const known = new Set<string>()

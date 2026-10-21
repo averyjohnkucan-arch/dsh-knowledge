@@ -346,12 +346,14 @@ describe('streaming-safe UI reads and vector publication',()=>{
    db.putChunks([{id:'a',baseId:'b',docId:'d1',index:0,text:'one',embedding:[1,0],embeddingModel:'m1'},
     {id:'b',baseId:'b',docId:'d2',index:0,text:'two'},
     {id:'c',baseId:'b',docId:'d3',index:0,text:'three',embedding:[0,1],embeddingModel:'m2'}])
+   db.putDocumentMetadata({id:'d1',baseId:'b',title:'one',sourceType:'text',charCount:100,tokenCount:20,chunkCount:1,createdAt:1})
+   db.putDocumentMetadata({id:'d2',baseId:'b',title:'two',sourceType:'file',charCount:200,tokenCount:40,chunkCount:1,createdAt:1,rawFilePath:'b/d2.txt'})
    let ticked=false
    const timer=setTimeout(()=>{ticked=true},0)
    const [stats,status]=await Promise.all([db.chunkStatsAsync(['b']),db.docChunkStatusAsync('b','m1')])
    clearTimeout(timer)
    expect(ticked).toBe(true)
-   expect(stats).toEqual(db.chunkStats(['b']))
+   const {documents,...chunkStats}=stats as typeof stats & {documents?:unknown};expect(documents).toEqual({documentCount:2,storedDocCount:1,charCount:300,tokenCount:60});expect(chunkStats).toEqual(db.chunkStats(['b']))
    expect(status).toEqual(db.docChunkStatus('b','m1'))
    expect(await db.chunkStatsAsync([])).toEqual(db.chunkStats([]))
    db.putChunks([{id:'b',baseId:'b',docId:'d2',index:0,text:'two',embedding:[1,0],embeddingModel:'m1'}])

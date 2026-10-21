@@ -384,6 +384,7 @@ async function route(
     }
     if (segments.length === 3) {
       if (segments[2] === 'external-settings' && method === 'PATCH') return service.updateExternalSource(baseId, body)
+      if (segments[2] === 'live' && method === 'GET') return service.baseLive(baseId)
       if (segments[2] === 'stats' && method === 'GET') return service.statsForUi?.(baseId) ?? service.stats(baseId)
       if (segments[2] === 'reindex' && method === 'POST') return service.startReindexBase(baseId)
       if (segments[2] === 'files-batch' && method === 'POST') {
@@ -510,6 +511,7 @@ async function route(
       return undefined
     }
     if (segments.length === 3) {
+      if (segments[2] === 'status' && method === 'GET') return service.documentStatus(documentId)
       if (segments[2] === 'cancel' && method === 'POST') return service.cancelProcessing(documentId)
       if (segments[2] === 'evidence' && method === 'GET') {
         const pageIndex = strictIntQuery(query, 'pageIndex', 0, 100_000)

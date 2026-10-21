@@ -173,6 +173,8 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
   const [ragOpen, setRagOpen] = useState(false)
   const [recallOpen, setRecallOpen] = useState(false)
   const [documents, setDocuments] = useState<DocumentSummary[]>([])
+  const documentsRef = useRef(documents)
+  documentsRef.current = documents
   const [chunks, setChunks] = useState<ChunkView[]>([])
   const [rawText, setRawText] = useState<string | null>(null)
   const [rawTextTruncated, setRawTextTruncated] = useState(false)
@@ -425,16 +427,23 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
           if (entry.baseId === selectedBaseId) activeIds.add(entry.docId)
         }
         anyActive = activeIds.size > 0 || summary.some(row => row.baseId === selectedBaseId && row.active)
+        const finished=[...new Set([...activeIdsRef.current,...documentsRef.current.filter(doc=>doc.baseId===selectedBaseId&&doc.status==='processing').map(doc=>doc.id)])].filter(id=>!activeIds.has(id))
         const changed = !sameSet(activeIdsRef.current, activeIds)
         activeIdsRef.current = activeIds
         if (!disposed) {
           const byId = new Map(entries.filter(entry => entry.baseId === selectedBaseId).map(entry => [entry.docId, entry]))
           setDocuments(current => current.map(doc => {
             const entry = byId.get(doc.id)
-            return entry === undefined ? doc : { ...doc, indexingPhase: entry.phase, indexingProgress: entry.progress, processingProgress: entry.processingProgress }
+            return entry === undefined ? doc : { ...doc, status:'processing' as const,indexingPhase: entry.phase, indexingProgress: entry.progress, processingProgress: entry.processingProgress }
           }))
         }
-        if (!disposed && changed) void reloadDocuments()
+        await Promise.all(finished.slice(0,32).map(async id=>{
+          try{const status=await api.documentStatus(id);if(!disposed)setDocuments(rows=>rows.map(doc=>doc.id===id?{...doc,...status}:doc))}catch{/* A deleted source is removed on the revision refresh. */}
+        }))
+        // Indexing IDs change every document. Reloading all 50,000 headers
+        // on every flip transfers tens of MB and blocks streaming publication.
+        // User actions refresh immediately; background passes refresh on finish.
+        if (!disposed && changed && !anyActive) void reloadDocuments()
       } catch {
         // polling is best-effort
       }
@@ -1290,11 +1299,17 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
     if (selectedBase?.storageMode !== 'external') return
     let disposed = false
     let timer: number | undefined
+    let revision=selectedBase.updatedAt
     const poll = async (): Promise<void> => {
       try {
-        // reloadDocuments also refreshes base summaries. Never overlap a slow
-        // large-library request or keep polling a background browser tab.
-        if (document.visibilityState !== 'hidden') await reloadDocuments()
+        if (document.visibilityState !== 'hidden') {
+          const live=await api.baseLive(selectedBase.id)
+          if(disposed)return
+          setStats(live.stats)
+          setBases(rows=>rows.map(base=>base.id===selectedBase.id?{...base,syncStatus:live.syncStatus,updatedAt:live.updatedAt,
+            documentCount:live.stats.documentCount,chunkCount:live.stats.chunkCount,charCount:live.stats.charCount,tokenCount:live.stats.tokenCount}:base))
+          if(live.updatedAt!==revision){revision=live.updatedAt;await reloadDocuments()}
+        }
       } catch {
         // Keep the last snapshot on a transient failure.
       } finally {
@@ -1303,7 +1318,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
     }
     timer = window.setTimeout(() => { void poll() }, 3000)
     return () => { disposed = true; window.clearTimeout(timer) }
-  }, [selectedBase?.id, selectedBase?.storageMode, reloadDocuments])
+  }, [api, selectedBase?.id, selectedBase?.storageMode, reloadDocuments])
 
   const addSourceMenu: MenuEntry[] = selectedBase?.storageMode === 'external' ? [
     { key: 'sync', label: t('reconcileNow'), onSelect: () => { void api.externalSettings(selectedBase.id, { reconcileNow: true }).then(refreshBases).catch(e => notify('error', String(e))) } },

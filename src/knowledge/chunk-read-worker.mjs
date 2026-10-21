@@ -25,6 +25,16 @@ try {
         .all(...baseIds).map(row=>({baseId:row.base_id,model:row.embedding_model,count:row.c}))
     }
   }
+  if(kind==='stats'&&baseIds.length) {
+    const placeholders=baseIds.map(()=>'?').join(',')
+    const meta=db.prepare(`SELECT COUNT(*) AS documentCount,
+      COALESCE(SUM(COALESCE(json_extract(header,'$.charCount'),0)),0) AS charCount,
+      COALESCE(SUM(COALESCE(json_extract(header,'$.tokenCount'),0)),0) AS tokenCount,
+      COALESCE(SUM(json_extract(header,'$.rawFilePath') IS NOT NULL),0) AS storedDocCount
+      FROM knowledge_document WHERE base_id IN (${placeholders})`).get(...baseIds)
+    // Legacy DomainKV-only metadata falls back to its original store path.
+    if(meta.documentCount||!value.count)value.documents=meta
+  }
   db.exec('COMMIT')
   parentPort.postMessage({ok:true,value})
 } catch(error) {parentPort.postMessage({ok:false,error:String(error)})}

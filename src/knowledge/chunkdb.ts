@@ -1007,6 +1007,11 @@ export class ChunkDatabase implements RetrievalLane {
     return vectors
   }
 
+  docEmbeddingStatus(docId:string,expectedModel?:string):{count:number;embeddedCount:number}{
+    const row=this.db.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(embedding IS NOT NULL AND (? IS NULL OR embedding_model=?)),0) AS embeddedCount FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id=?').get(expectedModel??null,expectedModel??null,docId) as {count:number;embeddedCount:number}
+    return row
+  }
+
   /** Per-doc chunk presence + embedding coverage in one grouped pass (listDocuments). */
   docChunkStatus(baseId: string, expectedModel?: string): { withChunks: Set<string>; missingEmbedding: Set<string> } {
     const rows = this.db.prepare(
