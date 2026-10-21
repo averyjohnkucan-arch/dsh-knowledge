@@ -1,3 +1,9 @@
+## 0.5.13 — Sync reconciles Markdown retention
+
+- Folder Sync now removes all saved Markdown revisions when Keep internal Markdown is off, including historical copies whose current pointer was already cleared. Syncing a parent folder covers its descendants.
+- Retention-only cleanup preserves stored text, chunks, vectors and original source files without re-parsing or re-embedding. Saving the setting alone remains future-only.
+- Cleanup failures remain visible and retryable; enabling retention again can save new revisions. Existing saved-Markdown citation URLs become unavailable after their copies are removed.
+
 ## 0.5.12 — saved Markdown citations and settings-aware folder sync
 
 - Optional Keep internal Markdown saves immutable derived `.md` revisions for future imports, reindexing and syncs. Saving the setting alone does not rewrite existing documents.
