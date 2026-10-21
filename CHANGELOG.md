@@ -1,3 +1,12 @@
+## 0.5.25 — Import backpressure and lower write amplification
+
+- Make internal parser congestion wait for capacity instead of failing documents. Admit source reads globally, with up to 128 lightweight jobs and four heavy documents on large hosts; nested sync/reindex operations share admission.
+- Batch concurrent metadata updates while preserving mutation order, per-document rollback, commit-before-acknowledgement and shutdown draining.
+- Increase completed-document publication targets to 128 documents / 16 MiB, with 256-document / 128-MiB pending bounds. The existing 50-ms collection window remains.
+- Cap the SQLite writer cache at 2 GiB toward an 8 GiB working-memory target, retain folder headers instead of source bodies, and index sibling lookups instead of repeatedly scanning them.
+- Store at most 120 one-second ETA buckets, coalesce diagnostic progress checkpoints, and batch orphan-index cleanup across documents. Remote job identifiers and terminal states remain checkpointed.
+- Add regression coverage for backpressure, independent cancellation, nested admission, metadata ordering/rollback/shutdown, progress bursts, orphan cleanup and high-rate ETA accounting.
+
 ## 0.5.24 — Bound import duplicate checks and preserve write batching
 
 - Replace per-file full-library source-text duplicate scans with a scoped indexed content-hash lookup; preserve the existing per-base mutation lock and self-exclusion.

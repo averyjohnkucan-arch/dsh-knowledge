@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ArtifactRepository } from '../src/knowledge/artifacts.js'
 import { parsedTextDocument } from '../src/knowledge/parsed-document.js'
-import { ProcessingQueue } from '../src/knowledge/processing-queue.js'
+import { DocumentAdmission, ProcessingQueue } from '../src/knowledge/processing-queue.js'
 import { composeDocumentEvidence } from '../src/knowledge/evidence.js'
 import type { KnowledgeDocument } from '../src/knowledge/types.js'
 
@@ -13,6 +13,35 @@ afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recurs
 const output = () => parsedTextDocument('hello evidence', new TextEncoder().encode('source'), 'builtin', 'options')
 
 describe('processing lifecycle', () => {
+  it('backpressures simultaneous imports without treating congestion as a failed document', async () => {
+    const queue = new ProcessingQueue(2)
+    let running = 0, peak = 0, completed = 0
+    const tasks = Array.from({ length: 96 }, () => queue.run(async () => {
+      peak = Math.max(peak, ++running)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      running--; completed++
+    }, new AbortController().signal))
+    await Promise.all(tasks)
+    expect(peak).toBe(2)
+    expect(completed).toBe(96)
+  })
+
+  it('admits source reads globally, leaves capacity for text while OCR waits, and cancels unread sources', async () => {
+    const admission = new DocumentAdmission(2, 1)
+    let release!: () => void
+    const first = admission.run('one.pdf', () => new Promise<void>(resolve => { release = resolve }))
+    let readSecond = false
+    const controller = new AbortController()
+    const second = admission.run('two.pdf', async () => { readSecond = true }, controller.signal)
+    expect(await admission.run('small.md', async () => admission.run('nested.md', async () => 42))).toBe(42)
+    expect(readSecond).toBe(false)
+    controller.abort()
+    await expect(second).rejects.toMatchObject({ name: 'AbortError' })
+    release(); await first
+    admission.close()
+    expect(() => admission.run('late.md', async () => 1)).toThrow()
+  })
+
   it('stores immutable revisions and rejects cross-document access and tampering', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-artifacts-')); dirs.push(root)
     const repository = new ArtifactRepository(root)

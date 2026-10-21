@@ -32,7 +32,7 @@ import { MineruDeployment } from './mineru-deployment.js'
 import type { DocumentEvidence, ProcessingProgress, ParsedDocument } from './processing-types.js'
 import { composeDocumentEvidence } from './evidence.js'
 import { ExternalFolders, externalFile, readableRoot, pickFolder } from './external-folders.js'
-import { ProcessingQueue } from './processing-queue.js'
+import { DocumentAdmission, ProcessingQueue } from './processing-queue.js'
 import { processingBudget } from './processor-transport.js'
 import { retryDocument, markAttemptsExhausted, attemptsExhausted } from './document-retry.js'
 import { composeContextWindow, estimateContextTokens, serializeContextWindow } from './context.js'
@@ -334,6 +334,7 @@ export class KnowledgeService extends Service {
   private shuttingDown = false
   private readonly processingConcurrency = Math.max(2, Math.min(8, Math.floor(availableParallelism() / 3), Math.floor(freemem() / (2 * 1024 ** 3))))
   private readonly processingQueue = new ProcessingQueue(this.processingConcurrency)
+  private readonly documentAdmission = new DocumentAdmission(this.processingConcurrency * 16, Math.min(4, this.processingConcurrency))
   private readonly processingProgress = new Map<string, ProcessingProgress>()
   private readonly processingControllers = new Map<string, AbortController>()
 
@@ -389,6 +390,7 @@ export class KnowledgeService extends Service {
     }
     this.resolveStore()
     this.ctx.effect(() => () => {
+      this.documentAdmission.close()
       for (const controller of this.processingControllers.values()) controller.abort()
       for (const active of this.indexing.values()) active.controller?.abort()
     }, 'knowledge: cancel document processors')
@@ -1294,7 +1296,9 @@ export class KnowledgeService extends Service {
     const fallbackPayload = rawFilePath !== undefined ? undefined : request.contentBase64
     this.enqueueIngest(request.baseId, async () => {
       try {
-        return await retryDocument(async () => {
+        return await this.documentAdmission.run(fileName, () => retryDocument(async () => {
+          taskController.signal.throwIfAborted()
+          if (!store.getDocument(docId) || !store.getBase(request.baseId)) throw new DOMException('Import canceled', 'AbortError')
           // Prefer re-reading the persisted raw copy (the queue never holds file
           // contents in memory); fall back to the request payload only when the
           // deployment has no raw backend (e.g. in-memory test stores).
@@ -1332,7 +1336,7 @@ export class KnowledgeService extends Service {
             processed: extracted,
           }, taskController.signal)
           if (store.getDocument(docId)?.embeddingError) return false
-        }, { signal: taskController.signal })
+        }, { signal: taskController.signal }), taskController.signal)
       } catch (error) {
         this.indexing.delete(docId)
         taskController.abort()
@@ -1941,7 +1945,8 @@ export class KnowledgeService extends Service {
   async reindexDocument(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
     if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
     // Refreshing/resubmitting the same folder operation joins its live pass.
-    if (this.requireStore().getDocument(id)?.sourceType === 'directory') {
+    const header = this.requireStore().getDocument(id)
+    if (header?.sourceType === 'directory') {
       const mode = `${options.mode ?? 'sync'}:${options.strictSource === true}`
       const existing = this.directoryReindexes.get(id)
       if (existing) {
@@ -1953,7 +1958,7 @@ export class KnowledgeService extends Service {
       try { return await task }
       finally { if (this.directoryReindexes.get(id)?.task === task) this.directoryReindexes.delete(id) }
     }
-    return retryDocument(() => this.reindexDocumentAttempt(id, options))
+    return this.documentAdmission.run(header?.fileName ?? header?.title ?? '', () => retryDocument(() => this.reindexDocumentAttempt(id, options)))
   }
 
   private async reindexDocumentAttempt(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
@@ -2504,26 +2509,20 @@ export class KnowledgeService extends Service {
   /** Resolve a direct child by its physical source path. A legacy child can be
    * adopted only when its name and kind are unique; two candidates are an
    * explicit ambiguity, never a first-match guess. */
+  private directoryChildKey(child: KnowledgeDocument): string {
+    return child.sourcePath !== undefined
+      ? `${child.sourceType}:path:${this.sourcePathKey(child.sourcePath)}`
+      : `${child.sourceType}:name:${child.sourceType === 'directory' ? child.title : child.fileName ?? child.title}`
+  }
+
   private resolveDirectoryChild(
-    children: readonly KnowledgeDocument[],
-    kind: 'file' | 'directory',
-    diskPath: string,
-    name: string,
+    children: ReadonlyMap<string, readonly KnowledgeDocument[]>,
+    kind: 'file' | 'directory', diskPath: string, name: string,
   ): { document?: KnowledgeDocument; ambiguous?: readonly KnowledgeDocument[] } {
-    const expectedType: DocumentSourceType = kind === 'directory' ? 'directory' : 'file'
-    const fullPath = join(diskPath, name)
-    const exact = children.filter(child =>
-      child.sourceType === expectedType
-      && child.sourcePath !== undefined
-      && this.sameSourcePath(child.sourcePath, fullPath),
-    )
+    const exact = children.get(`${kind}:path:${this.sourcePathKey(join(diskPath, name))}`) ?? []
     if (exact.length > 1) return { ambiguous: exact }
     if (exact.length === 1) return { document: exact[0] }
-    const legacy = children.filter(child =>
-      child.sourceType === expectedType
-      && child.sourcePath === undefined
-      && (kind === 'directory' ? child.title : (child.fileName ?? child.title)) === name,
-    )
+    const legacy = children.get(`${kind}:name:${name}`) ?? []
     if (legacy.length > 1) return { ambiguous: legacy }
     return legacy.length === 1 ? { document: legacy[0] } : {}
   }
@@ -2597,6 +2596,18 @@ export class KnowledgeService extends Service {
       }
     }
 
+    // Index sibling identities once; scanning every sibling for every file is
+    // quadratic for flat libraries. Keep only headers in the retained tree.
+    const childPositions = new Map(children.map((child, index) => [child.id, index]))
+    const childLookup = new Map<string, KnowledgeDocument[]>()
+    const remember = (document: KnowledgeDocument): void => {
+      const { rawText: _rawText, ...header } = document
+      const key = this.directoryChildKey(header)
+      const matches = childLookup.get(key) ?? []
+      if (!matches.some(child => child.id === header.id)) matches.push(header)
+      childLookup.set(key, matches)
+    }
+    children.forEach(remember)
     // One rolling window spans the whole source tree, including sibling folders.
     for (const entry of entries) {
       if (this.shuttingDown || store.getBase(directory.baseId) === undefined || store.getDocument(directory.id) === undefined) {
@@ -2605,7 +2616,7 @@ export class KnowledgeService extends Service {
       const fullPath = join(diskPath, entry.name)
       const relativePath = this.relativeSourcePath(rootPath, fullPath)
       if (entry.isDirectory()) {
-        const resolved = this.resolveDirectoryChild(children, 'directory', diskPath, entry.name)
+        const resolved = this.resolveDirectoryChild(childLookup, 'directory', diskPath, entry.name)
         if (resolved.ambiguous !== undefined) {
           items.push({
             relativePath,
@@ -2624,13 +2635,15 @@ export class KnowledgeService extends Service {
           if (child === undefined) {
             child = await this.createDirectory(directory.baseId, entry.name, directory.id)
             action = 'created'
+            childPositions.set(child.id, children.length)
             children.push(child)
             childrenByParent.set(directory.id, children)
           }
           const bound = await this.bindDocumentSourcePath(child, fullPath)
+          remember(bound)
           if (bound !== child && action === 'unchanged') action = 'updated'
-          const childIndex = children.findIndex(candidate => candidate.id === child!.id)
-          if (childIndex >= 0) children[childIndex] = bound
+          const childIndex = childPositions.get(child.id)
+          if (childIndex !== undefined) children[childIndex] = bound
           items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
           await this.syncDirectoryNode({ meterId, checkLegacySettings, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items, fileJobs, heavyJobs })
         } catch (error) {
@@ -2639,7 +2652,7 @@ export class KnowledgeService extends Service {
         continue
       }
       if (!entry.isFile() || !DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
-      const resolved = this.resolveDirectoryChild(children, 'file', diskPath, entry.name)
+      const resolved = this.resolveDirectoryChild(childLookup, 'file', diskPath, entry.name)
       if (resolved.ambiguous !== undefined) {
         items.push({
           relativePath,
@@ -2654,7 +2667,7 @@ export class KnowledgeService extends Service {
       // More lightweight producers can fill RAM write batches while the shared
       // parser gate retains its existing CPU/OCR limit. Heavy files stay capped.
       if (!lightweight) while (heavyJobs.size >= this.processingConcurrency) await Promise.race(heavyJobs)
-      const fileJob = (async () => {
+      const fileJob = this.documentAdmission.run(entry.name, async () => {
         this.processingMeter.begin(meterId)
         let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
         try {
@@ -2666,14 +2679,18 @@ export class KnowledgeService extends Service {
             if (document === undefined) {
               document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
               action = 'created'
-              children.push(document)
+              const { rawText: _rawText, ...header } = document
+              childPositions.set(header.id, children.length)
+              children.push(header)
+              remember(header)
               childrenByParent.set(directory.id, children)
             } else {
               action = await this.syncDirectoryFile(document, fullPath, entry.name, checkLegacySettings)
               const refreshed = this.requireStore().getDocument(document.id)
               if (refreshed !== undefined) {
-                const documentIndex = children.findIndex(candidate => candidate.id === document!.id)
-                if (documentIndex >= 0) children[documentIndex] = refreshed
+                const documentIndex = childPositions.get(document.id)
+                const { rawText: _rawText, ...header } = refreshed
+                if (documentIndex !== undefined) children[documentIndex] = header
                 document = refreshed
               }
             }
@@ -2695,13 +2712,13 @@ export class KnowledgeService extends Service {
           return
         }
         this.processingMeter.settle(meterId, outcome)
-      })()
+      }, undefined, !lightweight)
       fileJobs.add(fileJob)
       if (!lightweight) heavyJobs.add(fileJob)
       void fileJob.finally(() => { fileJobs.delete(fileJob); heavyJobs.delete(fileJob) }).catch(() => {})
       // Replace each finished file immediately. A long scan must not stall
       // the other slots at an artificial batch boundary.
-      if (fileJobs.size >= this.processingConcurrency * 4) await Promise.race(fileJobs)
+      if (fileJobs.size >= this.processingConcurrency * 16) await Promise.race(fileJobs)
     }
   }
 
@@ -2712,7 +2729,7 @@ export class KnowledgeService extends Service {
   /** Persist source/placeholder before parsing, so path imports recover just
    * like uploads if the host stops during a long-running processor call. */
   private async ingestPathFile(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
-    return retryDocument(() => this.ingestPathFileAttempt(baseId, sourcePath, fileName, parentDirectoryId))
+    return this.documentAdmission.run(fileName, () => retryDocument(() => this.ingestPathFileAttempt(baseId, sourcePath, fileName, parentDirectoryId)))
   }
 
   private async ingestPathFileAttempt(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {

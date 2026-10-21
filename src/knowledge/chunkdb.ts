@@ -299,8 +299,10 @@ export class ChunkDatabase implements RetrievalLane {
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = NORMAL')
-    // One writer owns the RAM page cache; readers retain their small defaults.
-    const cacheMiB = Math.max(32, Math.min(4096, Math.floor(freemem() / (1024 ** 2 * 16))))
+    // Reserve most of the 8 GiB working-memory target for parsers, models and
+    // source/chunk buffers. One writer owns at most 2 GiB of cached pages;
+    // readers retain their small defaults. This is not an OS RSS hard limit.
+    const cacheMiB = Math.max(32, Math.min(2048, Math.floor(freemem() / (1024 ** 2 * 16))))
     this.db.exec(`PRAGMA cache_size = -${cacheMiB * 1024}`)
     this.db.exec('PRAGMA temp_store = MEMORY')
     this.db.exec('PRAGMA wal_autocheckpoint = 8192')
@@ -485,6 +487,31 @@ export class ChunkDatabase implements RetrievalLane {
       this.db.exec('COMMIT')
       return count
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  /** Coalesce concurrent header/source updates into one durable transaction.
+   * A malformed/stale document must not poison its healthy neighbours. */
+  putDocumentMetadataBatch(documents: readonly KnowledgeDocument[]): Array<unknown | undefined> {
+    const errors: Array<unknown | undefined> = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const doc of documents) {
+        this.db.exec('SAVEPOINT metadata_item')
+        try {
+          const pending = this.pendingDocumentGeneration(doc.id)
+          if (pending !== undefined && doc.processing?.revision !== pending.document.processing?.revision) throw new Error('stale_document_generation')
+          this.putDocumentMetadata(doc)
+          if (pending !== undefined) this.acknowledgeDocumentGeneration(doc.id)
+          this.db.exec('RELEASE metadata_item')
+          errors.push(undefined)
+        } catch (error) {
+          this.db.exec('ROLLBACK TO metadata_item'); this.db.exec('RELEASE metadata_item')
+          errors.push(error)
+        }
+      }
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return errors
   }
 
   putDocumentMetadata(document: KnowledgeDocument): void {
@@ -1015,6 +1042,25 @@ export class ChunkDatabase implements RetrievalLane {
       }
     }
     this.vectorCache.delete(baseId)
+  }
+
+  /** Startup GC must not commit the FTS index once per orphan document. */
+  async deleteChunksForDocuments(docIds: readonly string[]): Promise<void> {
+    const stmt = this.db.prepare(`DELETE FROM chunk WHERE rowid IN
+      (SELECT rowid FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id IN
+        (SELECT value FROM json_each(?)) ORDER BY rowid LIMIT ?)`)
+    for (let offset = 0; offset < docIds.length; offset += 256) {
+      const ids = docIds.slice(offset, offset + 256)
+      const parameter = JSON.stringify(ids)
+      while (stmt.run(parameter, DELETE_BATCH_SIZE).changes > 0) {
+        // No open transaction across awaits; foreground reads remain available.
+        await new Promise<void>(resolve => setImmediate(resolve))
+      }
+      const removed = new Set(ids)
+      for (const [baseId, entries] of this.vectorCache) {
+        this.vectorCache.set(baseId, entries.filter(entry => !removed.has(entry.docId)))
+      }
+    }
   }
 
   /**

@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { ProcessingMeter } from '../src/knowledge/processing-meter.js'
 
 describe('document progress and rolling ETA', () => {
+  it('keeps a bounded two-minute window even when fifty thousand files finish quickly', () => {
+    let now = 0
+    const meter = new ProcessingMeter(() => now)
+    meter.start('root', 'base'); meter.add('root', 100_000)
+    for (let i = 0; i < 50_000; i++) { now = i; meter.settle('root', 'processed') }
+    const samples = (meter as any).runs.get('root').samples
+    expect(samples.length).toBeLessThanOrEqual(120)
+    expect(meter.snapshots()[0].completed).toBe(50_000)
+    now += 120_000
+    expect(meter.snapshots()[0].etaSeconds).toBeNull()
+  })
   it('counts queued, running, processed, unchanged and failed separately', () => {
     let now = 0
     const meter = new ProcessingMeter(() => now)

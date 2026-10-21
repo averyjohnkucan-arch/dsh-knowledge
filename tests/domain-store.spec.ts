@@ -1599,3 +1599,47 @@ it('uses a scoped hash lookup for duplicate checks without loading source bodies
     scan.mockRestore()
   } finally { await store.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+it('batches concurrent metadata updates, isolates invalid records, and preserves mutation ordering', async () => {
+  const root = await tempDir(), domain = fakeDomain()
+  const store = await openStore({ open: async () => domain } as StorageDomainFacility, { chunkStorePath: join(root, 'metadata.sqlite') })
+  try {
+    await store.putBase({ id: 'b', name: 'b', description: '', createdAt: 1, updatedAt: 1 })
+    const doc = (id: string): KnowledgeDocument => ({ id, baseId: 'b', title: id, sourceType: 'text', charCount: 5, chunkCount: 0, createdAt: 1, rawText: 'hello' })
+    const batch = vi.spyOn((store as any).chunkDb, 'putDocumentMetadataBatch')
+    const results = await Promise.allSettled([
+      store.putDocument(doc('one')),
+      store.putDocument({ ...doc('invalid'), sourceType: 'invalid' as any }),
+      store.putDocument(doc('two')),
+    ])
+    expect(results.map(result => result.status)).toEqual(['fulfilled', 'rejected', 'fulfilled'])
+    expect(batch).toHaveBeenCalledOnce()
+    expect(store.getDocument('invalid')).toBeUndefined()
+    expect(store.getDocument('two')?.rawText).toBe('hello')
+    // A delete between two puts must not leapfrog a delayed batch.
+    const first = store.putDocument({ ...doc('one'), title: 'first' })
+    const remove = store.deleteDocument('one')
+    const last = store.putDocument({ ...doc('one'), title: 'last' })
+    await Promise.all([first, remove, last])
+    expect(store.getDocument('one')?.title).toBe('last')
+    const closingWrite = store.putDocument(doc('closing'))
+    await store.close(); await closingWrite
+    const reopened = await openStore({ open: async () => domain } as StorageDomainFacility, { chunkStorePath: join(root, 'metadata.sqlite') })
+    expect(reopened.getDocument('closing')?.rawText).toBe('hello')
+    await reopened.close()
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+it('sweeps orphan chunks in groups without deleting live search results', async () => {
+  const root = await tempDir(), domain = fakeDomain()
+  const store = await openStore({ open: async () => domain } as StorageDomainFacility, { chunkStorePath: join(root, 'gc.sqlite') })
+  try {
+    await store.putBase({ id: 'b', name: 'b', description: '', createdAt: 1, updatedAt: 1 })
+    await store.putDocument({ id: 'keep', baseId: 'b', title: 'keep', sourceType: 'text', charCount: 10, chunkCount: 1, createdAt: 1 })
+    await store.putChunkBatch([chunk('keep-c', 'keep', 'b', 0, 'surviving evidence'), ...Array.from({ length: 520 }, (_, i) => chunk('gc-' + i, 'orphan-' + i, 'b', 0, 'discarded evidence'))])
+    expect(await store.reconcileOrphanChunks()).toBe(520)
+    expect(store.listChunks('b').map(item => item.docId)).toEqual(['keep'])
+    ;(store as any).chunkDb.db.exec("INSERT INTO chunk_fts(chunk_fts,rank) VALUES('integrity-check',1)")
+    expect(await store.reconcileOrphanChunks()).toBe(0)
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }) }
+})
