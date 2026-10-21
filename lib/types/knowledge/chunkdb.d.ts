@@ -195,6 +195,10 @@ export declare class ChunkDatabase implements RetrievalLane {
      * 500 for the same reason).
      */
     listEmbeddingVectorsByHashes(hashes: readonly string[], embeddingModel: string): Map<string, number[]>;
+    docEmbeddingStatus(docId: string, expectedModel?: string): {
+        count: number;
+        embeddedCount: number;
+    };
     /** Per-doc chunk presence + embedding coverage in one grouped pass (listDocuments). */
     docChunkStatus(baseId: string, expectedModel?: string): {
         withChunks: Set<string>;

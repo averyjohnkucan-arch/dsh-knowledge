@@ -422,6 +422,18 @@ export declare class KnowledgeService extends Service {
      * once by the recursive operations.
      */
     private outermostSelectedIds;
+    documentStatus(id: string): {
+        embedded: boolean;
+        status: string;
+        chunkCount: number;
+        charCount: number;
+        tokenCount: number | undefined;
+        updatedAt: number | undefined;
+        embeddingError: string | undefined;
+        errorCode: "interrupted" | "dimension_mismatch" | "parse_failed" | "embedding_provider" | undefined;
+        indexingPhase: "parsing" | "embedding" | undefined;
+        indexingProgress: number | undefined;
+    };
     listDocumentsForUi(baseId: string): Promise<DocumentSummary[]>;
     listDocuments(baseId: string, summary?: {
         withChunks: Set<string>;
@@ -595,6 +607,11 @@ export declare class KnowledgeService extends Service {
             snippet: string;
         }>;
     };
+    baseLive(baseId: string): Promise<{
+        updatedAt: number;
+        syncStatus: import("./external-folders.js").FolderState | undefined;
+        stats: BaseStats;
+    }>;
     statsForUi(baseId?: string): Promise<BaseStats>;
     stats(baseId?: string, summary?: ReturnType<Store['chunkStats']>): BaseStats;
     search(request: SearchRequest, execution?: SearchExecutionOptions): Promise<SearchResult>;

@@ -496,6 +496,11 @@ export declare class KnowledgeApi {
      * Embed one probe text through the given (or current) embedding config and
      * return the vector width (Cherry's dimension probe, run before a save).
      */
+    baseLive(baseId: string): Promise<{
+        updatedAt: number;
+        syncStatus?: BaseSummary['syncStatus'];
+        stats: BaseStats;
+    }>;
     getEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
     prepareEmbeddingAcceleration(model?: string): Promise<import('../../knowledge/embedding-acceleration.js').EmbeddingAccelerationStatus>;
     probeEmbeddingDimensions(options?: {
@@ -657,6 +662,7 @@ export declare class KnowledgeApi {
             message: string;
         };
     }>>;
+    documentStatus(id: string): Promise<Pick<DocumentSummary, 'status' | 'embedded' | 'chunkCount' | 'charCount' | 'tokenCount' | 'updatedAt' | 'embeddingError' | 'errorCode' | 'indexingPhase' | 'indexingProgress'>>;
     getDocument(documentId: string, opts?: {
         rawTextLimit?: number;
     }): Promise<DocumentDetail>;
