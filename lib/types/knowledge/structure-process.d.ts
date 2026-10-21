@@ -5,6 +5,7 @@ export declare class StructureProcess {
     private env;
     private prefix;
     private child?;
+    private closing;
     private pending?;
     private get label();
     private sequence;
