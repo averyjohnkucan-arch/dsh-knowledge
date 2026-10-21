@@ -253,7 +253,7 @@ describe('bulk KB generation removal', () => {
 })
 
 describe('document-scoped publication query plan', () => {
-  it('uses the document index even without SQLite statistics and preserves other documents', () => {
+  it('uses a narrow chunk lookup without SQLite statistics and preserves other documents', () => {
     const db = openSeeded()
     const raw = (db as unknown as { db: DatabaseSync }).db
     const prepare = vi.spyOn(raw, 'prepare')
@@ -262,8 +262,8 @@ describe('document-scoped publication query plan', () => {
     const statement = prepare.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith('DELETE FROM chunk ') && sql.includes('base_id = ?'))
     expect(statement).toBeDefined()
     prepare.mockRestore()
-    const plan = raw.prepare('EXPLAIN QUERY PLAN ' + statement).all('d1', 'b1') as Array<{ detail: string }>
-    expect(plan.map(row => row.detail).join(' ')).toContain('chunk_doc_idx')
+    const plan = raw.prepare('EXPLAIN QUERY PLAN ' + statement).all('c1', 'd1', 'b1') as Array<{ detail: string }>
+    expect(plan.map(row => row.detail).join(' ')).toMatch(/chunk_doc_idx|sqlite_autoindex_chunk_1/)
     expect(db.listChunksByDoc('d2').map(chunk => chunk.id)).toEqual(['c2'])
     db.close()
   })
@@ -410,5 +410,51 @@ it('preserves full-text rows when rechunking only replaces IDs and evidence', as
     expect(db.getChunk('c1')).toBeUndefined()
     expect((await db.lexical('hello',['b1'],10)).hits[0].id).toBe('regenerated-id')
     expect(db.getChunk('regenerated-id')?.processingRevision).toBe('new-evidence')
+  } finally {db.close()}
+})
+
+it('keeps unchanged neighbour rows and postings when one passage changes', async () => {
+  const db = open(), raw = (db as unknown as {db: DatabaseSync}).db
+  try {
+    const chunks = [0,1,2].map(index => ({ id: `stable-${index}`, docId: 'doc', baseId: 'base', index, text: `Unchanged evidence passage ${index}`, context: 'title' }))
+    db.putChunks(chunks)
+    const before = raw.prepare("SELECT fts_rowid FROM chunk WHERE chunk_id='stable-0'").get()
+    raw.exec("CREATE TRIGGER protect_neighbours BEFORE DELETE ON chunk WHEN OLD.chunk_id IN ('stable-0','stable-2') BEGIN SELECT RAISE(ABORT,'unchanged neighbour deleted'); END")
+    const next = chunks.map(chunk => chunk.index === 1 ? { ...chunk, id: 'replacement', text: 'Revised middle passage' } : chunk)
+    db.publishDocumentGeneration({ id: 'doc', baseId: 'base', title: 'title', sourceType: 'text', charCount: 90, chunkCount: 3, createdAt: 1, updatedAt: 2 }, next, 1, true)
+    expect(raw.prepare("SELECT fts_rowid FROM chunk WHERE chunk_id='stable-0'").get()).toEqual(before)
+    expect((await db.lexical('Revised', ['base'], 10)).hits.map(hit => hit.id)).toEqual(['replacement'])
+    expect((await db.lexical('Unchanged', ['base'], 10)).hits.map(hit => hit.id).sort()).toEqual(['stable-0', 'stable-2'])
+    expect(db.listChunkIdentitiesByDoc('doc').map(chunk => chunk.id)).toEqual(['stable-0', 'replacement', 'stable-2'])
+  } finally { db.close() }
+})
+
+it('moves legacy inline text lazily, skips unchanged body writes and rolls back failed metadata changes', () => {
+  const db = open(), raw = (db as unknown as {db: DatabaseSync}).db
+  const doc = { id: 'legacy', baseId: 'base', title: 'Saved source', sourceType: 'text' as const, charCount: 12000, chunkCount: 0, createdAt: 1, updatedAt: 1 }
+  const text = 'source paragraph '.repeat(1000)
+  try {
+    raw.prepare('INSERT INTO knowledge_document(doc_id,base_id,header,raw_text) VALUES (?,?,?,?)').run(doc.id,doc.baseId,JSON.stringify(doc),text)
+    expect(db.getDocumentMetadata(doc.id)?.rawText).toBe(text)
+    db.putDocumentMetadata({...doc,rawText:text,incomplete:true})
+    expect(raw.prepare('SELECT raw_text FROM knowledge_document WHERE doc_id=?').get(doc.id)).toEqual({raw_text:null})
+    expect(db.listDocumentMetadata('base')[0].rawText).toBe(text)
+    expect(db.listDocumentMetadata('base',false)[0].rawText).toBeUndefined()
+    expect(db.hasDocumentsWithoutSource('base')).toBe(false)
+    raw.exec("CREATE TRIGGER forbid_source_rewrite BEFORE UPDATE ON knowledge_document_text BEGIN SELECT RAISE(ABORT,'source rewritten'); END")
+    db.putDocumentMetadata({...doc,rawText:text,updatedAt:2})
+    expect(db.getDocumentMetadata(doc.id)?.updatedAt).toBe(2)
+    raw.exec('DROP TRIGGER forbid_source_rewrite')
+    raw.exec("CREATE TRIGGER reject_header BEFORE UPDATE ON knowledge_document BEGIN SELECT RAISE(ABORT,'header failed'); END")
+    expect(()=>db.putDocumentMetadata({...doc,rawText:'replacement text',updatedAt:3})).toThrow('header failed')
+    expect(db.getDocumentMetadata(doc.id)?.rawText).toBe(text)
+    expect(db.getDocumentMetadata(doc.id)?.updatedAt).toBe(2)
+    raw.exec('DROP TRIGGER reject_header')
+    db.putDocumentMetadata({...doc,updatedAt:4})
+    expect(db.getDocumentMetadata(doc.id)?.rawText).toBeUndefined()
+    expect(db.hasDocumentsWithoutSource('base')).toBe(true)
+    db.putDocumentMetadata({...doc,rawText:text,updatedAt:5})
+    db.deleteDocumentMetadata(doc.id)
+    expect(raw.prepare('SELECT count(*) AS n FROM knowledge_document_text').get()).toEqual({n:0})
   } finally {db.close()}
 })

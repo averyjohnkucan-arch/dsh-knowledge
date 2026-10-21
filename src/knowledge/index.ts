@@ -29,7 +29,7 @@ import { ArtifactRepository } from './artifacts.js'
 import { processDocumentFile, processorFingerprint, processorErrorCode, processorErrorMessage, type ProcessedFile } from './document-processing.js'
 import { probeMineruLocal } from './mineru-local.js'
 import { MineruDeployment } from './mineru-deployment.js'
-import type { DocumentEvidence, ProcessingProgress } from './processing-types.js'
+import type { DocumentEvidence, ProcessingProgress, ParsedDocument } from './processing-types.js'
 import { composeDocumentEvidence } from './evidence.js'
 import { ExternalFolders, externalFile, readableRoot, pickFolder } from './external-folders.js'
 import { ProcessingQueue } from './processing-queue.js'
@@ -2055,8 +2055,18 @@ export class KnowledgeService extends Service {
     let rebuilt: Awaited<ReturnType<KnowledgeService['sourceTextOf']>>
     try {
       if (options.mode === 'rechunk') {
-        const parsed = document.processing !== undefined
-          ? await this.artifacts.load(document.baseId, document.id, document.processing) : undefined
+        let parsed: ParsedDocument | undefined
+        if (document.processing !== undefined) {
+          try { parsed = await this.artifacts.load(document.baseId, document.id, document.processing) }
+          catch (error) {
+            // Saved text is an explicit re-chunk fallback. A missing sidecar
+            // must not repeatedly fail/retry a document whose text survives.
+            // Corrupt or mismatched evidence is still an error, never ignored.
+            const missing = (error as { code?: string }).code === 'ENOENT'
+              || error instanceof Error && error.message === 'processing artifact is missing; reparse the source'
+            if (!missing) throw error
+          }
+        }
         rebuilt = { text: parsed?.text ?? document.rawText ?? reconstructFromChunks(store.listChunksByDoc(id)),
           ...(parsed !== undefined && document.processing !== undefined ? { processed: { text: parsed.text, parsed, processing: { ...document.processing, reused: true } } } : {}),
         }
@@ -2090,7 +2100,9 @@ export class KnowledgeService extends Service {
         processing: rebuilt.processed?.processing,
       }
       const pieces = this.processingChunks(rebuilt.processed, config)
-      await store.stageDocumentGeneration(candidate, [])
+      // The incomplete marker already makes this rebuild resumable. Persist
+      // staging only when actual embedding batches arrive, not an empty copy
+      // of the entire source text before every lexical-only rebuild.
       const { chunks, embeddingError, embeddingErrorCode } = await this.buildChunks(document.baseId, document.id, document.title, rebuilt.text, config, pieces, batch => store.stageDocumentGeneration(candidate, batch), controller.signal, candidate.processing?.revision)
       controller.signal.throwIfAborted()
       if (embeddingError !== undefined && document.chunkCount > 0) throw markAttemptsExhausted(Object.assign(new Error('embedding failed; the previous document generation was preserved'), { code: embeddingErrorCode }))
@@ -4586,6 +4598,16 @@ export class KnowledgeService extends Service {
       ...(piece.embedding !== undefined ? { embedding: piece.embedding } : {}),
       context: piece.heading !== undefined ? `${title} > ${piece.heading}` : title,
     }))
+    // Reusing byte-identical indexed passages must not churn their random
+    // primary keys, text payload pages or citation links on every rebuild.
+    const store = this.requireStore()
+    const identities = store.listChunkIdentitiesByDoc?.(docId)
+      ?? store.listChunksByDoc(docId).map(chunk => ({ id: chunk.id, index: chunk.index, text: chunk.text, searchText: chunkSearchText(chunk) }))
+    const previousByIndex = new Map(identities.map(chunk => [chunk.index, chunk]))
+    chunks.forEach((chunk, index) => {
+      const previous = previousByIndex.get(chunk.index)
+      if (previous?.text === chunk.text && previous.searchText === chunkSearchText(chunk)) chunks[index] = { ...chunk, id: previous.id }
+    })
     if (deferredKey) {
       // Preserve completed vectors before replacing the generation. Deferral
       // must not turn an unchanged reindex into a full embedding bill.
