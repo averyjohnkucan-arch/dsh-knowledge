@@ -353,6 +353,7 @@ export declare class KnowledgeService extends Service {
     /** Reindexing a tracked directory is the same operation as re-importing its
      * source: one source identity, one diff engine, and one truthful result. */
     private rescanDirectory;
+    private readonly folderSyncAgain;
     private folderSyncJobs;
     startFolderSync(sourceId: string): {
         jobId: string;
