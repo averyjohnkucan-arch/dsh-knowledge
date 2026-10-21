@@ -96,6 +96,9 @@ export declare class ChunkDatabase implements RetrievalLane {
     private migrateFtsRowidColumn;
     /** One transaction and a durable marker: stale legacy rows can never resurrect deletions. */
     migrateDocumentMetadata(records: Iterable<[string, KnowledgeDocument]>): number;
+    /** Coalesce concurrent header/source updates into one durable transaction.
+     * A malformed/stale document must not poison its healthy neighbours. */
+    putDocumentMetadataBatch(documents: readonly KnowledgeDocument[]): Array<unknown | undefined>;
     putDocumentMetadata(document: KnowledgeDocument): void;
     getDocumentMetadata(id: string): KnowledgeDocument | undefined;
     listDocumentMetadata(baseId?: string, includeRawText?: boolean): KnowledgeDocument[];
@@ -178,6 +181,8 @@ export declare class ChunkDatabase implements RetrievalLane {
     discardStagedDocumentGeneration(docId: string): void;
     deleteChunks(docId: string, baseId?: string): Promise<void>;
     deleteChunksByBase(baseId: string): Promise<void>;
+    /** Startup GC must not commit the FTS index once per orphan document. */
+    deleteChunksForDocuments(docIds: readonly string[]): Promise<void>;
     /**
      * Return space a large delete freed back to the OS (Cherry's
      * `KnowledgeIndexStore.reclaimSpace` + driver thresholds). Best-effort:

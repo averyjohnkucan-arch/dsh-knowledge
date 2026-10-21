@@ -140,6 +140,7 @@ export declare class KnowledgeService extends Service {
     private shuttingDown;
     private readonly processingConcurrency;
     private readonly processingQueue;
+    private readonly documentAdmission;
     private readonly processingProgress;
     private readonly processingControllers;
     constructor(ctx: Context, config: Config);
@@ -385,6 +386,7 @@ export declare class KnowledgeService extends Service {
     /** Resolve a direct child by its physical source path. A legacy child can be
      * adopted only when its name and kind are unique; two candidates are an
      * explicit ambiguity, never a first-match guess. */
+    private directoryChildKey;
     private resolveDirectoryChild;
     private syncDirectoryNode;
     private ingestDirectoryFile;
