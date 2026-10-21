@@ -63,6 +63,7 @@ describe('resolveConfig', () => {
       structuredChunking: true,
       semanticChunkCandidateTokens: 128,
       injectUsagePrompt: true,
+      localOcrGpuWorkers: 2,
       localEmbeddingThreads: 0,
       localEmbeddingInstances: 0,
       localEmbeddingMicroBatchSize: 1,

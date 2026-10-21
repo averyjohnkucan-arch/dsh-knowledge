@@ -1,0 +1,12 @@
+-r embedding-gpu-requirements.txt
+rapidocr==3.10.0
+opencv-python-headless==5.0.0.93
+pillow==13.0.0
+pyclipper==1.4.0
+shapely==2.2.0
+six==1.17.0
+omegaconf==2.4.0
+requests==2.34.2
+colorlog==6.12.0
+charset-normalizer==3.5.2
+urllib3==2.8.0

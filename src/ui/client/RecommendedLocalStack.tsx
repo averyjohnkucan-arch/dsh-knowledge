@@ -11,6 +11,8 @@ export const RECOMMENDED_LOCAL = {
 export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
   const [status, setStatus] = useState({ status: 'checking', progress: 0, message: '', device: 'cpu' })
   const [ocrAcceleration, setOcrAcceleration] = useState<Awaited<ReturnType<KnowledgeApi['getOcrAcceleration']>> | null>(null)
+  const [ocrWorkers, setOcrWorkers] = useState(2)
+  useEffect(() => { void api.getConfig().then(config => setOcrWorkers(config.localOcrGpuWorkers ?? 2)).catch(() => {}) }, [api])
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
   useEffect(() => {
     let live = true
@@ -44,8 +46,9 @@ export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
       <button style={style.button} disabled={busy} onClick={() => void apply()}>Use recommended defaults</button>
     </div>
     <EmbeddingPerformance api={api}/>
-    <h4 style={{ margin: '14px 0 6px' }}>OCR acceleration · CPU, Intel iGPU and NPU</h4>
-    <p style={style.hint}>Installs private inference libraries and calibrates available devices against known text. Uses measured queue times to distribute pages. NVIDIA stays reserved. The standard CPU engine remains available as fallback.</p>
+    <h4 style={{ margin: '14px 0 6px' }}>OCR acceleration · CPU, NPU, Intel iGPU and NVIDIA</h4>
+    <p style={style.hint}>Installs private inference libraries and calibrates available devices against known text. Uses measured queue times to distribute pages. Up to two NVIDIA workers help when the GPU is free. Foreground inference releases both GPUs and limits OCR to one four-thread CPU worker; NPU work continues. Bulk parsing/OCR across all knowledge bases takes priority over vectorization. The standard CPU engine remains available as fallback.</p>
+    <label style={{display:'block',marginBottom:8}}>Idle NVIDIA OCR workers <select value={ocrWorkers} onChange={event => { const count=Number(event.target.value);setOcrWorkers(count);void api.setConfig({localOcrGpuWorkers:count}).catch(error=>setError(String(error))) }} style={style.input}><option value={1}>1 worker</option><option value={2}>2 workers (recommended)</option></select></label>
     <button style={style.button} disabled={busy || ocrAcceleration?.status === 'installing'} onClick={() => { void api.prepareOcrAcceleration().then(setOcrAcceleration).catch(e => setError(String(e))) }}>Download / calibrate OCR acceleration</button>
     {ocrAcceleration?.devices.map(device => <div key={device.device} style={{ ...style.hint, marginTop: 6 }}>{device.name} · {device.qualified ? `Validated · ${Math.round(device.medianMs ?? 0)} ms per calibration page` : device.error ?? 'Unavailable'}</div>)}
     {ocrAcceleration?.status === 'installing' && <p role="status" style={style.hint}>Installing and calibrating OCR devices…</p>}

@@ -238,6 +238,7 @@ export interface KnowledgeDocument {
    */
   readonly incomplete?: boolean
   /** Last completed explicit re-vectorization pass. */
+  readonly semanticChunkingPending?: boolean
   readonly vectorizationRevision?: string
   /** Reason embedding failed at import/reindex time, when it degraded to lexical-only. */
   readonly embeddingError?: string
@@ -350,6 +351,7 @@ export interface KnowledgeConfig {
   /** Local-model worker idle timeout in ms (0 = never release; see Config). */
   localEmbeddingIgpuIdle?: boolean
   localEmbeddingMainGpuIdle?: boolean
+  localOcrGpuWorkers?: number
   localEmbeddingThreads?: number
   localEmbeddingInstances?: number
   localEmbeddingMicroBatchSize?: number

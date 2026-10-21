@@ -1550,7 +1550,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                 </span>
               </div>
 
-              {embeddingMigrationActive && <p style={{ fontSize: 12, color: C.muted }} role="status">Updating embedding vectors from existing chunks. No re-chunking or OCR is needed; lexical retrieval remains available.</p>}
+              {embeddingMigrationActive && <p style={{ fontSize: 12, color: C.muted }} role="status">Vectorization runs after queued parsing/OCR across all knowledge bases. Deferred semantic merging uses saved text without repeating OCR; lexical retrieval remains available.</p>}
               {processingSummary.filter(row => row.baseId === selectedBase.id).map(row => <div key={row.id} style={{ fontSize: 12, color: C.muted, margin: '8px 0 12px' }} role="status">
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                   {row.id.startsWith('embedding:') && <strong>Vectorization</strong>}
@@ -1567,7 +1567,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
                     </ul>
                   </details> : <span>0 failed</span>}
                   {row.active && <span>{row.queued.toLocaleString()} queued · {row.running} running</span>}
-                  <span>{row.discovering ? 'Discovering files…' : !row.active ? (row.completed >= row.total ? 'Finished' : 'Stopped before completion') : row.etaSeconds === null ? 'Estimating time remaining…' : `About ${row.etaSeconds < 60 ? `${row.etaSeconds}s` : `${Math.ceil(row.etaSeconds / 60)} min`} remaining`}</span>
+                  <span>{row.waitingReason ?? (row.discovering ? 'Discovering files…' : !row.active ? (row.completed >= row.total ? 'Finished' : 'Stopped before completion') : row.etaSeconds === null ? 'Estimating time remaining…' : `About ${row.etaSeconds < 60 ? `${row.etaSeconds}s` : `${Math.ceil(row.etaSeconds / 60)} min`} remaining`)}</span>
                 </div>
                 <progress aria-label={row.id.startsWith('embedding:') ? 'Vectorization progress' : 'Document processing progress'} max={Math.max(1, row.total)} value={row.discovering ? undefined : row.completed} title="ETA uses completions from the last two minutes" style={{ width: '100%', height: 5, marginTop: 6, accentColor: C.accent }} />
               </div>)}

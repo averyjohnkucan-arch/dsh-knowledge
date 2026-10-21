@@ -118,12 +118,14 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     // stored vector, so the embedding API must not be called again.
     embedTextsMock.mockClear()
     await service.reindexDocument(doc.id)
+    await service.waitForIdle()
     expect(embedTextsMock).not.toHaveBeenCalled()
 
     // A chunk-size change re-embeds only the newly sliced chunks.
     embedTextsMock.mockClear()
     await service.renameBase(base.id, { config: { chunkSize: 300 } })
     await service.reindexDocument(doc.id)
+    await service.waitForIdle()
     expect(embedTextsMock).toHaveBeenCalled()
 
     // A different embedding model invalidates every hash → full re-embed.
@@ -367,11 +369,32 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
 
     embedTextsMock.mockClear()
     const resumed = await service.reindexDocument(summary.id)
+    await service.waitForIdle()
     expect(resumed.chunkCount).toBe(fullChunks.length)
     // Only the missing chunks were embedded — the surviving one was reused.
     const resumedEmbeddings = embedTextsMock.mock.calls.flatMap(call => call[4])
     expect(resumedEmbeddings.length).toBe(fullChunks.length - 1)
     expect(resumedEmbeddings.some(text => text.includes('alpha'))).toBe(false)
     expect(resumedEmbeddings.some(text => text.includes('beta'))).toBe(true)
+  })
+})
+
+describe('OCR-first scheduling across knowledge bases', () => {
+  it('persists lexical text first and delays another base’s embeddings until parsing drains', async () => {
+    const service = await mountService()
+    const first = await service.createBase({name:'OCR queue'})
+    const second = await service.createBase({name:'Vector queue',config:{embeddingProvider:'openai',embeddingBaseUrl:'http://x',embeddingModel:'m1',embeddingApiKey:'k',semanticChunk:true}})
+    let finish!:()=>void
+    const gate=new Promise<void>(resolve=>{finish=resolve})
+    ;(service as unknown as {enqueueIngest(baseId:string, task:()=>Promise<void>):void}).enqueueIngest(first.id,()=>gate)
+    embedTextsMock.mockClear()
+    const doc=await service.addTextDocument({baseId:second.id,title:'Deferred semantic evidence',content:'The laboratory studies river water.\n\nThe laboratory checks river samples daily.'})
+    await new Promise(resolve=>setTimeout(resolve,150))
+    expect(embedTextsMock).not.toHaveBeenCalled()
+    expect(service.listChunks(doc.id).length).toBeGreaterThan(0)
+    expect(service.listChunks(doc.id).every(chunk=>chunk.embedding===undefined)).toBe(true)
+    finish();await service.waitForIdle()
+    expect(embedTextsMock).toHaveBeenCalled()
+    expect(service.listChunks(doc.id).every(chunk=>chunk.embeddingModel==='openai:m1')).toBe(true)
   })
 })

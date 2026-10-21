@@ -672,3 +672,7 @@ of document metadata to SQLite, and a full 50,000-file speedup has not been meas
 File parsing, imports and individual document rebuilds use three total attempts, with one- and two-second waits before retries. Parsing stays pending while it retries; only an exhausted run is marked failed, retaining the final error and uploaded source for manual rebuild. Existing embedding requests also use three attempts. Nested parser/import retries share exhaustion state, so a parser is not called nine times. Successfully processed siblings are not replayed when one file fails. A fresh manual rebuild starts a new run.
 
 Cancellation stops immediately. Uncertain remote submissions are not resubmitted automatically; their saved jobs remain available for reconciliation. Crash-recovery attempts remain bounded across restarts. Sync also rebuilds incomplete or errored files even when their stored bytes have not changed.
+
+### OCR-first background processing (0.5.14)
+
+Queued parsing/OCR across all KBs finishes before bulk vectorization. Saved text is searchable immediately; semantic merging and vectors follow without another OCR pass. Local Models offers one or two optional NVIDIA OCR workers. CPU/NPU work continues while GPUs are free; foreground inference releases GPU workers and limits CPU OCR to four threads. See [release notes and measured limits](docs/releases/v0.5.14.md).

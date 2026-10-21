@@ -12,7 +12,7 @@ import { embeddingAcceleration, embeddingFp16Acceleration, FP16_EMBEDDING_MODEL 
  */
 
 import { OcrAcceleration } from './ocr-acceleration.js'
-import { useOcrAcceleration } from './ocr-pool.js'
+import { enterOcrPoolForeground, useOcrAcceleration } from './ocr-pool.js'
 import { ProcessingMeter } from './processing-meter.js'
 import { StructureV3Manager } from './structure-v3.js'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -297,7 +297,11 @@ export class KnowledgeService extends Service {
   private readonly jobs = new Map<string, BackgroundJob>()
   readonly ocrAcceleration = new OcrAcceleration()
   private readonly processingMeter = new ProcessingMeter()
-  processingSummary() { return this.processingMeter.snapshots() }
+  processingSummary() {
+    const parsing = this.hasParsingWork()
+    return this.processingMeter.snapshots().map(row => row.active && row.id.startsWith('embedding:') && parsing
+      ? { ...row, etaSeconds: null, waitingReason: 'Waiting for parsing/OCR across all knowledge bases' } : row)
+  }
   private readonly indexing = new Map<string, { baseId: string; title: string; phase: 'parsing' | 'embedding'; total: number; progress: number; controller?: AbortController }>()
   /**
    * Progress values that linger after a job exits (Cherry's 60s TTL), so the
@@ -390,6 +394,7 @@ export class KnowledgeService extends Service {
     await this.ocrAcceleration.status()
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     setLocalEmbeddingTuning(resolved)
+    this.ocrAcceleration.configure(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
     embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
@@ -459,7 +464,7 @@ export class KnowledgeService extends Service {
       .map(base => ({ id: base.id, path: base.externalPath!, enabled: base.syncEnabled !== false,
         intervalMs: (base.syncIntervalSeconds ?? 60) * 1000 })), async id => {
       const base = this.requireStore().getBase(id)
-      if (!base?.externalPath || this.shuttingDown || this.embeddingBackfills.has(id)) return
+      if (!base?.externalPath || this.shuttingDown) return
       const result = await this.importDirectoryTree(id, base.externalPath)
       await readableRoot(base.externalPath)
       if (result.sync && result.sync.failed > 0) throw new Error(`${result.sync.failed} source item(s) could not be indexed; previous indexed data was retained where available`)
@@ -666,6 +671,7 @@ export class KnowledgeService extends Service {
     setLocalModelCacheDir(resolved.localModelCacheDir)
     setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
     setLocalEmbeddingTuning(resolved)
+    this.ocrAcceleration.configure(resolved)
     embeddingAcceleration.configure(localModelCacheDir(), resolved)
     embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
     setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
@@ -903,6 +909,22 @@ export class KnowledgeService extends Service {
     return next
   }
 
+  private readonly vectorPhaseDocuments = new Set<string>()
+  private readonly parseEpochs = new Map<string, number>()
+  private readonly deferredVectorDocuments = new Map<string, boolean>()
+  private hasParsingWork(): boolean {
+    return this.syncingRoots.size > 0
+      || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+      || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id))
+  }
+  private async waitForParsing(signal?: AbortSignal): Promise<void> {
+    while (this.hasParsingWork()) {
+      signal?.throwIfAborted()
+      if (this.shuttingDown) throw new Error('Knowledge plugin is shutting down')
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+  }
+
   private readonly embeddingBackfills = new Set<string>()
 
   /** Explicit full vector pass, separate from sync, parsing and chunking. */
@@ -928,9 +950,10 @@ export class KnowledgeService extends Service {
       // Restart its inventory under the new key; old vectors remain excluded.
       while (!this.shuttingDown && store.getBase(baseId)) {
         const key = embeddingKey(this.getConfigFor(baseId))
+        const epoch = this.parseEpochs.get(baseId)
         try { await this.runEmbeddingBackfill(baseId) }
         catch (error) { if (key === embeddingKey(this.getConfigFor(baseId))) throw error }
-        if (key === embeddingKey(this.getConfigFor(baseId))) break
+        if (key === embeddingKey(this.getConfigFor(baseId)) && epoch === this.parseEpochs.get(baseId)) break
       }
     } finally { this.embeddingBackfills.delete(baseId) }
   }
@@ -948,7 +971,7 @@ export class KnowledgeService extends Service {
     const forceRevision = store.getBase(baseId)?.embeddingBackfillRevision
     const missing = forceRevision ? undefined : store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
     const documents = store.listDocuments(baseId, { includeRawText: false })
-      .filter(doc => doc.sourceType !== 'directory' && (forceRevision ? doc.vectorizationRevision !== forceRevision : missing!.has(doc.id)))
+      .filter(doc => doc.sourceType !== 'directory' && (doc.semanticChunkingPending || (forceRevision ? doc.vectorizationRevision !== forceRevision : missing!.has(doc.id))))
     this.processingMeter.start(meterId, baseId)
     this.processingMeter.add(meterId, documents.length)
     this.directoryWriteBatches.set(baseId, (this.directoryWriteBatches.get(baseId) ?? 0) + 1)
@@ -958,6 +981,7 @@ export class KnowledgeService extends Service {
         if (this.shuttingDown || !store.getBase(baseId)) throw new Error('Embedding backfill stopped')
         if (passKey !== embeddingKey(this.getConfigFor(baseId))) throw new Error('Embedding model changed; restarting vector inventory')
         await new Promise<void>(resolve => setImmediate(resolve))
+        await this.waitForParsing()
         this.processingMeter.begin(meterId)
         try {
           await this.embedExistingDocument(doc.id, forceRevision)
@@ -993,6 +1017,18 @@ export class KnowledgeService extends Service {
     if (this.indexing.has(id)) throw new Error('Document is already being indexed')
     const config = this.getConfigFor(document.baseId), key = embeddingKey(config)
     if (!key) throw new Error('No embedding model configured')
+    await this.waitForParsing()
+    if (document.semanticChunkingPending) {
+      this.vectorPhaseDocuments.add(id)
+      try {
+        // Reuse saved parsing artifacts/raw text: this never invokes OCR again.
+        await this.reindexDocument(id, { mode: 'rechunk' })
+        const current = store.getDocument(id)
+        if (current?.embeddingError) throw new Error(current.embeddingError)
+        if (current) await store.putDocument({ ...current, semanticChunkingPending: false, ...(forceRevision ? { vectorizationRevision: forceRevision } : {}) })
+        return
+      } finally { this.vectorPhaseDocuments.delete(id) }
+    }
     const chunks = store.listChunksByDoc(id).map(chunk => ({ ...chunk }))
     if (!chunks.length) return
     const controller = new AbortController()
@@ -1015,6 +1051,7 @@ export class KnowledgeService extends Service {
       }
       const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8, config.embeddingBatchSize) : config.embeddingBatchSize)
       for (let i = 0; i < missing.length; i += batchSize) {
+        await this.waitForParsing(controller.signal)
         controller.signal.throwIfAborted()
         this.assertIndexTargetAlive(id, document.baseId)
         const indices = missing.slice(i, i + batchSize)
@@ -3173,7 +3210,7 @@ export class KnowledgeService extends Service {
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
   async enterEmbeddingForeground() {
-    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(), embeddingFp16Acceleration.enterForeground()])
+    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(), embeddingFp16Acceleration.enterForeground(), this.ocrAcceleration.enterForeground(), enterOcrPoolForeground()])
     const failed = releases.find(result => result.status === 'rejected')
     if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); throw failed.reason }
     return () => { for (const result of releases) if (result.status === 'fulfilled') result.value() }
@@ -4330,7 +4367,19 @@ export class KnowledgeService extends Service {
       if(config.keepInternalMarkdown)revision=await this.markdownSnapshots.save(document,text,chunks)
       signal?.throwIfAborted()
       this.assertIndexTargetAlive(document.id,document.baseId)
-      await this.requireStore().commitDocumentGeneration({...rest,indexingSettingsFingerprint:indexingSettingsFingerprint(config),...(revision?{markdownRevision:revision}:{})},chunks)
+      const deferred = this.deferredVectorDocuments.get(document.id)
+      if (deferred !== undefined) {
+        const base = this.requireStore().getBase(document.baseId)
+        if (base) await this.requireStore().putBase({ ...base, embeddingBackfillPending: true })
+      }
+      await this.requireStore().commitDocumentGeneration({...rest,
+        ...(deferred !== undefined ? { semanticChunkingPending: deferred } : {}),
+        indexingSettingsFingerprint:indexingSettingsFingerprint(config),...(revision?{markdownRevision:revision}:{})},chunks)
+      if (deferred !== undefined) {
+        this.deferredVectorDocuments.delete(document.id)
+        this.parseEpochs.set(document.baseId, (this.parseEpochs.get(document.baseId) ?? 0) + 1)
+        void this.backfillBaseEmbeddings(document.baseId).catch(error => this.ctx.logger.warn(`knowledge: deferred vectorization pending: ${String(error)}`))
+      }
     }catch(error){
       if(revision&&(error as {published?:boolean}).published!==true)await this.markdownSnapshots.removeRevision(document.baseId,document.id,revision).catch(()=>{})
       throw error
@@ -4366,6 +4415,14 @@ export class KnowledgeService extends Service {
     signal?: AbortSignal,
     processingRevision?: string,
   ): Promise<{ chunks: KnowledgeChunk[]; embeddingError?: string; embeddingErrorCode?: 'dimension_mismatch' | 'embedding_provider' }> {
+    let deferredKey: string | undefined
+    // Bulk import owns parsing slots until this method returns. Waiting here
+    // would deadlock the queue, so commit lexical chunks and persist a later pass.
+    if (!this.vectorPhaseDocuments.has(docId) && config.embeddingProvider !== 'none' && this.hasParsingWork()) {
+      deferredKey = embeddingKey(config)
+      this.deferredVectorDocuments.set(docId, config.semanticChunk && pieces === undefined)
+      config = { ...config, semanticChunk: false, embeddingProvider: 'none' }
+    }
     let slices: ReadonlyArray<ChunkPiece & { embedding?: number[] }>
     if (pieces !== undefined) {
       slices = pieces
@@ -4383,6 +4440,7 @@ export class KnowledgeService extends Service {
           for (let i = 0; i < segments.length; i += batchSize) {
             signal?.throwIfAborted()
             this.assertIndexTargetAlive(docId, baseId)
+            if (this.vectorPhaseDocuments.has(docId)) await this.waitForParsing(signal)
             const batch = segments.slice(i, i + batchSize)
             const embedded = await this.embedTextsOnce(config, batch.map(segment => segment.text))
             if (embedded.length !== batch.length) throw new Error('Semantic embedding count mismatch')
@@ -4432,6 +4490,16 @@ export class KnowledgeService extends Service {
       ...(piece.embedding !== undefined ? { embedding: piece.embedding } : {}),
       context: piece.heading !== undefined ? `${title} > ${piece.heading}` : title,
     }))
+    if (deferredKey) {
+      // Preserve completed vectors before replacing the generation. Deferral
+      // must not turn an unchanged reindex into a full embedding bill.
+      const hashes = chunks.map(chunk => hashEmbeddingText(chunkSearchText(chunk)))
+      const cached = this.requireStore().listEmbeddingVectorsByHashes(hashes, deferredKey)
+      for (let i = 0; i < chunks.length; i++) {
+        const vector = cached.get(hashes[i])
+        if (vector) chunks[i] = { ...chunks[i], embedding: vector, embeddingModel: deferredKey }
+      }
+    }
     let embeddingError: string | undefined
     let embeddingErrorCode: 'dimension_mismatch' | 'embedding_provider' | undefined
     if (config.embeddingProvider !== 'none' && chunks.length > 0) {
