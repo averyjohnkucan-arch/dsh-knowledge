@@ -373,5 +373,7 @@ it('file-backed vector search runs outside the event loop and preserves filters 
   db.putChunkBatch([{id:'one',docId:'d1',baseId:'b',index:0,text:'updated',embedding:[0,1],embeddingModel:'new'}]);
   expect((await db.vector([1,0],['b'],2,{embeddingModel:'m'})).hits.map(x=>x.id)).toEqual(['two']);
   await expect(db.vector([1,0],['b'],1,undefined,Date.now()-1)).rejects.toThrow(/deadline/);
+  const writer=new DatabaseSync(join(dir,'chunks.sqlite'));writer.prepare("UPDATE chunk SET source_spans='[{}]' WHERE chunk_id='two'").run();writer.close();
+  await expect(db.vector([1,0],['b'],1,{embeddingModel:'m'})).rejects.toThrow(/invalid persisted source spans/);
  }finally{db.close();await rm(dir,{recursive:true,force:true})}
 },15000)
