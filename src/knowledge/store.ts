@@ -335,7 +335,7 @@ class DomainStore implements Store {
   private queuePublication(doc: KnowledgeDocument, chunks: KnowledgeChunk[]): Promise<void> {
     if (this.closing) return Promise.reject(new Error('Knowledge store is closing'))
     const bytes = (doc.rawText?.length ?? 0) * 2 + 2048 + chunks.reduce((sum, chunk) => sum + chunk.text.length * 2 + (chunk.embedding?.length ?? 0) * 8 + 1024, 0)
-    if (this.pendingPublications.length >= 64 || this.publicationBytes + bytes > 64 * 1024 ** 2 && this.pendingPublications.length > 0) {
+    if (this.pendingPublications.length >= 256 || this.publicationBytes + bytes > 128 * 1024 ** 2 && this.pendingPublications.length > 0) {
       return Promise.reject(Object.assign(new Error('Document write buffer is full; retry later'), { code: 'busy' }))
     }
     const result = new Promise<void>((resolve, reject) => {
@@ -348,7 +348,7 @@ class DomainStore implements Store {
 
   private schedulePublications(): void {
     if (!this.pendingPublications.length || this.publicationFlush) return
-    if (this.closing || this.pendingPublications.length >= 32 || this.publicationBytes >= 8 * 1024 ** 2) void this.flushPublications()
+    if (this.closing || this.pendingPublications.length >= 128 || this.publicationBytes >= 16 * 1024 ** 2) void this.flushPublications()
     else if (!this.publicationTimer) this.publicationTimer = setTimeout(() => { void this.flushPublications() }, 50)
   }
 
@@ -359,9 +359,9 @@ class DomainStore implements Store {
     if (!this.pendingPublications.length) return Promise.resolve()
     const batch: typeof this.pendingPublications = []
     let bytes = 0
-    while (this.pendingPublications.length && batch.length < 64) {
+    while (this.pendingPublications.length && batch.length < 128) {
       const next = this.pendingPublications[0]
-      if (batch.length && bytes + next.bytes > 8 * 1024 ** 2) break
+      if (batch.length && bytes + next.bytes > 16 * 1024 ** 2) break
       batch.push(this.pendingPublications.shift()!); bytes += next.bytes
     }
     this.publicationBytes -= bytes
@@ -391,6 +391,7 @@ class DomainStore implements Store {
   }
 
   private documentWriteChain: Promise<void> = Promise.resolve()
+  private metadataBatch?: Array<{ doc: KnowledgeDocument; resolve(): void; reject(error: unknown): void }>
   constructor(
     private readonly domain: Domain<typeof knowledgeDomainSpec>,
     private readonly chunkDb: ChunkDatabase,
@@ -464,6 +465,24 @@ class DomainStore implements Store {
   }
 
   putDocument(doc: KnowledgeDocument): Promise<void> {
+    if (this.closing) return Promise.reject(new Error('Knowledge store is closing'))
+    if (this.sqliteDocuments) {
+      // Reserve the writer position on first arrival. Later deletes/publications
+      // remain ordered behind it, while concurrent updates share one commit.
+      if (!this.metadataBatch) {
+        const batch: NonNullable<DomainStore['metadataBatch']> = []
+        void this.writeDocuments(async () => {
+          if (this.metadataBatch === batch) this.metadataBatch = undefined
+          const errors = this.chunkDb.putDocumentMetadataBatch(batch.map(item => item.doc))
+          batch.forEach((item, index) => errors[index] ? item.reject(errors[index]) : item.resolve())
+        }).catch(error => {
+          if (this.metadataBatch === batch) this.metadataBatch = undefined
+          for (const item of batch) item.reject(error)
+        })
+        this.metadataBatch = batch
+      }
+      return new Promise<void>((resolve, reject) => { this.metadataBatch!.push({ doc, resolve, reject }) })
+    }
     return this.writeDocuments(async () => {
       const pending = this.chunkDb.pendingDocumentGeneration(doc.id)
       if (pending !== undefined && doc.processing?.revision !== pending.document.processing?.revision) {
@@ -484,6 +503,8 @@ class DomainStore implements Store {
   }
 
   private writeDocuments<T>(operation: () => Promise<T>): Promise<T> {
+    // A different mutation is an ordering barrier for metadata coalescing.
+    this.metadataBatch = undefined
     // A large import can keep resolving SQLite writes synchronously through
     // promise microtasks. Give sockets, cancellation and chat control a turn
     // between documents while preserving the single-writer ordering.
@@ -715,15 +736,9 @@ class DomainStore implements Store {
     for (const base of this.listBases()) {
       for (const doc of this.listDocuments(base.id, { includeRawText: false })) known.add(doc.id)
     }
-    let removed = 0
-    for (const docId of this.chunkDb.docIdsWithChunks()) {
-      if (known.has(docId)) continue
-      // deleteChunks batches the sweep, fires the FTS tombstones, and drops the
-      // doc from the vector cache — the same path a normal delete takes.
-      await this.chunkDb.deleteChunks(docId)
-      removed += 1
-    }
-    return removed
+    const orphanIds = [...this.chunkDb.docIdsWithChunks()].filter(docId => !known.has(docId))
+    await this.chunkDb.deleteChunksForDocuments(orphanIds)
+    return orphanIds.length
   }
 
   get retrievalLane(): RetrievalLane {

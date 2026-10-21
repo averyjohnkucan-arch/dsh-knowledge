@@ -102,13 +102,29 @@ async function processDocumentFileAttempt(input: ProcessFileInput, attempt: numb
   }
   await artifacts.saveJob(job)
   let progressWrite: Promise<void> = Promise.resolve()
+  let pendingProgress: ProcessingJobRecord | undefined
+  let progressTimer: ReturnType<typeof setTimeout> | undefined
+  const flushProgress = (): Promise<void> => {
+    if (progressTimer) clearTimeout(progressTimer)
+    progressTimer = undefined
+    if (pendingProgress) {
+      const snapshot = pendingProgress
+      pendingProgress = undefined
+      progressWrite = progressWrite.then(() => artifacts.saveJob(snapshot))
+      void progressWrite.catch(() => {})
+    }
+    return progressWrite
+  }
   const progress = (value: ProcessingProgress): void => {
+    const newExternalId = value.jobId !== undefined && value.jobId !== job.progress.jobId
     const retainedId = value.jobId ?? job.progress.jobId ?? matching?.progress.jobId
     job = { ...job, progress: { ...value, ...(retainedId !== undefined ? { jobId: retainedId } : {}) }, updatedAt: Date.now() }
     // Keep the external id even after download/normalization stage events.
-    const snapshot = job
-    progressWrite = progressWrite.then(() => artifacts.saveJob(snapshot))
-    void progressWrite.catch(() => {})
+    pendingProgress = job
+    // Live UI progress stays immediate. Coalesce diagnostic checkpoints, but
+    // persist a newly assigned remote job ID immediately for restart recovery.
+    if (newExternalId) void flushProgress()
+    else if (!progressTimer) progressTimer = setTimeout(() => { void flushProgress() }, 1000)
     input.onProgress?.(value)
   }
   const warnings: ProcessingWarning[] = []
@@ -190,13 +206,13 @@ async function processDocumentFileAttempt(input: ProcessFileInput, attempt: numb
     input.signal?.throwIfAborted()
     output = { ...output, document: { ...output.document, optionsFingerprint: fingerprint } }
     progress({ stage: 'normalizing' })
-    await progressWrite
+    await flushProgress()
     const processing = await artifacts.save(baseId, documentId, output)
     input.signal?.throwIfAborted()
     await artifacts.saveJob({ ...job, state: 'completed', artifact: processing, progress: { stage: 'completed' }, updatedAt: Date.now() })
     return { text: output.document.text, parsed: output.document, processing }
   } catch (error) {
-    await progressWrite.catch(() => {})
+    await flushProgress().catch(() => {})
     const canceled = input.signal?.aborted === true
     const uncertain = ['submission_unknown', 'job_lost'].includes(processorErrorCode(error))
     const recoveryExhausted = input.resume && (job.startupAttempts ?? 0) >= DOCUMENT_MAX_ATTEMPTS

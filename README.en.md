@@ -105,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.24.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.25.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -297,9 +297,9 @@ Filters apply only to the current request. No database migration, reindex, or do
 
 ---
 
-## v0.5.24 highlights
+## v0.5.25 highlights
 
-Preserve full publication batches when the SQLite writer is occupied, use indexed duplicate checks without loading every source body, and avoid bulk body reads during base deletion/restoration. See [release notes and measured limits](docs/releases/v0.5.24.md).
+Backpressure concurrent imports before reading source bytes, batch metadata and chunk publications, and retain only headers during folder reconciliation. The writer cache is capped at 2 GiB toward an 8 GiB working-memory target; OCR admits at most four heavy documents globally. See [release notes and measured limits](docs/releases/v0.5.25.md).
 
 ## v0.5.19 highlights
 
