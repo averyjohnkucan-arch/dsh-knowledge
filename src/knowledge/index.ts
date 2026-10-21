@@ -442,7 +442,7 @@ export class KnowledgeService extends Service {
         const reason = 'import was interrupted by a shutdown; reindex to resume'
         for (const id of resumeIds) {
           const doc = store.getDocument(id)
-          if (doc !== undefined) {
+          if (doc !== undefined && store.getBase(doc.baseId)) {
             // Clear the resumable marker as part of the decision: leaving it set
             // meant every later start re-marked the same document failed and
             // overwrote its real embeddingError with `interrupted`, forever.
@@ -538,8 +538,9 @@ export class KnowledgeService extends Service {
   private async resumeInterruptedDocuments(ids: readonly string[]): Promise<void> {
     const store = this.requireStore()
     for (const id of ids) {
+      if (this.shuttingDown) return
       const doc = store.getDocument(id)
-      if (doc === undefined || doc.sourceType === 'directory') continue
+      if (doc === undefined || !store.getBase(doc.baseId) || doc.sourceType === 'directory') continue
       try {
         if (doc.rawFilePath !== undefined && doc.rawText === undefined) {
           // Crash before the text was persisted: rebuild from the raw copy.
@@ -589,7 +590,7 @@ export class KnowledgeService extends Service {
         // A settled recovery failure must not be selected again on every boot.
         // Keep raw sources/chunks for a manual rebuild, but leave the row failed.
         const current = store.getDocument(id)
-        if (current !== undefined) {
+        if (current !== undefined && !this.shuttingDown && store.getBase(current.baseId)) {
           await store.putDocument({ ...current, incomplete: false, embeddingError: processorErrorMessage(error),
             errorCode: current.rawText === undefined ? 'parse_failed' : 'embedding_provider', updatedAt: Date.now() })
         }

@@ -611,6 +611,7 @@ class DomainStore implements Store {
     for (const header of this.sqliteDocuments ? this.chunkDb.listDocumentMetadata(undefined, false) : [...this.documents.entries()].map(([, doc]) => doc)) {
       const id = header.id
       let doc = header
+      if (!this.getBase(doc.baseId)) continue
       if (doc.sourceType === 'directory') continue
       // Parsing failed in a completed import. Keep its raw source for an
       // explicit retry, but never re-run a potentially paid processor at boot.
@@ -660,6 +661,7 @@ class DomainStore implements Store {
     const actual = this.chunkCountsByDoc(this.listBases().map(base => base.id))
     for (const doc of this.sqliteDocuments ? this.chunkDb.listDocumentMetadata(undefined, false) : [...this.documents.entries()].map(([, doc]) => doc)) {
       const id = doc.id
+      if (!this.getBase(doc.baseId)) continue
       if ((doc.chunkCount ?? 0) !== (actual.get(id) ?? 0)) {
         await this.documents.put(id, { ...(this.getDocument(id) ?? doc), chunkCount: actual.get(id) ?? 0 })
       }
@@ -973,6 +975,7 @@ class MemoryStore implements Store {
     let removed = 0
     const resume: string[] = []
     for (const [id, doc] of [...this.documents.entries()]) {
+      if (!this.getBase(doc.baseId)) continue
       if (doc.sourceType === 'directory') continue
       if (doc.errorCode === 'parse_failed') continue
       if (doc.incomplete === true) {

@@ -525,6 +525,7 @@ describe('ChunkDatabase (per-chunk SQL layout)', () => {
 
   it('keeps explicitly failed parser imports out of automatic recovery', async () => {
     const store = await openStore(undefined)
+    await store.putBase({id:'b1',name:'b1',description:'',createdAt:1,updatedAt:1})
     const failed: KnowledgeDocument = {
       id: 'failed', baseId: 'b1', title: 'scan.pdf', sourceType: 'file',
       rawFilePath: 'b1/scan.pdf', errorCode: 'parse_failed',
@@ -1537,5 +1538,22 @@ it('drains the RAM publication buffer on close and never resurrects a deleted ta
       expect(reopened.getDocument('d')).toBeUndefined()
       expect(reopened.getChunk('next')).toBeUndefined()
     } finally {await reopened.close()}
+  } finally {await store.close();await rm(root,{recursive:true,force:true})}
+})
+
+it.each(['domain','sqlite'] as const)('does not recover or rewrite retained metadata belonging to deleted bases (%s)', async backend => {
+  const root=await tempDir(),domain=fakeDomain()
+  const store=await openStore({open:async()=>domain} as StorageDomainFacility,{chunkStorePath:join(root,'orphan-recovery.sqlite'),legacyJsonPath:join(root,'missing.json'),documentMetadataBackend:backend})
+  try {
+    await store.putBase({id:'gone',name:'Deleted base',description:'',createdAt:1,updatedAt:1})
+    const doc:KnowledgeDocument={id:'retained',baseId:'gone',title:'Saved old text',sourceType:'text',rawText:'Saved text must not trigger phantom recovery.',charCount:44,chunkCount:17,incomplete:true,createdAt:1,updatedAt:1}
+    await store.putDocument(doc)
+    await store.deleteBase('gone')
+    const write=backend==='sqlite'?vi.spyOn((store as any).chunkDb,'putDocumentMetadata'):vi.spyOn(domain.table('documents'),'put')
+    expect(await store.recoverInterruptedImports(Date.now())).toEqual({removed:0,resume:[]})
+    await (store as any).reconcileChunkCounts()
+    expect(store.getDocument(doc.id)).toEqual(doc)
+    expect(write).not.toHaveBeenCalled()
+    write.mockRestore()
   } finally {await store.close();await rm(root,{recursive:true,force:true})}
 })
