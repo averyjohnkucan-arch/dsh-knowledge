@@ -114,6 +114,26 @@ function expectOrderedContextWindow(hit: SearchHit): void {
 }
 
 describe('KnowledgeService', () => {
+  it('persists the vectorization-pending marker once rather than once per imported document', async () => {
+    const service = await mountService()
+    const base = await service.createBase({ name: 'pending-marker' })
+    const one = await service.addTextDocument({ baseId: base.id, title: 'one', content: 'first source paragraph' })
+    const two = await service.addTextDocument({ baseId: base.id, title: 'two', content: 'second source paragraph' })
+    const internal = service as any
+    const writes = vi.spyOn(internal.store, 'putBase')
+    const backfill = vi.spyOn(internal, 'backfillBaseEmbeddings').mockResolvedValue(undefined)
+    try {
+      for (const doc of [one, two]) {
+        internal.deferredVectorDocuments.set(doc.id, false)
+        const chunks = internal.store.listChunks(base.id).filter((chunk: { docId: string }) => chunk.docId === doc.id)
+        await internal.commitIndexedGeneration(doc, chunks, 'source paragraph', service.getConfig())
+      }
+      expect(writes).toHaveBeenCalledTimes(1)
+      expect(internal.store.getBase(base.id).embeddingBackfillPending).toBe(true)
+      expect(backfill).toHaveBeenCalledTimes(2)
+    } finally { writes.mockRestore(); backfill.mockRestore() }
+  })
+
   it('creates a base, adds a text document, and searches lexically', async () => {
     const service = await mountService()
     const base = await service.createBase({ name: 'docs' })
@@ -1873,4 +1893,59 @@ it('keeps the shared file window busy across sibling folders while one earlier P
     expect(result.errors).toHaveLength(0);expect(result.imported).toBe(3)
     expect(service.listDocuments(base.id).filter(doc=>doc.sourceType==='file')).toHaveLength(3)
   } finally {release();await pending;parser.mockRestore();await rm(root,{recursive:true,force:true})}
+})
+
+it('reconciles indexing settings from saved parsing evidence without rerunning OCR', async () => {
+  const service=await mountService(), internal=service as any
+  const root=await mkdtemp(join(tmpdir(),'knowledge-settings-reconcile-'))
+  let parser:ReturnType<typeof vi.spyOn>|undefined
+  const backfill=vi.spyOn(internal,'backfillBaseEmbeddings').mockResolvedValue(undefined)
+  try {
+    await writeFile(join(root,'source.txt'),'Saved source text about orbital navigation. '.repeat(100))
+    const base=await service.createBase({name:'Settings reconciliation'})
+    await service.importDirectoryTree(base.id,root)
+    const doc=service.listDocuments(base.id).find(doc=>doc.sourceType==='file')!
+    const revision=doc.processing!.revision
+    await internal.store.putDocument({...internal.store.getDocument(doc.id),incomplete:true})
+    parser=vi.spyOn(internal,'extractDocumentText')
+    await service.renameBase(base.id,{config:{chunkSize:300}})
+    const result=await service.importDirectoryTree(base.id,root)
+    expect(result.sync?.failed).toBe(0);expect(result.sync?.updated).toBe(1)
+    expect(parser).not.toHaveBeenCalled()
+    expect(service.getDocument(doc.id).processing?.revision).toBe(revision)
+    await service.renameBase(base.id,{config:{embeddingProvider:'openai',embeddingModel:'new-vector-model',embeddingBaseUrl:'http://127.0.0.1:1'}})
+    const vectorChange=await service.importDirectoryTree(base.id,root)
+    expect(vectorChange.sync?.failed).toBe(0)
+    expect(parser).not.toHaveBeenCalled()
+    expect(service.getDocument(doc.id).processing?.revision).toBe(revision)
+    await writeFile(join(root,'source.txt'),'Changed source text about new findings. '.repeat(80))
+    await service.importDirectoryTree(base.id,root)
+    expect(parser).toHaveBeenCalledOnce()
+    expect(service.getDocument(doc.id).processing?.revision).not.toBe(revision)
+  } finally { parser?.mockRestore();backfill.mockRestore();await rm(root,{recursive:true,force:true}) }
+})
+
+it('queues one reconciliation behind a running folder import without canceling it', async () => {
+  const service=await mountService(), internal=service as any
+  const root=await mkdtemp(join(tmpdir(),'knowledge-join-sync-'))
+  let release!:()=>void
+  const gate=new Promise<void>(resolve=>{release=resolve})
+  const extract=internal.extractDocumentText.bind(service)
+  const parser=vi.spyOn(internal,'extractDocumentText').mockImplementation(async (input:any)=>{await gate;return extract(input)})
+  let running:Promise<any>|undefined
+  try {
+    await writeFile(join(root,'source.txt'),'Source text retained through a concurrent reconciliation request.')
+    const base=await service.createBase({name:'Join folder sync'})
+    running=service.importDirectoryTree(base.id,root)
+    await vi.waitFor(()=>expect(parser).toHaveBeenCalledOnce())
+    const source=service.listDocuments(base.id).find(doc=>doc.sourceType==='directory')!
+    await service.renameBase(base.id,{config:{chunkSize:500}})
+    const one=service.startFolderSync(source.id),two=service.startFolderSync(source.id)
+    expect(two.jobId).toBe(one.jobId)
+    expect(service.folderSyncStatus(one.jobId).state).toBe('running')
+    release();expect((await running).errors).toHaveLength(0)
+    await vi.waitFor(()=>expect(service.folderSyncStatus(one.jobId).state).toBe('complete'),{timeout:3000})
+    expect(service.folderSyncStatus(one.jobId).result?.failed).toBe(0)
+    expect(parser).toHaveBeenCalledOnce()
+  } finally {release();await running;parser.mockRestore();await rm(root,{recursive:true,force:true})}
 })
