@@ -1822,7 +1822,7 @@ describe('external folder knowledge', () => {
   })
 })
 
-it('overlaps file processing in a bounded rolling window and combines base timestamp writes', async () => {
+it.each([{ large: false, peak: 9 }, { large: true, peak: 4 }])('bounds lightweight read-ahead and preserves the heavy-file window ($large)', async (fixture) => {
   const service = await mountService()
   const root = await mkdtemp(join(tmpdir(), 'knowledge-batch-'))
   const privateService = service as unknown as { extractDocumentText(...args: unknown[]): Promise<unknown>; store: Store }
@@ -1831,17 +1831,17 @@ it('overlaps file processing in a bounded rolling window and combines base times
   let active = 0, peak = 0
   const parser = vi.spyOn(privateService, 'extractDocumentText').mockImplementation(async (...args) => {
     active++; peak = Math.max(peak, active)
-    try { await new Promise(resolve => setTimeout(resolve, 10)); return await extract(...args) }
+    try { await new Promise(resolve => setTimeout(resolve, 10)); return await extract(...(fixture.large ? [{ ...(args[0] as object), bytes: Buffer.from('Small parser fixture for ' + String((args[0] as {fileName?:string}).fileName)) }] : args)) }
     finally { active-- }
   })
   try {
-    for (let i = 0; i < 9; i++) await writeFile(join(root, `${i}.txt`), `Distinct article ${i} about astronomy and observation.`)
+    for (let i = 0; i < 9; i++) await writeFile(join(root, `${i}.txt`), `Distinct article ${i} about astronomy and observation.` + (fixture.large ? 'x'.repeat(1024 ** 2) : ''))
     const base = await service.createBase({ name: 'Batch fixture' })
     const writes = vi.spyOn(privateService.store, 'putBase')
     const result = await service.importDirectoryTree(base.id, root)
     expect(result.errors).toHaveLength(0)
     expect(result.imported).toBe(9)
-    expect(peak).toBe(4)
+    expect(peak).toBe(fixture.peak)
     expect(active).toBe(0)
     expect(writes.mock.calls.length).toBeLessThanOrEqual(3)
     expect(service.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(9)

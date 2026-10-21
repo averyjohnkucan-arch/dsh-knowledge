@@ -458,3 +458,28 @@ it('moves legacy inline text lazily, skips unchanged body writes and rolls back 
     expect(raw.prepare('SELECT count(*) AS n FROM knowledge_document_text').get()).toEqual({n:0})
   } finally {db.close()}
 })
+
+it('inserts fresh passages in bounded SQL groups without losing text, IDs or rollback isolation', async () => {
+  const db = open(), raw = (db as unknown as {db: DatabaseSync}).db
+  const prepare = vi.spyOn(raw,'prepare')
+  try {
+    const chunks = Array.from({length:130},(_,index)=>({id:`bulk-${index}`,docId:'bulk',baseId:'base',index,text:`Unique searchable evidence ${index}`}))
+    const doc = {id:'bulk',baseId:'base',title:'Bulk',sourceType:'text' as const,charCount:4000,chunkCount:130,createdAt:1,updatedAt:2}
+    db.publishDocumentGeneration(doc,chunks,1,true)
+    const inserts = prepare.mock.calls.map(([sql])=>sql).filter(sql=>sql.startsWith('INSERT INTO chunk\n'))
+    expect(inserts).toHaveLength(3)
+    expect(db.listChunksByDoc('bulk').map(chunk=>chunk.id)).toEqual(chunks.map(chunk=>chunk.id))
+    raw.exec("INSERT INTO chunk_fts(chunk_fts,rank) VALUES('integrity-check',1)")
+    raw.exec("CREATE TRIGGER reject_chunk BEFORE INSERT ON chunk WHEN NEW.chunk_id='bad-65' BEGIN SELECT RAISE(ABORT,'bad passage'); END")
+    const bad = chunks.map((chunk,index)=>({...chunk,id:`bad-${index}`,docId:'bad'}))
+    const errors = db.publishDocumentGenerations([
+      {doc:{...doc,id:'bad'},chunks:bad,previousCreatedAt:1,atomicMetadata:true},
+      {doc:{...doc,id:'good',chunkCount:1},chunks:[{...chunks[0],id:'good-row',docId:'good'}],previousCreatedAt:1,atomicMetadata:true},
+    ])
+    expect(errors[0]).toBeInstanceOf(Error);expect(errors[1]).toBeUndefined()
+    expect(db.listChunksByDoc('bad')).toHaveLength(0)
+    expect(db.getDocumentMetadata('bad')).toBeUndefined()
+    expect(db.listChunksByDoc('good')).toHaveLength(1)
+    raw.exec("INSERT INTO chunk_fts(chunk_fts,rank) VALUES('integrity-check',1)")
+  } finally {prepare.mockRestore();db.close()}
+})

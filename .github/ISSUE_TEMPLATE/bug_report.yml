@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: dsh-knowledge version
-      placeholder: 0.5.22
+      placeholder: 0.5.23
     validations:
       required: true
   - type: input
