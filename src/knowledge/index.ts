@@ -1089,7 +1089,7 @@ export class KnowledgeService extends Service {
       const chunkCount = documents.reduce((sum, doc) => sum + doc.chunkCount, 0)
       const charCount = documents.reduce((sum, doc) => sum + doc.charCount, 0)
       const tokenCount = documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
-      const storedDocCount = documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined || base.storageMode === 'external' && doc.processing !== undefined ? 1 : 0), 0)
+      const storedDocCount = documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined || doc.processing !== undefined ? 1 : 0), 0)
       const sourceInfo = baseSourceLines(documents)
       return {
         id: base.id,
@@ -3656,7 +3656,7 @@ export class KnowledgeService extends Service {
     return {
       ...(baseId !== undefined ? { baseId } : {}),
       documentCount: totals?.documentCount??documents.length,
-      storedDocCount: totals?.storedDocCount??documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined ? 1 : 0), 0),
+      storedDocCount: totals?.storedDocCount??documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined || doc.processing !== undefined ? 1 : 0), 0),
       chunkCount: chunkStats.count,
       charCount,
       tokenCount,
