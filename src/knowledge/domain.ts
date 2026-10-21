@@ -25,6 +25,7 @@ export const baseConfigSchema = z.object({
   rerankBaseUrl: z.string().optional(),
   rerankApiKey: z.string().optional(),
   localRerankTimeoutMs: z.number().int().gte(10_000).lte(300_000).optional(),
+  keepInternalMarkdown: z.boolean().optional(),
   smartChunk: z.boolean().optional(),
   chunkSeparator: z.string().optional(),
   chunkSize: z.number().int().gt(0).optional(),
@@ -99,6 +100,8 @@ export const documentProcessingInfoSchema = z.object({
 })
 
 export const documentSchema = z.object({
+  markdownRevision: z.string().optional(),
+  indexingSettingsFingerprint: z.string().optional(),
   id: z.string(),
   baseId: z.string(),
   title: z.string(),
@@ -137,6 +140,7 @@ export const configOverridesSchema = z.object({
   rerankBaseUrl: z.string().optional(),
   rerankApiKey: z.string().optional(),
   localRerankTimeoutMs: z.number().int().gte(10_000).lte(300_000).optional(),
+  keepInternalMarkdown: z.boolean().optional(),
   smartChunk: z.boolean().optional(),
   chunkSeparator: z.string().optional(),
   chunkSize: z.number().int().gt(0).optional(),
@@ -185,6 +189,7 @@ export const configOverridesSchema = z.object({
 
 /** Partial runtime config stored in the domain global slot. */
 export interface ConfigOverrides {
+  keepInternalMarkdown?: boolean
   embeddingProvider?: KnowledgeConfig['embeddingProvider']
   embeddingBaseUrl?: string
   embeddingModel?: string

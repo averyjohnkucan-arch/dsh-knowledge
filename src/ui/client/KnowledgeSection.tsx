@@ -973,6 +973,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
       `${t('cascadeImpactFiles')}: ${sum(impact => impact.files)}`,
       `${t('cascadeImpactChunks')}: ${sum(impact => impact.chunks)}`,
       `${t('cascadeImpactSnapshots')}: ${sum(impact => impact.rawSnapshots)}`,
+      'Any saved Markdown revisions for these indexed documents will also be deleted.',
     ]
   }, [t])
 
@@ -1001,6 +1002,31 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
       return next
     })
   }, [api, run, reloadDocuments, notify, notifySync, t, collectSubtreeIds])
+
+  const syncRequests=useRef(new Set<string>())
+  const syncMounted=useRef(true)
+  useEffect(()=>{syncMounted.current=true;return()=>{syncMounted.current=false}},[])
+  const syncDoc=useCallback(async(doc:DocumentSummary):Promise<void>=>{
+    if(syncRequests.current.has(doc.id))return
+    syncRequests.current.add(doc.id)
+    const navigation=navSeq.current
+    try{
+      const {jobId}=await api.startFolderSync(doc.id)
+      notify('info',`Sync started: ${doc.title}`);setPollKick(kick=>kick+1)
+      while(syncMounted.current){
+        const status=await api.folderSyncStatus(jobId)
+        if(!syncMounted.current)break
+        if(status.state==='failed')throw Error(status.error??'Folder sync failed')
+        if(status.state==='complete'){
+          if(status.result)notifySync(`Sync: ${doc.title}`,status.result)
+          if(navSeq.current===navigation)await reloadDocuments()
+          break
+        }
+        await new Promise<void>(resolve=>window.setTimeout(resolve,1500))
+      }
+    }catch(error){if(syncMounted.current)notify('error',error instanceof Error?error.message:String(error))}
+    finally{syncRequests.current.delete(doc.id)}
+  },[api,notify,notifySync,reloadDocuments])
 
   const refreshUrlDoc = useCallback(async (doc: DocumentSummary): Promise<void> => {
     await run(async () => {
@@ -1351,6 +1377,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
         { key: 'open', label: t('openFolder'), icon: <IconFolderOpen size={14} />, onSelect: () => drillIntoDirectory(doc.id) },
         { key: 'reindex', label: t('reindexButton'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc) },
         { key: 'rechunk', label: t('rechunkDocument'), icon: <IconRefresh size={14} />, onSelect: () => void reindexDoc(doc, 'rechunk') },
+        { key: 'sync', label: 'Sync', icon: <IconRefresh size={14} />, onSelect: () => void syncDoc(doc) },
         { key: 'sep' },
         { key: 'delete', label: t('delete'), danger: true, onSelect: () => setDialog({ kind: 'confirmDeleteDoc', doc }) },
       ]
@@ -2386,6 +2413,7 @@ function RecallResultCard(props: { hit: SearchHit; index: number; t: Translate }
           margin: 0, fontSize: 13, color: C.muted, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
           ...(expanded ? {} : { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }),
         }}>{displayText}</p>
+        {hit.indexedMarkdownUrl && <a href={hit.indexedMarkdownUrl} target="_blank" rel="noreferrer" style={{color:C.accent,fontSize:12}}>View indexed passage</a>}
         <SourceReferences documentId={hit.docId} spans={hit.sourceSpans} t={t} />
       </div>
     </div>
@@ -2630,6 +2658,7 @@ function DocumentDetailPanel(props: {
         </span>
         <span style={{ display: 'flex', gap: 2, background: C.surface2, borderRadius: 8, padding: 2, flexShrink: 0 }}>
           <button className="kb-row" style={tabStyle(mode === 'preview')} onClick={() => setMode('preview')}>{t('preview')}</button>
+          {doc.markdownRevision && <a style={{ ...tabStyle(false), textDecoration:'none' }} href={`/knowledge/documents/${encodeURIComponent(doc.id)}/markdown/${encodeURIComponent(doc.markdownRevision)}`} target="_blank" rel="noreferrer">Indexed Markdown</a>}
           {doc.sourceType === 'file' && <a style={{ ...tabStyle(mode === 'original'), textDecoration: 'none' }} href={`/knowledge/documents/${doc.id}/raw?inline=1`} target="_blank" rel="noreferrer">{t('originalDocument')}</a>}
           <button className="kb-row" style={tabStyle(mode === 'chunks')} onClick={() => setMode('chunks')}>{t('chunks')} ({doc.chunkCount})</button>
           {doc.processing ? <button className="kb-row" style={tabStyle(mode === 'evidence')} onClick={() => setMode('evidence')}>{t('evidence')}</button> : null}
@@ -2771,7 +2800,7 @@ function citationMarkdown(hit: SearchHit, t: Translate): string {
   const source = hit.heading !== undefined && hit.heading.length > 0
     ? `${hit.documentTitle} / ${hit.heading}`
     : hit.documentTitle
-  return `${quote}\n>\n> — ${source}${t('citationSource').replace('{id}', hit.baseId)}`
+  return `${quote}\n>\n> — ${source}${t('citationSource').replace('{id}', hit.baseId)}${hit.indexedMarkdownUrl?` [View indexed passage](${hit.indexedMarkdownUrl})`:''}`
 }
 
 function highlightMatches(text: string, query: string, markStyle: CSSProperties): JSX.Element {

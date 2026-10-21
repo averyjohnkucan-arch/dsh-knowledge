@@ -47,6 +47,7 @@ export interface BaseConfig {
   readonly rerankApiKey?: string
   /** Total local rerank budget, including queue wait (10–300 seconds). */
   readonly localRerankTimeoutMs?: number
+  readonly keepInternalMarkdown?: boolean
   readonly smartChunk?: boolean
   readonly chunkSeparator?: string
   readonly chunkSize?: number
@@ -195,6 +196,8 @@ export interface DeleteImpact {
 
 /** One imported document inside a knowledge base. */
 export interface KnowledgeDocument {
+  readonly markdownRevision?: string
+  readonly indexingSettingsFingerprint?: string
   readonly sourceSignature?: string
   readonly processing?: DocumentProcessingInfo
   readonly id: string
@@ -284,6 +287,7 @@ export interface KnowledgeConfig {
   /** Total local rerank budget, including queue wait (10–300 seconds). */
   readonly localRerankTimeoutMs: number
   /** Heading-aware chunking (Cherry Studio's 智能分段); off = delimiter-only. */
+  readonly keepInternalMarkdown?: boolean
   readonly smartChunk: boolean
   /** Chunk boundary separator when smartChunk is off. */
   readonly chunkSeparator: string
@@ -406,6 +410,7 @@ export interface ContextWindow {
 
 /** One ranked search result. */
 export interface SearchHit {
+  readonly indexedMarkdownUrl?: string
   readonly sourceSpans?: readonly DocumentSourceSpan[]
   readonly processingRevision?: string
   readonly chunkId: string
@@ -430,6 +435,7 @@ export interface SearchHit {
 
 /** Summary of one document, for listing UIs. */
 export interface DocumentSummary {
+  readonly markdownRevision?: string
   readonly processing?: DocumentProcessingInfo
   readonly id: string
   readonly baseId: string
@@ -522,6 +528,7 @@ export interface BaseStats {
 
 /** Full document view: metadata, raw text, and every chunk. */
 export interface DocumentDetail {
+  readonly markdownRevision?: string
   readonly processing?: DocumentProcessingInfo
   readonly id: string
   readonly baseId: string

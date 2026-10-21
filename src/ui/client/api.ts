@@ -23,6 +23,7 @@ export interface BaseConfig {
   rerankBaseUrl?: string
   rerankApiKey?: string
   localRerankTimeoutMs?: number
+  keepInternalMarkdown?: boolean
   smartChunk?: boolean
   chunkSeparator?: string
   chunkSize?: number
@@ -133,6 +134,7 @@ export interface DeleteImpact {
 }
 
 export interface DocumentSummary {
+  markdownRevision?: string
   id: string
   baseId: string
   title: string
@@ -209,6 +211,7 @@ export interface KnowledgeConfig {
   rerankBaseUrl: string
   rerankApiKey: string
   localRerankTimeoutMs: number
+  keepInternalMarkdown?: boolean
   smartChunk: boolean
   chunkSeparator: string
   chunkSize: number
@@ -258,6 +261,7 @@ export interface KnowledgeConfig {
 }
 
 export interface SearchHit {
+  indexedMarkdownUrl?: string
   chunkId: string
   docId: string
   baseId: string
@@ -350,6 +354,7 @@ export interface BaseStats {
 }
 
 export interface DocumentDetail {
+  markdownRevision?: string
   id: string
   baseId: string
   title: string
@@ -704,6 +709,9 @@ export class KnowledgeApi {
   cancelDirectoryImport(jobId: string): Promise<{ cancelled: boolean }> {
     return this.call('POST', `/import-directory/${encodeURIComponent(jobId)}/cancel`)
   }
+
+  startFolderSync(id:string):Promise<{jobId:string}>{return this.call('POST',`/documents/${encodeURIComponent(id)}/sync`,{})}
+  folderSyncStatus(jobId:string):Promise<{state:'running'|'complete'|'failed';result?:DirectorySyncResult;error?:string}>{return this.call('GET',`/folder-sync/${encodeURIComponent(jobId)}`)}
 
   getProcessingSummary(): Promise<ProcessingSnapshot[]> { return this.call('GET', '/processing-summary') }
 

@@ -15,4 +15,15 @@ describe('owned inference worker exit barrier',()=>{
    abort.abort();await worker.stopAndWait();expect(alive(pid)).toBe(false);expect((await request).message).toMatch(/canceled/)
   } finally {worker.dispose()}
  })
+ it('contains broken stdin pipe errors without crashing the host',async()=>{
+  const worker=new StructureProcess(process.execPath,['-e',program],process.env,'RESULT ')
+  try{
+   const pending=worker.request({wait:true},5000).catch(error=>error)
+   const child=(worker as unknown as {child:{stdin:{emit(event:string,error:Error):void}}}).child
+   const failure=Object.assign(new Error('broken pipe'),{code:'EPIPE'})
+   expect(()=>child.stdin.emit('error',failure)).not.toThrow()
+   expect((await pending).code).toBe('EPIPE');await worker.stopAndWait()
+  }finally{worker.dispose()}
+ })
+
 })

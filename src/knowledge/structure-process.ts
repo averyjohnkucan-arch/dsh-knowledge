@@ -22,6 +22,7 @@ export class StructureProcess {
     this.child = child; this.log = ''
     child.unref()
     child.stderr.on('data', data => { this.log = (this.log + data.toString()).slice(-6000) })
+    child.stdin.on('error', error => { if (this.child === child) this.stop(error) })
     const lines = createInterface({ input: child.stdout })
     lines.on('line', line => {
       if (this.child !== child || !line.startsWith(this.prefix)) return

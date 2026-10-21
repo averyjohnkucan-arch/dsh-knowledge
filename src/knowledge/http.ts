@@ -1,3 +1,4 @@
+import { renderMarkdownSnapshot } from './markdown-snapshots.js'
 /**
  * JSON HTTP surface for the knowledge service, served on the same origin as
  * the browser panel at `/knowledge/*`. Responses use a uniform envelope:
@@ -57,6 +58,17 @@ async function handleRequest(service: KnowledgeService, req: IncomingMessage, re
 
     if (segments[0] === 'embedding-acceleration' || segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
 
+    if(method==='GET'&&segments[0]==='documents'&&segments[2]==='markdown'&&segments.length===4){
+      const revision=segments[3],chunk=queryChunk(url.searchParams)
+      if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(revision))throw new InvalidRequestError('Invalid Markdown revision')
+      const snapshot=await service.getMarkdownSnapshot(segments[1],revision)
+      if(url.searchParams.get('format')==='json'){writeJson(res,200,{ok:true,value:snapshot});return}
+      if(chunk&&!snapshot.passages.some(passage=>passage.chunkId===chunk))throw new InvalidRequestError('Citation does not belong to the requested saved revision')
+      const download=url.searchParams.get('download')==='1'
+      const content=download?snapshot.text:renderMarkdownSnapshot(snapshot,chunk)
+      res.writeHead(200,{'content-type':download?'text/markdown; charset=utf-8':'text/html; charset=utf-8','x-content-type-options':'nosniff','cache-control':'private, no-store','content-security-policy':"sandbox; default-src 'none'; style-src 'unsafe-inline'",...(download?{'content-disposition':'attachment; filename="indexed.md"'}:{})})
+      res.end(content);return
+    }
     const body = method === 'GET' ? undefined : await readJson(req)
     const value = await route(service, method, segments, body ?? {}, url.searchParams)
     if (value === undefined) {
@@ -333,6 +345,9 @@ async function route(
   if (segments[0] === 'folder-picker' && method === 'POST') return service.pickSourceFolder()
 
   if (segments[0] === 'processing-summary' && method === 'GET') return service.processingSummary()
+
+  if(segments[0]==='folder-sync'&&segments.length===2&&method==='GET')return service.folderSyncStatus(segments[1])
+  if(segments[0]==='documents'&&segments.length===3&&segments[2]==='sync'&&method==='POST')return service.startFolderSync(segments[1])
 
   // /indexing-status
   if (segments[0] === 'indexing-status' && method === 'GET') {
@@ -632,3 +647,5 @@ function strictIntQuery(query: URLSearchParams, key: string, min: number, max: n
   if (raw.trim() === '' || !Number.isInteger(value) || value < min || value > max) throw new InvalidRequestError(`invalid ${key}`)
   return value
 }
+
+function queryChunk(query:URLSearchParams):string|undefined{const value=query.get('chunk');if(value===null)return undefined;if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value))throw new InvalidRequestError('Invalid citation chunk');return value}
