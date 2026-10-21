@@ -1,4 +1,7 @@
-/** Coalesce concurrent vector requests into bounded GPU batches, preserving order. */
+export declare class EmbeddingQueueTimeout extends Error {
+    constructor();
+}
+/** Coalesce concurrent vector requests into bounded batches, preserving order. */
 export declare class EmbeddingBatcher {
     private execute;
     private maxBatch;
@@ -10,7 +13,7 @@ export declare class EmbeddingBatcher {
         vectors: number[][];
         elapsedMs: number;
     }>, maxBatch?: number);
-    request(text: string, priority?: 'query' | 'index'): Promise<{
+    request(text: string, priority?: 'query' | 'index', maxQueueWaitMs?: number): Promise<{
         vector: number[];
         elapsedMs: number;
     }>;

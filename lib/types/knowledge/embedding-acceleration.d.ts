@@ -30,6 +30,8 @@ export declare class EmbeddingAcceleration {
     private checking;
     private polling;
     private stopped;
+    private npuRevalidation?;
+    private npuRecoveryLane?;
     private warming?;
     private warmed;
     private reference?;
@@ -61,6 +63,7 @@ export declare class EmbeddingAcceleration {
     private run;
     warm(): Promise<void>;
     embed(texts: readonly string[], purpose?: 'query' | 'index'): Promise<number[][]>;
+    private revalidateNpu;
     private stopGpu;
     enterForeground(): Promise<() => void>;
     private updateGpus;
