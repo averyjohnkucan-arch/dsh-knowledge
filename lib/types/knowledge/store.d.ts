@@ -85,6 +85,7 @@ export interface Store {
         includeRawText?: boolean;
     }): KnowledgeDocument[];
     getDocument(id: string): KnowledgeDocument | undefined;
+    findDocumentByContentHash?(baseId: string, contentHash: string, excludeId?: string): KnowledgeDocument | undefined;
     hasDocumentsWithoutSource(baseId: string): boolean;
     putDocument(doc: KnowledgeDocument): Promise<void>;
     deleteDocument(id: string): Promise<void>;

@@ -99,6 +99,8 @@ export declare class ChunkDatabase implements RetrievalLane {
     putDocumentMetadata(document: KnowledgeDocument): void;
     getDocumentMetadata(id: string): KnowledgeDocument | undefined;
     listDocumentMetadata(baseId?: string, includeRawText?: boolean): KnowledgeDocument[];
+    /** Duplicate checks must never load the library's source bodies. */
+    findDocumentByContentHash(baseId: string, contentHash: string, excludeId?: string): KnowledgeDocument | undefined;
     /** Check source availability without materializing the library's text. */
     hasDocumentsWithoutSource(baseId: string): boolean;
     deleteDocumentMetadata(id: string): boolean;
