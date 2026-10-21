@@ -315,6 +315,60 @@ export async function openStore(
 }
 
 class DomainStore implements Store {
+  private pendingPublications: Array<{ doc: KnowledgeDocument; chunks: KnowledgeChunk[]; bytes: number; resolve(): void; reject(error: unknown): void }> = []
+  private publicationBytes = 0
+  private publicationTimer?: ReturnType<typeof setTimeout>
+  private publicationFlush?: Promise<void>
+  private closing = false
+  private closePromise?: Promise<void>
+
+  private queuePublication(doc: KnowledgeDocument, chunks: KnowledgeChunk[]): Promise<void> {
+    if (this.closing) return Promise.reject(new Error('Knowledge store is closing'))
+    const bytes = (doc.rawText?.length ?? 0) * 2 + 2048 + chunks.reduce((sum, chunk) => sum + chunk.text.length * 2 + (chunk.embedding?.length ?? 0) * 8 + 1024, 0)
+    if (this.pendingPublications.length >= 64 || this.publicationBytes + bytes > 64 * 1024 ** 2 && this.pendingPublications.length > 0) {
+      return Promise.reject(Object.assign(new Error('Document write buffer is full; retry later'), { code: 'busy' }))
+    }
+    const result = new Promise<void>((resolve, reject) => {
+      this.pendingPublications.push({ doc, chunks, bytes, resolve, reject })
+      this.publicationBytes += bytes
+    })
+    if (this.pendingPublications.length >= 64 || this.publicationBytes >= 8 * 1024 ** 2) void this.flushPublications()
+    else if (!this.publicationTimer && !this.publicationFlush) this.publicationTimer = setTimeout(() => { void this.flushPublications() }, 10)
+    return result
+  }
+
+  private flushPublications(): Promise<void> {
+    if (this.publicationFlush) return this.publicationFlush
+    if (this.publicationTimer) clearTimeout(this.publicationTimer)
+    this.publicationTimer = undefined
+    if (!this.pendingPublications.length) return Promise.resolve()
+    const batch: typeof this.pendingPublications = []
+    let bytes = 0
+    while (this.pendingPublications.length && batch.length < 64) {
+      const next = this.pendingPublications[0]
+      if (batch.length && bytes + next.bytes > 8 * 1024 ** 2) break
+      batch.push(this.pendingPublications.shift()!); bytes += next.bytes
+    }
+    this.publicationBytes -= bytes
+    const flush = this.writeDocuments(async () => {
+      const valid: typeof batch = []
+      for (const item of batch) {
+        const current = this.documents.get(item.doc.id)
+        if (!current || current.baseId !== item.doc.baseId || current.createdAt !== item.doc.createdAt || !this.getBase(item.doc.baseId)) {
+          item.reject(new Error('document_generation_target_missing'))
+        } else valid.push(item)
+      }
+      const errors = this.chunkDb.publishDocumentGenerations(valid.map(item => ({ doc: item.doc, chunks: item.chunks, previousCreatedAt: item.doc.createdAt, atomicMetadata: true })))
+      valid.forEach((item, index) => { if (errors[index]) item.reject(errors[index]); else item.resolve() })
+    }).catch(error => { for (const item of batch) item.reject(error) })
+    this.publicationFlush = flush
+    void flush.finally(() => {
+      if (this.publicationFlush === flush) this.publicationFlush = undefined
+      if (this.pendingPublications.length) void this.flushPublications()
+    })
+    return flush
+  }
+
   private documentWriteChain: Promise<void> = Promise.resolve()
   constructor(
     private readonly domain: Domain<typeof knowledgeDomainSpec>,
@@ -437,16 +491,11 @@ class DomainStore implements Store {
   }
 
   commitDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[]): Promise<void> {
+    if (this.sqliteDocuments) return this.queuePublication(doc, chunks)
     return this.writeDocuments(async () => {
       const current = this.documents.get(doc.id)
       if (current === undefined || current.baseId !== doc.baseId || current.createdAt !== doc.createdAt || this.getBase(doc.baseId) === undefined) {
         throw new Error('document_generation_target_missing')
-      }
-      if (this.sqliteDocuments) {
-        // Metadata and retrieval rows now share one SQLite commit. A failed write
-        // preserves the previous generation; no cross-backend journal is needed.
-        this.chunkDb.publishDocumentGeneration(doc, chunks, current.createdAt, true)
-        return
       }
       this.chunkDb.stageDocumentGeneration(doc, chunks)
       this.chunkDb.publishDocumentGeneration(doc, chunks, current.createdAt)
@@ -717,10 +766,16 @@ class DomainStore implements Store {
     return next
   }
 
-  async close(): Promise<void> {
-    await this.documentWriteChain
-    this.chunkDb.close()
-    await this.domain.close()
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise
+    this.closing = true
+    this.closePromise = (async () => {
+      while (this.publicationFlush || this.pendingPublications.length) await this.flushPublications()
+      await this.documentWriteChain
+      this.chunkDb.close()
+      await this.domain.close()
+    })()
+    return this.closePromise
   }
 }
 

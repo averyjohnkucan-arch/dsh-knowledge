@@ -1933,13 +1933,27 @@ export class KnowledgeService extends Service {
     return next
   }
 
+  private readonly directoryReindexes = new Map<string, { mode: string; task: Promise<ReindexDocumentResult> }>()
   async reindexDocument(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
-    // Retry leaves only: never replay an entire directory's successful children.
-    if (this.requireStore().getDocument(id)?.sourceType === 'directory') return this.reindexDocumentAttempt(id, options)
+    if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
+    // Refreshing/resubmitting the same folder operation joins its live pass.
+    if (this.requireStore().getDocument(id)?.sourceType === 'directory') {
+      const mode = `${options.mode ?? 'sync'}:${options.strictSource === true}`
+      const existing = this.directoryReindexes.get(id)
+      if (existing) {
+        if (existing.mode !== mode) throw new Error('This folder is already being reindexed with different options')
+        return existing.task
+      }
+      const task = this.reindexDocumentAttempt(id, options)
+      this.directoryReindexes.set(id, { mode, task })
+      try { return await task }
+      finally { if (this.directoryReindexes.get(id)?.task === task) this.directoryReindexes.delete(id) }
+    }
     return retryDocument(() => this.reindexDocumentAttempt(id, options))
   }
 
   private async reindexDocumentAttempt(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
+    if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
     const store = this.requireStore()
     const document = store.getDocument(id)
     if (document === undefined) throw new Error(`document not found: ${id}`)
@@ -1963,6 +1977,7 @@ export class KnowledgeService extends Service {
       let failed = 0
       let firstError = ''
       for (const child of store.listDocuments(document.baseId, { includeRawText: false })) {
+        if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
         if (child.parentDirectoryId !== document.id) continue
         if (this.indexing.has(child.id)) continue
         try {

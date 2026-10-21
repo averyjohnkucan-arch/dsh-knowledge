@@ -1499,3 +1499,42 @@ it('external folders store no original copy and reconcile again after reopening 
     await store.close()
   } finally { await rm(dir, { recursive: true, force: true }) }
 }, 30000)
+
+it('collects concurrent completed documents in RAM and commits before acknowledging them', async () => {
+  const root=await tempDir(),domain=fakeDomain()
+  const store=await openStore({open:async()=>domain} as StorageDomainFacility,{chunkStorePath:join(root,'batch.sqlite')})
+  const internal=store as any
+  try {
+    await store.putBase({id:'b',name:'b',description:'',createdAt:1,updatedAt:1})
+    const docs=Array.from({length:8},(_,i)=>({id:'d'+i,baseId:'b',title:'doc',sourceType:'text' as const,charCount:5,chunkCount:1,createdAt:1,updatedAt:2}))
+    for(const doc of docs)await store.putDocument({...doc,chunkCount:0})
+    const publish=vi.spyOn(internal.chunkDb,'publishDocumentGenerations')
+    const jobs=docs.map(doc=>store.commitDocumentGeneration(doc,[chunk('c'+doc.id,doc.id,'b',0,'hello')]))
+    expect(store.listChunks('b')).toHaveLength(0)
+    await Promise.all(jobs)
+    expect(publish).toHaveBeenCalledOnce();expect(publish.mock.calls[0][0]).toHaveLength(8)
+    expect(store.listChunks('b')).toHaveLength(8)
+    publish.mockRestore()
+  } finally {await store.close();await rm(root,{recursive:true,force:true})}
+})
+
+it('drains the RAM publication buffer on close and never resurrects a deleted target', async () => {
+  const root=await tempDir(),domain=fakeDomain()
+  const store=await openStore({open:async()=>domain} as StorageDomainFacility,{chunkStorePath:join(root,'batch.sqlite')})
+  try {
+    await store.putBase({id:'b',name:'b',description:'',createdAt:1,updatedAt:1})
+    const doc={id:'d',baseId:'b',title:'doc',sourceType:'text' as const,charCount:5,chunkCount:1,createdAt:1,updatedAt:2}
+    await store.putDocument({...doc,chunkCount:0})
+    const publication=store.commitDocumentGeneration(doc,[chunk('c','d','b',0,'hello')])
+    await store.close();await publication
+    const reopened=await openStore({open:async()=>domain} as StorageDomainFacility,{chunkStorePath:join(root,'batch.sqlite')})
+    try {
+      expect(reopened.listChunksByDoc('d')).toHaveLength(1)
+      const next=reopened.commitDocumentGeneration({...doc,updatedAt:3},[chunk('next','d','b',0,'replacement')])
+      const rejected=expect(next).rejects.toThrow('target_missing')
+      await reopened.deleteDocument('d');await rejected
+      expect(reopened.getDocument('d')).toBeUndefined()
+      expect(reopened.getChunk('next')).toBeUndefined()
+    } finally {await reopened.close()}
+  } finally {await store.close();await rm(root,{recursive:true,force:true})}
+})

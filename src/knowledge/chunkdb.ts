@@ -22,7 +22,7 @@ import { Worker } from 'node:worker_threads'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { homedir, freemem } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { KnowledgeChunk, KnowledgeDocument } from './types.js'
 import { documentSchema } from './domain.js'
@@ -299,6 +299,11 @@ export class ChunkDatabase implements RetrievalLane {
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
     this.db.exec('PRAGMA synchronous = NORMAL')
+    // One writer owns the RAM page cache; readers retain their small defaults.
+    const cacheMiB = Math.max(32, Math.min(4096, Math.floor(freemem() / (1024 ** 2 * 16))))
+    this.db.exec(`PRAGMA cache_size = -${cacheMiB * 1024}`)
+    this.db.exec('PRAGMA temp_store = MEMORY')
+    this.db.exec('PRAGMA wal_autocheckpoint = 8192')
     this.db.exec('PRAGMA foreign_keys = OFF')
     // Abort long synchronous scans from inside SQLite itself. AbortSignal
     // timers cannot fire while DatabaseSync blocks the JS event loop, so the
@@ -768,32 +773,75 @@ export class ChunkDatabase implements RetrievalLane {
       chunks: rows.map(row => JSON.parse(row.chunk_json) as KnowledgeChunk).sort((a, b) => a.index - b.index) }
   }
 
-  /** Replace the live generation and its recovery record in ONE transaction. */
+  /** Publish a single generation through the same atomic RAM-batch path. */
   publishDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[], previousCreatedAt: number, atomicMetadata = false): void {
-    validateDocumentGeneration(doc, chunks)
-    if (doc.chunkCount !== chunks.length) throw new Error('document generation chunk count mismatch')
+    const [error] = this.publishDocumentGenerations([{ doc, chunks, previousCreatedAt, atomicMetadata }])
+    if (error) throw error
+  }
+
+  /** One WAL transaction, with a savepoint isolating each document's failure.
+   * Nothing is acknowledged or added to the vector cache before COMMIT. */
+  publishDocumentGenerations(entries: readonly { doc: KnowledgeDocument; chunks: KnowledgeChunk[]; previousCreatedAt: number; atomicMetadata?: boolean }[]): Array<Error | undefined> {
+    if (!entries.length) return []
+    const errors: Array<Error | undefined> = []
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      // Both columns are indexed separately. Without statistics SQLite may
-      // choose base_id and scan millions of passages for every document.
-      // This mutation is document-scoped; force its existing narrow index.
-      // A vector-only pass must not rebuild the text index. Verify the entire
-      // canonical generation before taking the narrow update path; changed
-      // text, evidence, ordering or IDs still use full atomic publication.
-      const previous = this.db.prepare(`SELECT chunk_id, idx, text, search_text, heading, context, source_spans, processing_revision
-        FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ? ORDER BY idx`).all(doc.id, doc.baseId)
-      const sameText = previous.length === chunks.length && previous.every((row, index) => {
-        const chunk=chunks[index]
-        return row.chunk_id===chunk.id && row.idx===chunk.index && row.text===chunk.text && row.search_text===searchTextOf(chunk)
-          && row.heading===(chunk.heading??null) && row.context===(chunk.context??null)
-          && row.source_spans===(chunk.sourceSpans!==undefined?JSON.stringify(chunk.sourceSpans):null)
-          && row.processing_revision===(chunk.processingRevision??null)
+      for (const entry of entries) {
+        this.db.exec('SAVEPOINT document_batch_item')
+        try {
+          this.publishDocumentGenerationRows(entry.doc, entry.chunks, entry.previousCreatedAt, entry.atomicMetadata ?? false)
+          this.db.exec('RELEASE document_batch_item')
+          errors.push(undefined)
+        } catch (error) {
+          this.db.exec('ROLLBACK TO document_batch_item')
+          this.db.exec('RELEASE document_batch_item')
+          errors.push(error instanceof Error ? error : new Error(String(error)))
+        }
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    entries.forEach((entry, index) => {
+      if (errors[index]) return
+      this.dropVectorCacheByDoc(entry.doc.id)
+      for (const chunk of entry.chunks) this.upsertVectorCache(chunk)
+    })
+    return errors
+  }
+
+  private publishDocumentGenerationRows(doc: KnowledgeDocument, chunks: KnowledgeChunk[], previousCreatedAt: number, atomicMetadata: boolean): void {
+    validateDocumentGeneration(doc, chunks)
+    if (doc.chunkCount !== chunks.length) throw new Error('document generation chunk count mismatch')
+    // Both columns are indexed separately. Without statistics SQLite may
+    // choose base_id and scan millions of passages for every document.
+    // This mutation is document-scoped; force its existing narrow index.
+    // A vector-only pass must not rebuild the text index. Verify the entire
+    // canonical text before taking the narrow update path; changed text
+    // still uses full atomic publication, while IDs/evidence can update in place.
+    const previous = this.db.prepare(`SELECT chunk_id, idx, text, search_text
+      FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ? ORDER BY idx`).all(doc.id, doc.baseId)
+    const oldPositions = new Map(previous.map((row, index) => [row.chunk_id, index]))
+    const sameText = previous.length === chunks.length && previous.every((row, index) => {
+      const chunk = chunks[index]
+      return row.idx === chunk.index && row.text === chunk.text && row.search_text === searchTextOf(chunk)
+        && (!oldPositions.has(chunk.id) || oldPositions.get(chunk.id) === index)
+    })
+    if (sameText) {
+      // ID/evidence/vector changes do not require trigram index tombstones.
+      const update = this.db.prepare(`UPDATE chunk SET chunk_id=?, heading=?, context=?, embedding=?, embedding_model=?,
+        embedding_text_hash=?, source_spans=?, processing_revision=? WHERE chunk_id=? AND doc_id=? AND base_id=?
+        AND (chunk_id IS NOT ? OR heading IS NOT ? OR context IS NOT ? OR embedding IS NOT ? OR embedding_model IS NOT ?
+          OR embedding_text_hash IS NOT ? OR source_spans IS NOT ? OR processing_revision IS NOT ?)`)
+      chunks.forEach((chunk, index) => {
+        const values = [chunk.id, chunk.heading ?? null, chunk.context ?? null,
+          chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null, chunk.embeddingModel ?? null,
+          chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
+          chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null]
+        update.run(...values, previous[index].chunk_id as string, doc.id, doc.baseId, ...values)
       })
-      if(sameText) {
-        const update=this.db.prepare('UPDATE chunk SET embedding=?, embedding_model=?, embedding_text_hash=? WHERE chunk_id=? AND doc_id=? AND base_id=?')
-        for(const chunk of chunks)update.run(chunk.embedding!==undefined?encodeEmbedding(chunk.embedding):null,chunk.embeddingModel??null,
-          chunk.embedding!==undefined?hashEmbeddingText(searchTextOf(chunk)):null,chunk.id,doc.id,doc.baseId)
-      } else {
+    } else {
       this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ?').run(doc.id, doc.baseId)
       const insert = this.db.prepare(`INSERT INTO chunk
         (chunk_id, doc_id, base_id, idx, text, search_text, heading, context, embedding, embedding_model, embedding_text_hash, source_spans, processing_revision)
@@ -802,19 +850,15 @@ export class ChunkDatabase implements RetrievalLane {
         chunk.heading ?? null, chunk.context ?? null, chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null,
         chunk.embeddingModel ?? null, chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
         chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null)
-      }
-      if (atomicMetadata) {
-        this.putDocumentMetadata(doc)
-        this.db.prepare('DELETE FROM document_generation_commit WHERE doc_id=?').run(doc.id)
-      } else this.db.prepare(`INSERT INTO document_generation_commit(doc_id, base_id, previous_created_at, next_document) VALUES (?, ?, ?, ?)
-        ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, previous_created_at = excluded.previous_created_at, next_document = excluded.next_document`)
-        .run(doc.id, doc.baseId, previousCreatedAt, JSON.stringify(doc))
-      this.db.prepare('DELETE FROM document_generation_stage WHERE doc_id = ?').run(doc.id)
-      this.db.prepare('DELETE FROM document_generation_chunk WHERE doc_id = ?').run(doc.id)
-      this.db.exec('COMMIT')
-    } catch (error) { this.db.exec('ROLLBACK'); throw error }
-    this.dropVectorCacheByDoc(doc.id)
-    for (const chunk of chunks) this.upsertVectorCache(chunk)
+    }
+    if (atomicMetadata) {
+      this.putDocumentMetadata(doc)
+      this.db.prepare('DELETE FROM document_generation_commit WHERE doc_id=?').run(doc.id)
+    } else this.db.prepare(`INSERT INTO document_generation_commit(doc_id, base_id, previous_created_at, next_document) VALUES (?, ?, ?, ?)
+      ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, previous_created_at = excluded.previous_created_at, next_document = excluded.next_document`)
+      .run(doc.id, doc.baseId, previousCreatedAt, JSON.stringify(doc))
+    this.db.prepare('DELETE FROM document_generation_stage WHERE doc_id = ?').run(doc.id)
+    this.db.prepare('DELETE FROM document_generation_chunk WHERE doc_id = ?').run(doc.id)
   }
 
   pendingDocumentGenerations(): PendingDocumentGeneration[] {
