@@ -1554,6 +1554,8 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
               {processingSummary.filter(row => row.baseId === selectedBase.id).map(row => <div key={row.id} style={{ fontSize: 12, color: C.muted, margin: '8px 0 12px' }} role="status">
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                   {row.id.startsWith('embedding:') && <strong>Vectorization</strong>}
+                  {row.id.startsWith('rechunk:') && <strong>Re-chunking saved text</strong>}
+                  {row.id.startsWith('reparse:') && <strong>Re-parsing sources</strong>}
                   <span>{row.completed.toLocaleString()} / {row.total.toLocaleString()} documents</span>
                   <span>{row.processed.toLocaleString()} processed · {row.skipped.toLocaleString()} unchanged</span>
                   {row.failed > 0 ? <details>

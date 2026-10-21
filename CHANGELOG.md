@@ -1,3 +1,10 @@
+## 0.5.21 — Folder rebuild progress and bounded producers
+
+- Report a dedicated re-chunk/reparse run across all nested source documents, with completed, running, queued, failures, and the existing rolling two-minute ETA.
+- Replace stale completed sync progress when a rebuild starts.
+- Feed the existing bounded RAM publication buffer with up to four concurrent rebuild producers; SQLite writes remain serialized and acknowledged after commit.
+- Read directory metadata once per rebuild subtree instead of rescanning the full base for each nested directory.
+
 ## 0.5.20 — RAM-buffered publication and fewer index rewrites
 
 - Join repeated folder rebuild requests and stop directory iteration on unload.

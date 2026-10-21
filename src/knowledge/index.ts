@@ -1974,18 +1974,64 @@ export class KnowledgeService extends Service {
       // reindex-subtree job keeps going; failing leaves are surfaced, not
       // fatal). Failures are collected and reported as a summary after the
       // sweep, so the user sees "N failed" instead of a silent partial run.
+      const children = new Map<string, KnowledgeDocument[]>()
+      for (const child of store.listDocuments(document.baseId, { includeRawText: false })) {
+        if (!child.parentDirectoryId) continue
+        const siblings = children.get(child.parentDirectoryId) ?? []
+        siblings.push(child)
+        children.set(child.parentDirectoryId, siblings)
+      }
+      const leaves: KnowledgeDocument[] = []
+      const pending = [document.id]
+      const visited = new Set<string>()
+      while (pending.length) {
+        const parent = pending.pop()!
+        if (visited.has(parent)) continue
+        visited.add(parent)
+        for (const child of children.get(parent) ?? []) {
+          if (child.sourceType === 'directory') pending.push(child.id)
+          else leaves.push(child)
+        }
+      }
+      const meterId = `${options.mode ?? 'reindex'}:${document.id}`
+      this.processingMeter.start(meterId, document.baseId)
+      this.processingMeter.add(meterId, leaves.length)
       let failed = 0
       let firstError = ''
-      for (const child of store.listDocuments(document.baseId, { includeRawText: false })) {
-        if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
-        if (child.parentDirectoryId !== document.id) continue
-        if (this.indexing.has(child.id)) continue
-        try {
-          await this.reindexDocument(child.id, options)
-        } catch (error) {
-          failed += 1
-          if (firstError === '') firstError = error instanceof Error ? error.message : String(error)
+      let cursor = 0
+      const worker = async (): Promise<void> => {
+        while (cursor < leaves.length) {
+          if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
+          const child = leaves[cursor++]
+          this.processingMeter.begin(meterId)
+          if (this.indexing.has(child.id)) {
+            this.processingMeter.settle(meterId, 'skipped')
+            continue
+          }
+          try {
+            await this.reindexDocument(child.id, options)
+            this.processingMeter.settle(meterId, 'processed')
+          } catch (error) {
+            failed += 1
+            const message = error instanceof Error ? error.message : String(error)
+            if (firstError === '') firstError = message
+            this.processingMeter.settle(meterId, 'failed', { documentId: child.id, title: child.title, message })
+          }
         }
+      }
+      try {
+        // Bounded producers let completed documents share the RAM publication
+        // buffer. SQLite still has exactly one serialized writer.
+        const results = await Promise.allSettled(Array.from({ length: Math.min(4, this.processingConcurrency, leaves.length) }, worker))
+        const rejected = results.find(result => result.status === 'rejected')
+        if (rejected?.status === 'rejected') throw rejected.reason
+        for (const directoryId of visited) {
+          if (directoryId === document.id) continue
+          const current = store.getDocument(directoryId)
+          if (current) await store.putDocument({ ...current, updatedAt: Date.now() })
+        }
+      } finally {
+        this.processingMeter.finish(meterId)
       }
       if (failed > 0) {
         throw new Error(`directory reindex finished with ${failed} failed item(s): ${firstError}`)

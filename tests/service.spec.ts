@@ -9,7 +9,7 @@ import { clampRawTextLimit, KnowledgeService, MAX_RAW_TEXT_LIMIT, NotFoundError 
 import { estimateContextTokens, serializeContextWindow } from '../src/knowledge/context.js'
 import type { Config } from '../src/knowledge/config.js'
 import type { KnowledgeService as KnowledgeServiceType } from '../src/knowledge/index.js'
-import type { SearchHit, SearchResult } from '../src/knowledge/types.js'
+import type { KnowledgeDocument, SearchHit, SearchResult } from '../src/knowledge/types.js'
 import type { Store } from '../src/knowledge/store.js'
 import { knowledgeRoute } from '../src/knowledge/http.js'
 import { KnowledgeApi } from '../src/ui/client/api.js'
@@ -1967,4 +1967,69 @@ it('joins repeated folder re-chunk requests instead of launching duplicate passe
     internal.shuttingDown=true
     await expect(service.reindexDocument(root.id,{mode:'rechunk'})).rejects.toMatchObject({name:'AbortError'})
   } finally {release();internal.shuttingDown=false;attempt.mockRestore()}
+})
+
+it('reports folder re-chunk progress across nested leaves separately from a completed sync', async () => {
+  const service = await mountService(), internal = service as any
+  const base = await service.createBase({ name: 'Rechunk progress' })
+  const root = await service.createDirectory(base.id, 'root')
+  const folder = await service.createDirectory(base.id, 'nested', root.id)
+  const leaf = await service.addFileDocument({ baseId: base.id, title: 'leaf', fileName: 'leaf.txt', parentDirectoryId: folder.id,
+    contentBase64: Buffer.from('Saved text for rebuilding chunks.').toString('base64') })
+  await service.waitForIdle()
+  internal.processingMeter.start(root.id, base.id)
+  internal.processingMeter.add(root.id)
+  internal.processingMeter.begin(root.id)
+  internal.processingMeter.settle(root.id, 'skipped')
+  internal.processingMeter.finish(root.id)
+  const original = internal.reindexDocumentAttempt.bind(service)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const attempt = vi.spyOn(internal, 'reindexDocumentAttempt').mockImplementation(async (id: any, options: any) => {
+    if (id === leaf.id) { await gate; throw new Error('test failure') }
+    return original(id, options)
+  })
+  const running = service.reindexDocument(root.id, { mode: 'rechunk' })
+  try {
+    await vi.waitFor(() => expect(service.processingSummary()).toEqual([expect.objectContaining({
+      id: `rechunk:${root.id}`, total: 1, completed: 0, running: 1, active: true,
+    })]))
+    const failure = expect(running).rejects.toThrow('1 failed')
+    release()
+    await failure
+    expect(service.processingSummary()).toEqual([expect.objectContaining({
+      total: 1, completed: 1, failed: 1, running: 0, active: false,
+      failures: [expect.objectContaining({ documentId: leaf.id, message: 'test failure' })],
+    })])
+  } finally { release(); await running.catch(() => {}); attempt.mockRestore() }
+})
+
+it('limits folder rebuild producers while reporting queued and running documents', async () => {
+  const service = await mountService(), internal = service as any
+  const base = await service.createBase({ name: 'Bounded rebuild' })
+  const root = await service.createDirectory(base.id, 'root')
+  const leaves: KnowledgeDocument[] = []
+  for (let i = 0; i < 7; i++) leaves.push(await service.addFileDocument({ baseId: base.id, title: `leaf${i}`, fileName: `leaf${i}.txt`, parentDirectoryId: root.id,
+    contentBase64: Buffer.from(`Source document ${i} for rebuild.`).toString('base64') }))
+  await service.waitForIdle()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const original = internal.reindexDocumentAttempt.bind(service)
+  let active = 0, peak = 0
+  const attempt = vi.spyOn(internal, 'reindexDocumentAttempt').mockImplementation(async (id: any, options: any) => {
+    const leaf = leaves.find(doc => doc.id === id)
+    if (!leaf) return original(id, options)
+    active++; peak = Math.max(peak, active)
+    try { await gate; return leaf } finally { active-- }
+  })
+  const running = service.reindexDocument(root.id, { mode: 'rechunk' })
+  try {
+    const limit = Math.min(4, internal.processingConcurrency)
+    await vi.waitFor(() => expect(service.processingSummary()).toEqual([expect.objectContaining({
+      total: 7, running: limit, queued: 7 - limit, completed: 0, active: true,
+    })]))
+    release(); await running
+    expect(peak).toBe(limit)
+    expect(service.processingSummary()).toEqual([expect.objectContaining({ total: 7, processed: 7, completed: 7, active: false })])
+  } finally { release(); await running.catch(() => {}); attempt.mockRestore() }
 })
