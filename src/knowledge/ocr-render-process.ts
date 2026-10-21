@@ -1,5 +1,6 @@
 /** Isolated, backpressured PDF rendering. One document per process owns MuPDF. */
 import * as engine from 'mupdf'
+import { encodeOcrRgb } from './ocr-png.js'
 const credits = new Set<() => void>()
 let active = false, outstanding = 0
 process.on('disconnect', () => process.exit(0))
@@ -27,7 +28,7 @@ process.on('message', (request: any) => {
           let scale = Math.min(preferred, Math.sqrt(request.pageBytes / (4 * area)) * .999, request.maxDimension / width, request.maxDimension / height)
           for (let attempt = 0; attempt < 4; attempt++) {
             let raster: engine.Pixmap | undefined
-            try { raster = page.toPixmap(engine.Matrix.scale(scale,scale),engine.ColorSpace.DeviceRGB,false); png = Buffer.from(raster.asPNG()); break }
+            try { raster = page.toPixmap(engine.Matrix.scale(scale,scale),engine.ColorSpace.DeviceRGB,false); png = encodeOcrRgb(raster.getWidth(),raster.getHeight(),raster.getStride(),raster.getPixels()); break }
             catch(error) { if(attempt===3 || !/malloc|memory|allocat/i.test(String(error)))throw error; scale /= 2 }
             finally { raster?.destroy() }
           }

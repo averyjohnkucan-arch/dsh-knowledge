@@ -11,8 +11,8 @@ export const RECOMMENDED_LOCAL = {
 export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
   const [status, setStatus] = useState({ status: 'checking', progress: 0, message: '', device: 'cpu' })
   const [ocrAcceleration, setOcrAcceleration] = useState<Awaited<ReturnType<KnowledgeApi['getOcrAcceleration']>> | null>(null)
-  const [ocrWorkers, setOcrWorkers] = useState(2)
-  useEffect(() => { void api.getConfig().then(config => setOcrWorkers(config.localOcrGpuWorkers ?? 2)).catch(() => {}) }, [api])
+  const [ocrWorkers, setOcrWorkers] = useState(8)
+  useEffect(() => { void api.getConfig().then(config => setOcrWorkers(config.localOcrGpuWorkers ?? 8)).catch(() => {}) }, [api])
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
   useEffect(() => {
     let live = true
@@ -39,18 +39,18 @@ export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }
   }
   return <section style={{ ...style.card, marginBottom: 16 }} aria-label="Recommended local pipeline">
-    <h3 style={{ margin: '0 0 8px', fontSize: 15 }}>Recommended local pipeline · CPU</h3>
-    <p style={style.hint}>Qwen3 Embedding 0.6B · BGE Reranker Base · PaddleOCR v5 · PP-StructureV3 layout, tables and charts alongside the built-in PDF parser. Runs locally without NVIDIA GPU memory. Model weights download separately.</p>
+    <h3 style={{ margin: '0 0 8px', fontSize: 15 }}>Recommended local pipeline</h3>
+    <p style={style.hint}>Qwen3 Embedding 0.6B · BGE Reranker Base · PaddleOCR v5 · PP-StructureV3 layout, tables and charts alongside the built-in PDF parser. CPU fallback remains available. OCR can also use NPU, Intel iGPU and available NVIDIA resources. Model weights download separately.</p>
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', margin: '12px 0' }}>
       <button style={style.button} disabled={busy || status.status === 'installing'} onClick={() => void install(true)}>Download recommended models</button>
       <button style={style.button} disabled={busy} onClick={() => void apply()}>Use recommended defaults</button>
     </div>
     <EmbeddingPerformance api={api}/>
     <h4 style={{ margin: '14px 0 6px' }}>OCR acceleration · CPU, NPU, Intel iGPU and NVIDIA</h4>
-    <p style={style.hint}>Installs private inference libraries and calibrates available devices against known text. Uses measured queue times to distribute pages. Up to two NVIDIA workers help when the GPU is free. Foreground inference releases both GPUs and limits OCR to one eight-thread CPU worker; NPU work continues. Bulk parsing/OCR across all knowledge bases takes priority over vectorization. The standard CPU engine remains available as fallback.</p>
-    <label style={{display:'block',marginBottom:8}}>Idle NVIDIA OCR workers <select value={ocrWorkers} onChange={event => { const count=Number(event.target.value);setOcrWorkers(count);void api.setConfig({localOcrGpuWorkers:count}).catch(error=>setError(String(error))) }} style={style.input}><option value={1}>1 worker</option><option value={2}>2 workers (recommended)</option></select></label>
+    <p style={style.hint}>Installs private inference libraries and calibrates available devices against known text. Uses measured queue times to distribute pages. Up to eight NVIDIA workers help when the GPU is free, with a VRAM headroom limit. Foreground inference releases both GPUs and limits OCR to one eight-thread CPU worker; NPU work continues. Bulk parsing/OCR across all knowledge bases takes priority over vectorization. The standard CPU engine remains available as fallback.</p>
+    <label style={{display:'block',marginBottom:8}}>Idle NVIDIA OCR workers <select value={ocrWorkers} onChange={event => { const count=Number(event.target.value);setOcrWorkers(count);void api.setConfig({localOcrGpuWorkers:count}).catch(error=>setError(String(error))) }} style={style.input}>{Array.from({length:8},(_,index)=>index+1).map(count=><option key={count} value={count}>{count} {count===1?'worker':'workers'}{count===8?' (throughput default)':''}</option>)}</select></label>
     <button style={style.button} disabled={busy || ocrAcceleration?.status === 'installing'} onClick={() => { void api.prepareOcrAcceleration().then(setOcrAcceleration).catch(e => setError(String(e))) }}>Download / calibrate OCR acceleration</button>
-    {ocrAcceleration?.devices.map(device => <div key={device.device} style={{ ...style.hint, marginTop: 6 }}>{device.name} · {device.qualified ? `Validated · ${Math.round(device.medianMs ?? 0)} ms per calibration page` : device.error ?? 'Unavailable'}</div>)}
+    {ocrAcceleration?.devices.map((device, index) => <div key={`${device.device}:${index}`} style={{ ...style.hint, marginTop: 6 }}>{device.name} · {device.qualified ? `Validated · ${device.enabled === false ? 'Paused' : device.pending ? 'Working' : 'Ready'} · ${device.completed ?? 0} OCR requests · ${Math.round(device.medianMs ?? 0)} ms estimate` : device.error ?? (device.enabled ? 'Validating' : 'Unavailable')}</div>)}
     {ocrAcceleration?.status === 'installing' && <p role="status" style={style.hint}>Installing and calibrating OCR devices…</p>}
     {ocrAcceleration?.status === 'error' && <p role="alert" style={{ ...style.hint, color: C.danger }}>{ocrAcceleration.message}</p>}
     <h4 style={{ margin: '14px 0 6px' }}>PP-StructureV3 · layout, tables and charts</h4>

@@ -36,6 +36,13 @@ const REQUIRED_FILES = [
   'lib/knowledge/embed-process.mjs',
   'lib/knowledge/rerank-process.mjs',
   'lib/knowledge/ocr-process.mjs',
+  'lib/knowledge/ocr-render-process.mjs',
+  'lib/knowledge/benchmark-ocr.mjs',
+  'scripts/ocr-cuda-worker.py',
+  'scripts/ocr-ctc.py',
+  'scripts/ocr-gpu-requirements.txt',
+  'scripts/ocr-accelerator-worker.py',
+  'scripts/benchmark-ocr-corpus.mjs',
   'lib/knowledge/pdf-parse-worker.mjs',
   'lib/knowledge/chunk-read-worker.mjs',
   'lib/tool-knowledge/index.js',
@@ -45,8 +52,8 @@ const REQUIRED_FILES = [
 // the first is git-ignored, the second is unreferenced, and neither has any
 // reason to reach a consumer. Listing them here means a later change to the
 // `files` allowlist cannot publish them by accident.
-const FORBIDDEN_PREFIXES = ['src/', 'tests/', 'node_modules/', '.git/', '.github/', 'docs/superpowers/', 'docs/issues/', 'docs/images/']
-const FORBIDDEN_FILES = ['lib/knowledge/private-python-benchmark.mjs','lib/knowledge/embed-benchmark.mjs','lib/knowledge/embedding-benchmark.mjs','lib/knowledge/indexing-baseline.mjs','lib/knowledge/indexing-optimized.mjs','lib/knowledge/ocr-accelerated.mjs','lib/knowledge/ocr-baseline.mjs','lib/knowledge/ocr-optimized.mjs','lib/knowledge/ocr-process-baseline.mjs','lib/knowledge/release-validation.mjs','lib/knowledge/embed-worker.mjs', 'lib/knowledge/embed-worker.mjs.map', 'lib/knowledge/ocr-worker.mjs', 'lib/knowledge/ocr-worker.mjs.map']
+const FORBIDDEN_PREFIXES = ['scripts/__pycache__/','src/', 'tests/', 'node_modules/', '.git/', '.github/', 'docs/superpowers/', 'docs/issues/', 'docs/images/']
+const FORBIDDEN_FILES = ['lib/knowledge/ocr-final-handoff.mjs','lib/knowledge/ocr-replay-final.mjs','scripts/ocr-cuda-baseline.py','scripts/ocr-cuda-candidate.py','scripts/ocr-intel-baseline.py','scripts/ocr-intel-candidate.py','lib/knowledge/ocr-replay-baseline.mjs','lib/knowledge/ocr-replay-candidate.mjs','lib/knowledge/ocr-replay-pool.mjs','lib/knowledge/ocr-render-baseline.mjs','lib/knowledge/pdf-parse-baseline.mjs','lib/knowledge/ocr-png-bench.mjs','lib/knowledge/private-python-benchmark.mjs','lib/knowledge/embed-benchmark.mjs','lib/knowledge/embedding-benchmark.mjs','lib/knowledge/indexing-baseline.mjs','lib/knowledge/indexing-optimized.mjs','lib/knowledge/ocr-accelerated.mjs','lib/knowledge/ocr-baseline.mjs','lib/knowledge/ocr-optimized.mjs','lib/knowledge/ocr-process-baseline.mjs','lib/knowledge/release-validation.mjs','lib/knowledge/embed-worker.mjs', 'lib/knowledge/embed-worker.mjs.map', 'lib/knowledge/ocr-worker.mjs', 'lib/knowledge/ocr-worker.mjs.map']
 
 function executable(name) {
   return process.platform === 'win32' ? `${name}.cmd` : name

@@ -182,7 +182,7 @@ export const configOverridesSchema = z.object({
   localModelCacheDir: z.string().optional(),
   localEmbeddingIgpuIdle: z.boolean().optional(),
   localEmbeddingMainGpuIdle: z.boolean().optional(),
-  localOcrGpuWorkers: z.number().int().gte(1).lte(2).optional(),
+  localOcrGpuWorkers: z.number().int().gte(1).lte(8).optional(),
   localEmbeddingThreads: z.number().int().gte(0).lte(64).optional(),
   localEmbeddingInstances: z.number().int().gte(0).lte(4).optional(),
   localEmbeddingMicroBatchSize: z.number().int().gte(1).lte(8).optional(),

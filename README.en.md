@@ -105,7 +105,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.13.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.17.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -297,7 +297,11 @@ Filters apply only to the current request. No database migration, reindex, or do
 
 ---
 
-## v0.5.13 highlights
+## v0.5.17 highlights
+
+- Faster lossless PDF raster encoding, compact CUDA OCR output, a bounded parser pool, and rolling folder imports. See [the OCR benchmark](benchmarks/ocr/README.md) for measured results and reproducible commands.
+
+### Earlier 0.5.13 changes
 
 Enable **Keep internal Markdown** in a base's settings → Advanced to save future indexed text revisions for citation highlighting. The setting is off by default and does not rewrite existing documents when saved. Use a folder's fourth **Sync** menu action to apply changed source files and processing settings. Unchanged work is reused. Saved passage links preserve their indexed revision while retention remains enabled; original-source links remain available. Turning retention off and syncing removes all saved Markdown revisions recursively, while preserving indexed text, vectors and original files. A retention-only cleanup does not repeat parsing or embedding.
 

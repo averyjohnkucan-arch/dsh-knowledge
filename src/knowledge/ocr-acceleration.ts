@@ -12,9 +12,9 @@ import { createHash } from 'node:crypto'
 import { localModelCacheDir } from './embed.js'
 import { StructureProcess } from './structure-process.js'
 
-interface Device { device: string; name: string; qualified: boolean; medianMs?: number; error?: string }
+interface Device { device: string; name: string; qualified: boolean; medianMs?: number; error?: string; enabled?: boolean; pending?: number; completed?: number }
 export interface OcrAccelerationStatus { status: 'not_installed' | 'installing' | 'ready' | 'error'; message: string; devices: Device[] }
-interface Lane { device: Device; process: StructureProcess; pending: number; tail: Promise<unknown>; samples: number[]; runs: number; failed: boolean; enabled: boolean; current?: Promise<unknown>; retryAt?: number }
+interface Lane { device: Device; process: StructureProcess; pending: number; tail: Promise<unknown>; samples: number[]; runs: number; failed: boolean; enabled: boolean; current?: Promise<unknown>; retryAt?: number; completed?: number }
 const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, import.meta.url))
 export function acceleratorEnvironment(root: string): NodeJS.ProcessEnv {
   const env = { ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '', PYTHONUNBUFFERED: '1', PYTHONDONTWRITEBYTECODE: '1' }
@@ -29,6 +29,9 @@ export function acceleratorEnvironment(root: string): NodeJS.ProcessEnv {
 export class OcrAcceleration {
   private lanes: Lane[] = []
   private loadedRoot?: string
+  private modelHash?: string
+  private cudaQualifiedHash?: string
+  private cudaQualification?: Promise<void>
   private state?: OcrAccelerationStatus
   private preparation?: Promise<void>
   private setupChild?: ChildProcess
@@ -40,8 +43,8 @@ export class OcrAcceleration {
   private readonly intelAvailability = new IntelEmbeddingAvailability()
   private unregisterDevices = registerBackgroundDevices(() => this.lanes.map(lane => lane.process.pid))
   private gpuRetryAt = 0
-  private gpuWorkers = 2
-  configure(options: { localOcrGpuWorkers?: number } = {}): void { this.gpuWorkers = Math.max(1, Math.min(2, options.localOcrGpuWorkers ?? 2)) }
+  private gpuWorkers = 8
+  configure(options: { localOcrGpuWorkers?: number } = {}): void { this.gpuWorkers = Math.max(1, Math.min(8, options.localOcrGpuWorkers ?? 8)) }
   private gpuPython(): string { return join(localModelCacheDir(), 'embedding-gpu-runtime', 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') }
   private makeLane(device: Device): Lane {
     const cuda = device.device.startsWith('CUDA')
@@ -67,6 +70,14 @@ export class OcrAcceleration {
     let released = false
     return () => { if (!released) { released = true; this.foreground--; if (!this.foreground) for (const lane of cpu) lane.enabled = true } }
   }
+  private async balanceCpu(): Promise<void> {
+    const cpu = this.lanes.filter(lane => lane.device.device === 'CPU')
+    const gpuHeavy = this.lanes.filter(lane => lane.device.device.startsWith('CUDA') && lane.enabled && !lane.failed).length >= 4
+    await Promise.all(cpu.slice(1).map(async lane => {
+      if (this.foreground || gpuHeavy) { if (lane.enabled) await this.stopLane(lane) }
+      else if (!lane.failed) lane.enabled = true
+    }))
+  }
   private async updateDevices(): Promise<void> {
     if (this.stopped || this.polling || !this.loadedRoot) return
     this.polling = true
@@ -77,22 +88,27 @@ export class OcrAcceleration {
       const intel = active && idle ? await this.intelAvailability.sample(owned()) : { available: false }
       const nvidia: Awaited<ReturnType<typeof nvidiaEmbeddingAvailability>> = active && idle ? await nvidiaEmbeddingAvailability(owned) : { available: false, reason: 'OCR is idle or foreground inference is active' }
       if (this.stopped || this.foreground) { intel.available = false; nvidia.available = false }
+      // Reserve headroom; each additional CUDA process can retain two model
+      // arenas plus a context. Existing workers already count against free VRAM.
+      const resident = this.lanes.filter(lane => lane.device.device.startsWith('CUDA') && lane.process.pid !== undefined).length
+      const target = Math.min(this.gpuWorkers, resident + Math.floor(Math.max(0, (nvidia.freeMiB ?? 0) - 2048) / 2048))
       for (const lane of this.lanes.filter(lane => /^GPU|^CUDA/.test(lane.device.device))) {
         if (lane.device.device.startsWith('CUDA') && lane.failed && (lane.retryAt ?? Infinity) <= Date.now()) { lane.failed = false; lane.device.qualified = false }
         const available = lane.device.device.startsWith('CUDA') ? nvidia.available && Number(lane.device.device.split(':')[1]) < this.gpuWorkers : intel.available
         if (!available && lane.enabled) await this.stopLane(lane)
         else if (available && !lane.failed) lane.enabled = true
       }
-      if (nvidia.available && (nvidia.freeMiB ?? 0) >= 2048 && Date.now() >= this.gpuRetryAt && !this.lanes.some(lane => lane.device.device === `CUDA:${Math.min(this.gpuWorkers, (nvidia.freeMiB ?? 0) >= 4096 ? 2 : 1) - 1}`)) {
+      if (nvidia.available && target > 0 && Date.now() >= this.gpuRetryAt && !this.lanes.some(lane => lane.device.device === `CUDA:${target - 1}`)) {
         // A missing optional runtime is retried only after explicit setup/reload.
         try { await readFile(join(localModelCacheDir(), 'embedding-gpu-runtime', 'venv', process.platform === 'win32' ? 'pyvenv.cfg' : 'pyvenv.cfg')) }
         catch { this.gpuRetryAt = Date.now() + 60_000; return }
         if (this.stopped || this.foreground) return
-        for (let i = 0; i < Math.min(this.gpuWorkers, (nvidia.freeMiB ?? 0) >= 4096 ? 2 : 1); i++) {
+        for (let i = 0; i < target; i++) {
           if (!this.lanes.some(lane => lane.device.device === `CUDA:${i}`)) this.lanes.push(this.makeLane({ device: `CUDA:${i}`, name: `NVIDIA OCR worker ${i + 1}`, qualified: false, medianMs: 100 }))
         }
-        for (const lane of this.lanes.filter(lane => lane.device.device.startsWith('CUDA'))) lane.enabled = true
+        for (const lane of this.lanes.filter(lane => lane.device.device.startsWith('CUDA'))) lane.enabled = Number(lane.device.device.split(':')[1]) < this.gpuWorkers
       }
+      await this.balanceCpu()
     } finally { this.polling = false }
   }
   root(): string { return join(localModelCacheDir(), 'ocr-accelerators') }
@@ -100,7 +116,7 @@ export class OcrAcceleration {
   get concurrency(): number { return Math.max(1, this.lanes.filter(lane => !lane.failed && lane.enabled).length) }
   async status(): Promise<OcrAccelerationStatus> {
     if (this.state) return this.state
-    if (this.loadedRoot === this.root()) return { status: 'ready', message: 'Calibrated local OCR devices', devices: this.lanes.map(lane => ({ ...lane.device, qualified: lane.device.qualified && !lane.failed })) }
+    if (this.loadedRoot === this.root()) return { status: 'ready', message: 'Calibrated local OCR devices', devices: this.lanes.map(lane => ({ ...lane.device, qualified: lane.device.qualified && !lane.failed, enabled: lane.enabled && !lane.failed, pending: lane.pending, completed: lane.completed ?? 0 })) }
     this.releaseWorkers()
     try {
       const receipt = JSON.parse(await readFile(join(this.root(), 'ready.json'), 'utf8'))
@@ -108,6 +124,7 @@ export class OcrAcceleration {
       const digest = createHash('sha256')
       for (const name of ['ppocrv5_det.onnx', 'ppocrv5_rec.onnx', 'ppocrv5_dict.txt']) digest.update(await readFile(join(localModelCacheDir(), 'ocr', name)))
       if (digest.digest('hex') !== receipt.modelHash) throw new Error('OCR weights changed; recalibration required')
+      this.modelHash = receipt.modelHash
       for (const device of receipt.devices as Device[]) {
         if (!device.qualified || !Number.isFinite(device.medianMs) || device.medianMs! <= 0) continue
         if (!(device.device === 'CPU' || /^NPU(?:\.\d+)?$/.test(device.device) || /^GPU(?:\.\d+)?$/.test(device.device) && /intel/i.test(device.name))) continue
@@ -128,7 +145,7 @@ export class OcrAcceleration {
       if(this.stopped)return undefined
       const healthy=this.lanes.filter(lane=>!lane.failed&&lane.enabled&&(lane.retryAt??0)<=Date.now())
       if(!healthy.length)return undefined
-      const choices=healthy.filter(lane=>lane.pending<2).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)
+      const choices=healthy.filter(lane=>lane.pending < (lane.device.device.startsWith('CUDA') ? 16 : 1)).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)
       lane=choices[0]
       // Busy is not failure. Backpressure avoids spawning extra CPU fallback
       // workers alongside the foreground eight-thread CPU session.
@@ -141,8 +158,21 @@ export class OcrAcceleration {
         if (lane.failed || !lane.enabled) return undefined
         const request = lane.process.request({ png: png.toString('base64') }, 300_000); lane.current = request
         const result = await request
+        lane.completed = (lane.completed ?? 0) + 1
+        if (typeof result.text !== 'string') throw new Error('Invalid OCR text response')
         if (lane.device.device.startsWith('CUDA') && !lane.device.qualified) {
           if (result.provider !== 'CUDAExecutionProvider') throw new Error('OCR CUDA provider was not verified')
+          // Identical workers on the same CUDA device share one backend
+          // comparison, but every process must verify its provider and weights.
+          const shared = typeof result.modelHash === 'string' && result.modelHash === this.modelHash
+          while (shared && this.cudaQualification) await this.cudaQualification
+          if (shared && this.cudaQualifiedHash === this.modelHash) {
+            lane.device.qualified = true; delete lane.device.error
+          } else {
+          let release: (() => void) | undefined
+          const reservation = shared ? new Promise<void>(resolve => { release = resolve }) : undefined
+          if (shared) this.cudaQualification = reservation
+          try {
           const reference = this.lanes.filter(other => other.device.device === 'CPU' && !other.failed && other.enabled).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)[0]
           if (!reference) throw new Error('No OCR CPU reference')
           // Serialize the comparison on the CPU lane; never overlap native sessions.
@@ -153,6 +183,7 @@ export class OcrAcceleration {
           }).finally(()=>{reference.pending--})
           reference.tail = check.catch(() => {})
           const expected = await check
+          reference.completed = (reference.completed ?? 0) + 1
           const agreement = ocrTextAgreement(String(expected.text ?? ''), String(result.text ?? ''))
           if (agreement < MIN_OCR_AGREEMENT) {
             // Retry this page on CPU. An ambiguous scan is not a broken device:
@@ -163,9 +194,11 @@ export class OcrAcceleration {
             return String(expected.text ?? '')
           }
           lane.device.qualified = true
+          if (shared && result.modelHash === this.modelHash && String(expected.text ?? '').normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '').length >= 32) this.cudaQualifiedHash = this.modelHash
           delete lane.device.error
+          } finally { release?.(); if (this.cudaQualification === reservation) this.cudaQualification = undefined }
+          }
         }
-        if (typeof result.text !== 'string') throw new Error('Invalid OCR text response')
         if (lane.runs++ > 0 && typeof result.elapsedMs === 'number' && result.elapsedMs > 0) {
           lane.samples.push(result.elapsedMs); lane.samples = lane.samples.slice(-10)
           const sorted = [...lane.samples].sort((a, b) => a - b); lane.device.medianMs = sorted[Math.floor(sorted.length / 2)]
@@ -209,6 +242,6 @@ export class OcrAcceleration {
       .finally(() => { this.preparation = undefined })
     return this.state
   }
-  releaseWorkers(): void { for (const lane of this.lanes) lane.process.dispose(); this.lanes = []; this.loadedRoot = undefined }
+  releaseWorkers(): void { for (const lane of this.lanes) lane.process.dispose(); this.lanes = []; this.loadedRoot = undefined; this.modelHash = undefined; this.cudaQualifiedHash = undefined; this.cudaQualification = undefined }
   dispose(): void { this.stopped = true; if (this.timer) clearInterval(this.timer); this.unregisterDevices(); this.setupChild && stopOwnedProcess(this.setupChild); this.releaseWorkers() }
 }

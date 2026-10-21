@@ -91,3 +91,38 @@ it('reroutes queued GPU pages through the bounded CPU/NPU lanes during foregroun
  expect(await Promise.all(jobs)).toEqual(['OCR evidence','OCR evidence'])
  expect(cuda.process.request).toHaveBeenCalledTimes(1);release()
 })
+
+it('queues on a faster CUDA lane instead of making a short document wait for slow CPU OCR', async () => {
+  const {manager,cpu,npu,igpu,cuda}=fixture()
+  let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve})
+  cuda.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:1}})
+  const jobs=Array.from({length:12},()=>manager.recognize(Buffer.from('page')))
+  await new Promise<void>(resolve=>setImmediate(resolve))
+  expect(cuda.process.request).toHaveBeenCalledTimes(1)
+  expect(cpu.process.request).not.toHaveBeenCalled();expect(npu.process.request).not.toHaveBeenCalled();expect(igpu.process.request).not.toHaveBeenCalled()
+  finish();expect(await Promise.all(jobs)).toEqual(Array(12).fill('OCR evidence'))
+  const status=await manager.status(),device=status.devices.find(device=>device.device==='CUDA:0')
+  expect(device).toMatchObject({enabled:true,pending:0,completed:12})
+})
+
+it('shares CUDA backend qualification only for matching provider and source model identity', async () => {
+  const {manager,cpu,cuda}=fixture();cuda.device.qualified=false
+  const evidence='OCR evidence from archival correspondence with a verified recording date.'
+  cpu.process.request.mockResolvedValue({text:evidence,elapsedMs:100})
+  Object.assign(manager,{modelHash:'known-weights'})
+  const clone={...cuda,device:{...cuda.device,device:'CUDA:1'},tail:Promise.resolve(),pending:0}
+  ;(manager as any).lanes.push(clone)
+  cuda.process.request.mockResolvedValue({text:evidence,elapsedMs:1,provider:'CUDAExecutionProvider',modelHash:'known-weights'} as never)
+  expect(await Promise.all([manager.recognize(Buffer.from('one')),manager.recognize(Buffer.from('two'))])).toEqual([evidence,evidence])
+  expect(cpu.process.request).toHaveBeenCalledOnce()
+  expect(cuda.device.qualified).toBe(true);expect(clone.device.qualified).toBe(true)
+})
+
+it('keeps more CPU OCR capacity when CUDA is absent and reduces contention with a large CUDA pool', async () => {
+  const {manager,cpu,extraCpu,cuda}=fixture()
+  ;(manager as any).lanes.push(...Array.from({length:3},(_,i)=>({...cuda,device:{...cuda.device,device:`CUDA:${i+1}`}})))
+  await (manager as any).balanceCpu()
+  expect(cpu.enabled).toBe(true);expect(extraCpu.enabled).toBe(false)
+  for(const lane of (manager as any).lanes)if(lane.device.device.startsWith('CUDA'))lane.enabled=false
+  await (manager as any).balanceCpu();expect(extraCpu.enabled).toBe(true)
+})
