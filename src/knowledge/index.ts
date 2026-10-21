@@ -2883,11 +2883,16 @@ export class KnowledgeService extends Service {
     return [...selected].filter(id => known.has(id) && !inner.has(id))
   }
 
-  listDocuments(baseId: string): DocumentSummary[] {
+  async listDocumentsForUi(baseId:string):Promise<DocumentSummary[]> {
+    const store=this.requireStore(),key=embeddingKey(this.getConfigFor(baseId))
+    const summary=await (store.docChunkStatusAsync?.(baseId,key)??store.docChunkStatus(baseId,key))
+    return this.listDocuments(baseId,summary)
+  }
+  listDocuments(baseId: string, summary?:{withChunks:Set<string>;missingEmbedding:Set<string>}): DocumentSummary[] {
     const store = this.requireStore()
     // One grouped pass over the base's chunks (embedding is all-or-nothing per
     // doc), avoiding a full chunk scan per document on every list.
-    const { withChunks, missingEmbedding } = store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId)))
+    const { withChunks, missingEmbedding } = summary ?? store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId)))
     const allDocs = store.listDocuments(baseId, { includeRawText: false })
     const childCount = new Map<string, number>()
     for (const doc of allDocs) {
@@ -3487,7 +3492,14 @@ export class KnowledgeService extends Service {
 
   // ── statistics ────────────────────────────────────────────────────────────
 
-  stats(baseId?: string): BaseStats {
+  async statsForUi(baseId?:string):Promise<BaseStats>{
+    const store=this.requireStore()
+    if(baseId!==undefined&&!store.getBase(baseId))throw new NotFoundError(`knowledge base not found: ${baseId}`)
+    const ids=baseId!==undefined?[baseId]:store.listBases().map(base=>base.id)
+    const summary=await (store.chunkStatsAsync?.(ids)??store.chunkStats(ids))
+    return this.stats(baseId,summary)
+  }
+  stats(baseId?: string, summary?:ReturnType<Store['chunkStats']>): BaseStats {
     const store = this.requireStore()
     // An unknown base must be an explicit error: filtering would answer with a
     // plausible-looking zero summary that hides the caller's mistake.
@@ -3498,7 +3510,7 @@ export class KnowledgeService extends Service {
     const documents = bases.flatMap(base => store.listDocuments(base.id, { includeRawText: false }))
     const charCount = documents.reduce((sum, doc) => sum + doc.charCount, 0)
     const tokenCount = documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
-    const chunkStats = store.chunkStats(bases.map(base => base.id))
+    const chunkStats = summary ?? store.chunkStats(bases.map(base => base.id))
     // Staleness: an embedded chunk is stale when it was produced by a different
     // embedding source than the base's currently resolved configuration.
     let staleChunkCount = 0

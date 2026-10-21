@@ -37,6 +37,7 @@ const REQUIRED_FILES = [
   'lib/knowledge/rerank-process.mjs',
   'lib/knowledge/ocr-process.mjs',
   'lib/knowledge/pdf-parse-worker.mjs',
+  'lib/knowledge/chunk-read-worker.mjs',
   'lib/tool-knowledge/index.js',
   'lib/client.js',
 ]

@@ -193,6 +193,8 @@ export interface Store {
   reconcileOrphanChunks(): Promise<number>
   /** Aggregate chunk stats without loading chunk rows. */
   chunkStats(baseIds: readonly string[]): ChunkStats
+  chunkStatsAsync?(baseIds: readonly string[]): Promise<ChunkStats>
+  docChunkStatusAsync?(baseId:string,expectedModel?:string):Promise<{withChunks:Set<string>;missingEmbedding:Set<string>}>
   /** SQL-backed retrieval lanes (FTS5 + vector scan); absent on in-memory stores. */
   readonly retrievalLane?: RetrievalLane
   /** Original source bytes of uploaded documents (absent on in-memory stores). */
@@ -619,6 +621,8 @@ class DomainStore implements Store {
   chunkStats(baseIds: readonly string[]): ChunkStats {
     return this.chunkDb.chunkStats(baseIds)
   }
+  chunkStatsAsync(baseIds:readonly string[]):Promise<ChunkStats>{return this.chunkDb.chunkStatsAsync(baseIds)}
+  docChunkStatusAsync(baseId:string,expectedModel?:string){return this.chunkDb.docChunkStatusAsync(baseId,expectedModel)}
 
   async reconcileOrphanChunks(): Promise<number> {
     const known = new Set<string>()

@@ -219,7 +219,7 @@ async function route(
   }
 
   // /stats
-  if (segments[0] === 'stats' && method === 'GET') return service.stats()
+  if (segments[0] === 'stats' && method === 'GET') return service.statsForUi?.() ?? service.stats()
 
   // /local-model-status?model=...
   if (segments[0] === 'local-model-status' && method === 'GET') {
@@ -384,7 +384,7 @@ async function route(
     }
     if (segments.length === 3) {
       if (segments[2] === 'external-settings' && method === 'PATCH') return service.updateExternalSource(baseId, body)
-      if (segments[2] === 'stats' && method === 'GET') return service.stats(baseId)
+      if (segments[2] === 'stats' && method === 'GET') return service.statsForUi?.(baseId) ?? service.stats(baseId)
       if (segments[2] === 'reindex' && method === 'POST') return service.startReindexBase(baseId)
       if (segments[2] === 'files-batch' && method === 'POST') {
         const bodyRequest = body as Partial<AddFilesRequest>
@@ -441,7 +441,7 @@ async function route(
         )
       }
       if (segments[2] === 'documents') {
-        if (method === 'GET') return service.listDocuments(baseId)
+        if (method === 'GET') return service.listDocumentsForUi?.(baseId) ?? service.listDocuments(baseId)
         if (method === 'POST') {
           if (typeof body.url === 'string') {
             return service.addUrlDocument({

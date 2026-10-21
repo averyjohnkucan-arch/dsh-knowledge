@@ -106,6 +106,7 @@ const hostEntries = [
   // Plain .mjs on purpose: a worker thread is started by Node's own loader, so
   // the same relative URL has to resolve in src/ (tests) and lib/ (runtime).
   ['src/knowledge/pdf-parse-worker.mjs', 'lib/knowledge/pdf-parse-worker.mjs'],
+  ['src/knowledge/chunk-read-worker.mjs', 'lib/knowledge/chunk-read-worker.mjs'],
 ]
 
 for (const [entry, outfile] of hostEntries) {
