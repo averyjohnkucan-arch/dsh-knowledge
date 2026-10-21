@@ -9,6 +9,7 @@
  * @module dsh-knowledge/knowledge/ocr
  */
 
+import { streamOcrRasters, disposeOcrRenderers } from './ocr-render-client.js'
 import { deflateSync } from 'node:zlib'
 import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -237,7 +238,7 @@ interface PdfImage {
   data: Uint8ClampedArray
 }
 
-const ocrProcess = new OcrPool()
+let ocrProcess = new OcrPool()
 
 /** Resolve pdfjs-dist's wasm directory (image decoders) for fake-worker mode. */
 const pdfjsWasmUrl: string | undefined = (() => {
@@ -394,7 +395,10 @@ export async function renderPdfPages(bytes: Uint8Array, maxPages: number, select
 
 /** Legacy function name retained for callers; waits for the OCR child to exit. */
 export async function disposeOcrWorker(): Promise<void> {
-  await ocrProcess.dispose()
+  await disposeOcrRenderers()
+  const previous = ocrProcess
+  await previous.dispose()
+  if (ocrProcess === previous) ocrProcess = new OcrPool()
 }
 
 /**
@@ -599,13 +603,13 @@ function crc32(buffer: Buffer): number {
  */
 export async function ocrPdfPages(bytes: Uint8Array, selectedPages?: readonly number[]): Promise<Map<number, string>> {
   if (!isOcrReady()) return new Map()
+  const pool = ocrProcess
   const deadline = Date.now() + MAX_OCR_TOTAL_MS
   const pageTexts = new Map<number, string[]>()
   try {
-    const rendered = await renderPdfPages(bytes, MAX_OCR_PAGES, selectedPages)
     const recognize = async (page: number, png: Buffer): Promise<void> => {
       try {
-        const text = postprocessOcrText(await ocrProcess.recognize(png, ocrCacheDir()))
+        const text = postprocessOcrText(await pool.recognize(png, ocrCacheDir()))
         if (text.length > 0) {
           const bucket = pageTexts.get(page) ?? []
           bucket.push(text)
@@ -616,11 +620,13 @@ export async function ocrPdfPages(bytes: Uint8Array, selectedPages?: readonly nu
         throw ocrError((error as { code?: string }).code ?? 'ocr_failed', `OCR failed for page ${page}: ${message}`)
       }
     }
+    const streamed = await streamOcrRasters(bytes, selectedPages, {maxPages:MAX_OCR_PAGES,pageBytes:MAX_PAGE_RASTER_BYTES,totalBytes:MAX_TOTAL_RASTER_BYTES,maxDimension:MAX_RASTER_DIMENSION,timeoutMs:Math.max(1,deadline-Date.now()),window:pool.concurrency},recognize)
+    const rendered = streamed ? [] : await renderPdfPages(bytes, MAX_OCR_PAGES, selectedPages)
     if (rendered !== null) {
       // Full-page renders: one PNG per page, straight into the recognizer
       // (mupdf output needs no grayscale/normalize chain).
       let next = 0
-      await Promise.all(Array.from({ length: Math.min(ocrProcess.concurrency, rendered.length) }, async () => {
+      await Promise.all(Array.from({ length: Math.min(pool.concurrency, rendered.length) }, async () => {
         for (;;) {
           const item = rendered[next++]
           if (!item) return

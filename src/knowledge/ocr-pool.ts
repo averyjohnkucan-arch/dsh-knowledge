@@ -21,15 +21,20 @@ export function useOcrAcceleration(value: OcrAcceleration | undefined): void { a
 /** Four threads per CPU session; a shared gate caps foreground OCR to one session. */
 export class OcrPool {
   constructor() { pools.add(this) }
+  private stopped = false
   private clients: OcrProcessClient[] = []
   private readonly cpuConcurrency = idleCpuWorkers
   get concurrency(): number { return Math.max(this.cpuConcurrency, acceleration?.concurrency ?? 1) }
   async recognize(png: Buffer, modelDir: string): Promise<string> {
+    if (this.stopped) throw new Error('OCR pool stopped')
     const text = await acceleration?.recognize(png)
+    if (this.stopped) throw new Error('OCR pool stopped')
     if (text !== undefined) return text
     while (cpuRunning >= (foreground ? 1 : idleCpuWorkers)) {
+      if (this.stopped) throw new Error('OCR pool stopped')
       await new Promise<void>(resolve => { const wake = () => { waiters.delete(wake); resolve() }; waiters.add(wake) })
     }
+    if (this.stopped) throw new Error('OCR pool stopped')
     cpuRunning++
     try {
     let client = this.clients.reduce<OcrProcessClient | undefined>((best, next) => !best || next.pendingCount < best.pendingCount ? next : best, undefined)
@@ -43,6 +48,8 @@ export class OcrPool {
     const clients = this.clients; this.clients = []; await Promise.all(clients.map(client => client.dispose()))
   }
   async dispose(): Promise<void> {
+    this.stopped = true
+    for (const wake of waiters) wake()
     pools.delete(this)
     acceleration?.releaseWorkers()
     const clients = this.clients; this.clients = []

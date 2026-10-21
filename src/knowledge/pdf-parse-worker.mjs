@@ -56,11 +56,10 @@ parentPort?.on('message', message => {
           text += item.str; lastY = item.transform[5]
         }
         pages[page.pageNumber - 1] = text
-        if (!text.trim()) {
-          const operators = await page.getOperatorList()
-          // Image-paint operator IDs from the bundled pdf.js 1.10 parser.
-          if (operators.fnArray.some(op => [82, 83, 84, 85, 86, 87, 88, 89].includes(op))) scanned.push(page.pageNumber)
-        }
+        // Text extraction must not decode images. pdf.js 1.10's operator-list
+        // path uses browser Image globals and is expensive on scanned PDFs.
+        // Textless pages (including blank pages) are cheap OCR candidates.
+        if (!text.trim()) scanned.push(page.pageNumber)
         return text
       } })
       parentPort?.postMessage({ id, ok: true, text: typeof result?.text === 'string' ? result.text : '', pages: Array.from({ length: result.numpages }, (_, index) => pages[index] ?? ''), scanned })
