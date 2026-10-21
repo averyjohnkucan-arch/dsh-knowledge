@@ -7,9 +7,9 @@ import type { retrievalDefinition as Definition, retrievalRecord as Record } fro
 const module = { exports: {} as { retrievalDefinition: typeof Definition; retrievalRecord: typeof Record; KnowledgeRetrieval: (props: unknown) => unknown } }
 const code = (await transform(await readFile(new URL('../src/ui/client/KnowledgeRetrieval.tsx', import.meta.url), 'utf8'), { loader: 'tsx', jsx: 'automatic', format: 'cjs' })).code
 const jsx = (type: unknown, props: unknown) => ({ type, props })
-runInNewContext(code, { module, exports: module.exports, require: () => ({ jsx, jsxs: jsx }) })
+runInNewContext(code, { module, exports: module.exports, require: (name: string) => name === '@deepseek-ai/dsh-client-ui-primitives' ? { DisclosureRow: 'DisclosureRow', IconBrowseOutlineRegular: 'IconBrowseOutlineRegular' } : ({ jsx, jsxs: jsx }) })
 const { retrievalDefinition, retrievalRecord, KnowledgeRetrieval } = module.exports
-const render = (data: ReturnType<typeof Record>) => JSON.stringify(KnowledgeRetrieval({ node: { data } }))
+const render = (data: ReturnType<typeof Record>) => JSON.stringify(KnowledgeRetrieval({ node: { data }, useDisclosure: () => ({ expanded: true, toggle() {} }) }))
 
 describe('durable knowledge retrieval disclosure', () => {
   const event = { type: 'user/message', seq: 42, surfaceOp: 'append', data: {
@@ -25,7 +25,7 @@ describe('durable knowledge retrieval disclosure', () => {
     const state = retrievalDefinition.start({}, match)
     expect(retrievalDefinition.buildViewNode({ key: 'k', id: 'i', start: match, state })).toMatchObject({ anchorSeq: 42, location, data: { count: 1, text: event.data.content[0].text } })
     const markup = render(state)
-    expect(markup).toContain('Automatic knowledge retrieval — ')
+    expect(markup).toContain('Automatic knowledge retrieval')
     expect(markup).toContain('may or may not be relevant to your message')
     expect(markup).toContain('/knowledge/documents/doc1/raw?inline=1')
     expect(markup).toContain('Actual evidence <script>bad()</script>')
@@ -33,7 +33,7 @@ describe('durable knowledge retrieval disclosure', () => {
     expect(markup).not.toContain('docId=')
     expect(markup).not.toContain('Untrusted reference material')
     expect(markup).not.toContain('dangerouslySetInnerHTML')
-    expect(markup).not.toContain('\"open\":true')
+    expect(markup).toContain('DisclosureRow')
   })
   it('shows zero results and supports saved messages from before passage counts existed', () => {
     expect(render({ count: 0, text: 'No new passages supplied.' })).toContain('No new passages were supplied for this question.')
