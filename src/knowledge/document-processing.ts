@@ -48,6 +48,8 @@ export function processorErrorMessage(error: unknown): string {
 
 export interface ProcessFileInput {
   readonly structureV3?: StructureV3Manager
+  /** Gate parsing only; optional structure enrichment must not hold parser capacity. */
+  readonly runParsing?: <T>(task: () => Promise<T>) => Promise<T>
   readonly baseId: string
   readonly documentId: string
   readonly fileName: string
@@ -112,51 +114,56 @@ async function processDocumentFileAttempt(input: ProcessFileInput, attempt: numb
   const warnings: ProcessingWarning[] = []
   try {
     let output: ProcessingOutput | undefined
-    let remoteFailure: unknown
     const pdf = extensionOf(input.fileName) === 'pdf'
-    if (pdf && config.documentProcessorProvider === 'mineru-local') {
-      try {
-        output = await extractWithMineruLocal(bytes, input.fileName, {
-          apiUrl: config.mineruLocalUrl ?? 'http://127.0.0.1:8000',
-          apiKey: config.mineruLocalApiKey,
-          tier: config.mineruTier ?? 'basic',
-          timeoutMs: config.documentProcessingTimeoutMs ?? 1_800_000,
-        }, {
-          signal: input.signal, onProgress: progress,
-          ...(matching?.state === 'running' && matching.progress.jobId !== undefined ? { resumeJobId: matching.progress.jobId } : {}),
-        })
-      } catch (error) {
-        input.signal?.throwIfAborted()
-        if (['job_lost', 'submission_unknown'].includes(processorErrorCode(error))) throw error
-        remoteFailure = error
-      }
-    } else if (pdf && config.documentProcessorProvider === 'mineru') {
-      if (config.mineruApiKey.trim() === '') {
-        remoteFailure = Object.assign(new Error('MinerU cloud requires a key'), { code: 'configuration_missing' })
-      } else {
+    const parse = async (): Promise<ProcessingOutput> => {
+      let remoteFailure: unknown
+      if (pdf && config.documentProcessorProvider === 'mineru-local') {
         try {
-          progress({ stage: 'parsing' })
-          const text = await extractPdfWithMineru(bytes, input.fileName, { apiHost: config.mineruApiHost, apiKey: config.mineruApiKey }, input.signal)
-          output = parsedTextDocument(text, bytes, 'mineru', fingerprint)
-        } catch (error) { input.signal?.throwIfAborted(); remoteFailure = error }
+          output = await extractWithMineruLocal(bytes, input.fileName, {
+            apiUrl: config.mineruLocalUrl ?? 'http://127.0.0.1:8000',
+            apiKey: config.mineruLocalApiKey,
+            tier: config.mineruTier ?? 'basic',
+            timeoutMs: config.documentProcessingTimeoutMs ?? 1_800_000,
+          }, {
+            signal: input.signal, onProgress: progress,
+            ...(matching?.state === 'running' && matching.progress.jobId !== undefined ? { resumeJobId: matching.progress.jobId } : {}),
+          })
+        } catch (error) {
+          input.signal?.throwIfAborted()
+          if (['job_lost', 'submission_unknown'].includes(processorErrorCode(error))) throw error
+          remoteFailure = error
+        }
+      } else if (pdf && config.documentProcessorProvider === 'mineru') {
+        if (config.mineruApiKey.trim() === '') {
+          remoteFailure = Object.assign(new Error('MinerU cloud requires a key'), { code: 'configuration_missing' })
+        } else {
+          try {
+            progress({ stage: 'parsing' })
+            const text = await extractPdfWithMineru(bytes, input.fileName, { apiHost: config.mineruApiHost, apiKey: config.mineruApiKey }, input.signal)
+            output = parsedTextDocument(text, bytes, 'mineru', fingerprint)
+          } catch (error) { input.signal?.throwIfAborted(); remoteFailure = error }
+        }
       }
-    }
-    if (output === undefined) {
-      if (remoteFailure !== undefined) warnings.push({ code: 'processor_fallback', message: `${processorErrorMessage(remoteFailure)}; used built-in local parsing` })
-      progress({ stage: 'parsing' })
-      try {
-        const text = await parseDocumentBuffer(bytes, input.fileName, input.mimeType, { ocrEnabled: config.ocrEnabled })
-        input.signal?.throwIfAborted()
-        output = parsedTextDocument(text, bytes, 'builtin', fingerprint, warnings)
-      } catch (error) {
-        input.signal?.throwIfAborted()
-        if (remoteFailure !== undefined) throw Object.assign(new Error(`MinerU extraction failed (${processorErrorCode(remoteFailure)}); local parsing failed (${processorErrorCode(error)})`), { code: 'parse_failed' })
-        throw error
+      if (output === undefined) {
+        if (remoteFailure !== undefined) warnings.push({ code: 'processor_fallback', message: `${processorErrorMessage(remoteFailure)}; used built-in local parsing` })
+        progress({ stage: 'parsing' })
+        try {
+          const text = await parseDocumentBuffer(bytes, input.fileName, input.mimeType, { ocrEnabled: config.ocrEnabled })
+          input.signal?.throwIfAborted()
+          output = parsedTextDocument(text, bytes, 'builtin', fingerprint, warnings)
+        } catch (error) {
+          input.signal?.throwIfAborted()
+          if (remoteFailure !== undefined) throw Object.assign(new Error(`MinerU extraction failed (${processorErrorCode(remoteFailure)}); local parsing failed (${processorErrorCode(error)})`), { code: 'parse_failed' })
+          throw error
+        }
       }
+      return output
     }
+    output = await (input.runParsing ? input.runParsing(parse) : parse())
     if (!output.document.text.trim()) throw Object.assign(new Error('parsed document is empty'), { code: 'empty_result' })
     // Captioning remains opt-in, but now runs identically on import and reparse.
     if (pdf && config.imageCaptionProvider !== 'off') {
+      progress({ stage: 'enriching' })
       try {
         const { captionPdfImages } = await import('./caption.js')
         input.signal?.throwIfAborted()

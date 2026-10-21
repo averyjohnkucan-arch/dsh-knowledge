@@ -4,7 +4,7 @@ import type { KnowledgeKey, Translate } from './locales.js'
 import { C, style } from './theme.js'
 
 const stageKeys: Record<ProcessingProgress['stage'], KnowledgeKey> = {
-  queued: 'stageQueued', checking: 'stageChecking', uploading: 'stageUploading', parsing: 'stageParsing',
+  queued: 'stageQueued', checking: 'stageChecking', uploading: 'stageUploading', parsing: 'stageParsing', enriching: 'stageEnriching',
   downloading: 'stageDownloading', normalizing: 'stageNormalizing', indexing: 'stageIndexing',
   completed: 'stageCompleted', failed: 'stageFailed', canceled: 'stageCanceled',
 }

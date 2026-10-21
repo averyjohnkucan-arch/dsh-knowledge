@@ -66,7 +66,7 @@ export class StructureV3Manager {
     }).finally(() => { this.setup = undefined })
     return { ...this.state }
   }
-  async extract(bytes: Uint8Array, fingerprint: string, charts: boolean, timeout: number, signal?: AbortSignal): Promise<ProcessingOutput> {
+  async extract(bytes: Uint8Array, fingerprint: string, charts: boolean, timeout: number, signal?: AbortSignal, tablesOnly = false): Promise<ProcessingOutput> {
     const task = async () => {
       signal?.throwIfAborted()
       if ((await this.status()).status !== 'ready') throw Object.assign(new Error('Install PP-StructureV3 in Knowledge → Local Models first'), { code: 'structure_not_ready' })
@@ -81,7 +81,7 @@ export class StructureV3Manager {
             PADDLE_PDX_CACHE_HOME: join(this.root(), 'models'), HF_HOME: join(this.root(), 'hf-cache'), PYTHONUNBUFFERED: '1',
           })
         }
-        await this.worker.run(join(dir, 'source.pdf'), join(dir, 'result.json'), charts, timeout, signal)
+        await this.worker.request({ input: join(dir, 'source.pdf'), output: join(dir, 'result.json'), charts, tablesOnly }, timeout, signal)
         const result = JSON.parse(await readFile(join(dir, 'result.json'), 'utf8')) as { pageCount: number; blocks: { page: number; type: string; text: string }[] }
         if (!Number.isInteger(result.pageCount) || result.pageCount < 1 || result.pageCount > 10000 || !Array.isArray(result.blocks)) throw new Error('Invalid PP-StructureV3 page count')
         const blocks: ParsedBlock[] = []; let text = ''
@@ -92,7 +92,7 @@ export class StructureV3Manager {
           const type = block.type.includes('title') ? 'heading' : block.type === 'table' || block.type === 'chart' ? 'table' : 'text'
           blocks.push({ id: `structure-${blocks.length}`, index: blocks.length, type, text: content, textStart: start, textEnd: start + content.length, pageIndex: block.page - 1 })
         }
-        if (!text.trim()) throw new Error('PP-StructureV3 returned no readable text')
+        if (!tablesOnly && !text.trim()) throw new Error('PP-StructureV3 returned no readable text')
         const output = parsedTextDocument(text, bytes, 'paddle', fingerprint)
         return { ...output, document: { ...output.document, processorVersion: 'PaddleOCR 3.7.0 / PP-StructureV3 CPU', blocks,
           completeness: 'complete' as const, pageCount: result.pageCount, processedPages: Array.from({ length: result.pageCount }, (_, index) => index) } }

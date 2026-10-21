@@ -2111,9 +2111,10 @@ export class KnowledgeService extends Service {
     const budget = processingBudget(config.documentProcessingTimeoutMs ?? 1_800_000, signal)
     this.processingProgress.set(input.documentId, { stage: 'queued' })
     try {
-      return await this.processingQueue.run(() => processDocumentFile({ ...input, structureV3: this.structureV3, config, artifacts: this.artifacts, signal: budget.signal,
+      return await processDocumentFile({ ...input, structureV3: this.structureV3, config, artifacts: this.artifacts, signal: budget.signal,
+        runParsing: task => this.processingQueue.run(task, budget.signal),
         onProgress: progress => { this.processingProgress.set(input.documentId, progress) },
-      }), budget.signal)
+      })
     } catch (error) {
       this.ctx.logger.warn(`knowledge: document processor ${processorErrorCode(error)}`)
       throw error
