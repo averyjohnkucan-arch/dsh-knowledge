@@ -12,6 +12,9 @@ import type { Domain, DomainSpec } from '@deepseek-ai/dsh-storage-domain';
 import type { ConfigOverrides } from './domain.js';
 import type { RetrievalLane, StagedDocumentGeneration } from './chunkdb.js';
 import type { KnowledgeBase, KnowledgeChunk, KnowledgeDocument } from './types.js';
+export type ChunkIdentity = Pick<KnowledgeChunk, 'id' | 'index' | 'text'> & {
+    searchText: string;
+};
 export interface ChunkStats {
     documents?: {
         documentCount: number;
@@ -88,6 +91,8 @@ export interface Store {
     listChunks(baseId: string): KnowledgeChunk[];
     getChunk(id: string): KnowledgeChunk | undefined;
     listChunksByDoc(docId: string, limit?: number, offset?: number): KnowledgeChunk[];
+    /** Text identities only; avoids loading vectors merely to retain stable citation IDs. */
+    listChunkIdentitiesByDoc?(docId: string): ChunkIdentity[];
     /** Chunks of one document whose index falls in `[fromIdx, toIdx]` (sibling context around a search hit). */
     listChunksByIndexRange(docId: string, fromIdx: number, toIdx: number): KnowledgeChunk[];
     /** Several merged document ranges fetched as one storage operation. */

@@ -99,7 +99,7 @@ export declare class ChunkDatabase implements RetrievalLane {
     putDocumentMetadata(document: KnowledgeDocument): void;
     getDocumentMetadata(id: string): KnowledgeDocument | undefined;
     listDocumentMetadata(baseId?: string, includeRawText?: boolean): KnowledgeDocument[];
-    /** Check source availability in SQL without materializing the library's text. */
+    /** Check source availability without materializing the library's text. */
     hasDocumentsWithoutSource(baseId: string): boolean;
     deleteDocumentMetadata(id: string): boolean;
     private readMeta;
@@ -120,6 +120,12 @@ export declare class ChunkDatabase implements RetrievalLane {
     get size(): number;
     listChunks(baseId: string): KnowledgeChunk[];
     getChunk(id: string): KnowledgeChunk | undefined;
+    listChunkIdentitiesByDoc(docId: string): Array<{
+        id: string;
+        index: number;
+        text: string;
+        searchText: string;
+    }>;
     listChunksByDoc(docId: string, limit?: number, offset?: number): KnowledgeChunk[];
     /** Chunks of one document whose index falls in `[fromIdx, toIdx]` — the
      *  sibling context around a search hit, fetched with one bounded SQL query. */
