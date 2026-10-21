@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { Worker } from 'node:worker_threads'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -290,7 +291,10 @@ export class ChunkDatabase implements RetrievalLane {
 
   private static readonly SELECT_COLUMNS = 'chunk_id, doc_id, base_id, idx, text, heading, context, embedding, embedding_model, source_spans, processing_revision'
 
-  constructor(path: string) {
+  private readonly summaryWorkers = new Set<Worker>()
+  private readonly summaryRequests = new Map<string, Promise<unknown>>()
+
+  constructor(private readonly path: string) {
     mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode = WAL')
@@ -773,6 +777,23 @@ export class ChunkDatabase implements RetrievalLane {
       // Both columns are indexed separately. Without statistics SQLite may
       // choose base_id and scan millions of passages for every document.
       // This mutation is document-scoped; force its existing narrow index.
+      // A vector-only pass must not rebuild the text index. Verify the entire
+      // canonical generation before taking the narrow update path; changed
+      // text, evidence, ordering or IDs still use full atomic publication.
+      const previous = this.db.prepare(`SELECT chunk_id, idx, text, search_text, heading, context, source_spans, processing_revision
+        FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ? ORDER BY idx`).all(doc.id, doc.baseId)
+      const sameText = previous.length === chunks.length && previous.every((row, index) => {
+        const chunk=chunks[index]
+        return row.chunk_id===chunk.id && row.idx===chunk.index && row.text===chunk.text && row.search_text===searchTextOf(chunk)
+          && row.heading===(chunk.heading??null) && row.context===(chunk.context??null)
+          && row.source_spans===(chunk.sourceSpans!==undefined?JSON.stringify(chunk.sourceSpans):null)
+          && row.processing_revision===(chunk.processingRevision??null)
+      })
+      if(sameText) {
+        const update=this.db.prepare('UPDATE chunk SET embedding=?, embedding_model=?, embedding_text_hash=? WHERE chunk_id=? AND doc_id=? AND base_id=?')
+        for(const chunk of chunks)update.run(chunk.embedding!==undefined?encodeEmbedding(chunk.embedding):null,chunk.embeddingModel??null,
+          chunk.embedding!==undefined?hashEmbeddingText(searchTextOf(chunk)):null,chunk.id,doc.id,doc.baseId)
+      } else {
       this.db.prepare('DELETE FROM chunk INDEXED BY chunk_doc_idx WHERE doc_id = ? AND base_id = ?').run(doc.id, doc.baseId)
       const insert = this.db.prepare(`INSERT INTO chunk
         (chunk_id, doc_id, base_id, idx, text, search_text, heading, context, embedding, embedding_model, embedding_text_hash, source_spans, processing_revision)
@@ -781,6 +802,7 @@ export class ChunkDatabase implements RetrievalLane {
         chunk.heading ?? null, chunk.context ?? null, chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null,
         chunk.embeddingModel ?? null, chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
         chunk.sourceSpans !== undefined ? JSON.stringify(chunk.sourceSpans) : null, chunk.processingRevision ?? null)
+      }
       if (atomicMetadata) {
         this.putDocumentMetadata(doc)
         this.db.prepare('DELETE FROM document_generation_commit WHERE doc_id=?').run(doc.id)
@@ -1008,6 +1030,32 @@ export class ChunkDatabase implements RetrievalLane {
     return new Set(rows.map(row => row.doc_id))
   }
 
+  /** UI scans use a read-only worker so millions of rows cannot stall LLM streaming. */
+  private readSummary<T>(kind: 'stats'|'documents', baseIds: readonly string[], expectedModel?: string): Promise<T> {
+    const key=JSON.stringify([kind,baseIds,expectedModel])
+    const pending=this.summaryRequests.get(key)
+    if(pending)return pending as Promise<T>
+    if(this.summaryWorkers.size>=4)return Promise.reject(new Error('Knowledge summary reader is busy; retry shortly'))
+    const request=new Promise<T>((resolve,reject)=>{
+      const worker=new Worker(new URL('./chunk-read-worker.mjs',import.meta.url),{workerData:{path:this.path,kind,baseIds,expectedModel},execArgv:[]})
+      this.summaryWorkers.add(worker)
+      const timer=setTimeout(()=>{void worker.terminate();reject(new Error('Knowledge summary read timed out'))},30_000)
+      worker.once('message',(message:{ok:boolean;value:T;error?:string})=>{message.ok?resolve(message.value):reject(new Error(message.error??'Knowledge summary read failed'));void worker.terminate()})
+      worker.once('error',reject)
+      worker.once('exit',()=>{clearTimeout(timer);this.summaryWorkers.delete(worker);reject(new Error('Knowledge summary reader stopped'))})
+    }).finally(()=>{this.summaryRequests.delete(key)})
+    this.summaryRequests.set(key,request)
+    return request
+  }
+  chunkStatsAsync(baseIds:readonly string[]):Promise<ReturnType<ChunkDatabase['chunkStats']>> {
+    return this.path===':memory:'?Promise.resolve(this.chunkStats(baseIds)):this.readSummary('stats',baseIds)
+  }
+  async docChunkStatusAsync(baseId:string,expectedModel?:string):Promise<ReturnType<ChunkDatabase['docChunkStatus']>> {
+    if(this.path===':memory:')return this.docChunkStatus(baseId,expectedModel)
+    const rows=await this.readSummary<Array<{doc_id:string;missing:number}>>('documents',[baseId],expectedModel)
+    return {withChunks:new Set(rows.map(row=>row.doc_id)),missingEmbedding:new Set(rows.filter(row=>row.missing>0).map(row=>row.doc_id))}
+  }
+
   /** Aggregate chunk stats for `stats()`: counts, embedding presence/dimensions, model tags. */
   chunkStats(baseIds: readonly string[]): {
     count: number
@@ -1206,6 +1254,8 @@ export class ChunkDatabase implements RetrievalLane {
   }
 
   close(): void {
+    for(const worker of this.summaryWorkers)void worker.terminate()
+    this.summaryWorkers.clear()
     this.db.close()
   }
 }

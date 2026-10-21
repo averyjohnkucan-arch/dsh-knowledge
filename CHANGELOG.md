@@ -1,3 +1,9 @@
+# 0.5.5 — keep background indexing from stalling streamed replies
+
+- Run large UI chunk-count and document-coverage scans in bounded read-only worker threads, with exact results, coalesced duplicate requests and a timeout.
+- Update only vector columns when a published generation has identical text, chunk IDs, ordering and evidence. Preserve FTS rows and atomic generation recovery; changed text still uses full publication.
+- No DSH core or engine tuning changes. Engine decode throughput and DSH session-average throughput measure different time intervals.
+
 # 0.5.4 — accelerated Qwen embeddings and compact passages
 
 - Optional pinned FP16 Qwen profile shares validated vectors across ONNX Runtime CPU/CUDA and OpenVINO Intel NPU/iGPU. Private runtimes, model hashes, device qualification and CPU fallback ship inside the plugin.

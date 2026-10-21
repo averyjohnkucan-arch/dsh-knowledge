@@ -324,3 +324,38 @@ describe('embedding format isolation', () => {
     db.close()
   })
 })
+
+describe('streaming-safe UI reads and vector publication',()=>{
+ it('updates only vector columns when the complete canonical text generation is unchanged',async()=>{
+  const db=openSeeded(),raw=(db as unknown as {db:DatabaseSync}).db
+  const before=raw.prepare('SELECT fts_rowid FROM chunk WHERE chunk_id=?').get('c1')
+  const chunks=db.listChunksByDoc('d1').map(chunk=>({...chunk,embedding:[1,0],embeddingModel:'new-vector-space'}))
+  db.publishDocumentGeneration({id:'d1',baseId:'b1',title:'doc',sourceType:'text',charCount:24,chunkCount:1,createdAt:1,updatedAt:2},chunks,1)
+  expect(raw.prepare('SELECT fts_rowid FROM chunk WHERE chunk_id=?').get('c1')).toEqual(before)
+  expect(db.listChunksByDoc('d1')[0].embedding).toEqual([1,0])
+  expect((await db.lexical('hello',['b1'],10)).hits.map(hit=>hit.id)).toContain('c1')
+  expect(db.pendingDocumentGenerations()[0].document.updatedAt).toBe(2)
+  // A context edit is a text-index change even if the body and IDs match.
+  db.publishDocumentGeneration({id:'d1',baseId:'b1',title:'doc',sourceType:'text',charCount:24,chunkCount:1,createdAt:1,updatedAt:3},chunks.map(chunk=>({...chunk,context:'astronomy telescope'})),1)
+  expect((await db.lexical('telescope',['b1'],10)).hits.map(hit=>hit.id)).toContain('c1')
+  db.close()
+ })
+ it('returns exact summaries from a read-only worker while the host remains responsive',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'knowledge-ui-reader-')),db=new ChunkDatabase(join(root,'chunks.sqlite'))
+  try {
+   db.putChunks([{id:'a',baseId:'b',docId:'d1',index:0,text:'one',embedding:[1,0],embeddingModel:'m1'},
+    {id:'b',baseId:'b',docId:'d2',index:0,text:'two'},
+    {id:'c',baseId:'b',docId:'d3',index:0,text:'three',embedding:[0,1],embeddingModel:'m2'}])
+   let ticked=false
+   const timer=setTimeout(()=>{ticked=true},0)
+   const [stats,status]=await Promise.all([db.chunkStatsAsync(['b']),db.docChunkStatusAsync('b','m1')])
+   clearTimeout(timer)
+   expect(ticked).toBe(true)
+   expect(stats).toEqual(db.chunkStats(['b']))
+   expect(status).toEqual(db.docChunkStatus('b','m1'))
+   expect(await db.chunkStatsAsync([])).toEqual(db.chunkStats([]))
+   db.putChunks([{id:'b',baseId:'b',docId:'d2',index:0,text:'two',embedding:[1,0],embeddingModel:'m1'}])
+   expect(await db.docChunkStatusAsync('b','m1')).toEqual(db.docChunkStatus('b','m1'))
+  }finally{db.close();await rm(root,{recursive:true,force:true})}
+ })
+})

@@ -65,6 +65,7 @@ export interface PendingDocumentGeneration {
 export declare function validateDocumentGeneration(doc: KnowledgeDocument, chunks: readonly KnowledgeChunk[]): void;
 /** The chunk store: bounded SQL reads, single-transaction writes. */
 export declare class ChunkDatabase implements RetrievalLane {
+    private readonly path;
     private readonly db;
     /**
      * Per-base vector cache for the brute-force lane: vectors load lazily on
@@ -78,6 +79,8 @@ export declare class ChunkDatabase implements RetrievalLane {
      *  write from another connection invalidates it instead of being invisible. */
     private readonly vectorCacheDataVersion;
     private static readonly SELECT_COLUMNS;
+    private readonly summaryWorkers;
+    private readonly summaryRequests;
     constructor(path: string);
     private migrateEvidenceColumns;
     /**
@@ -202,6 +205,10 @@ export declare class ChunkDatabase implements RetrievalLane {
      *  row is already gone, and those rows would keep matching the retrieval
      *  lanes (they scope by base, not by document existence) forever. */
     docIdsWithChunks(): Set<string>;
+    /** UI scans use a read-only worker so millions of rows cannot stall LLM streaming. */
+    private readSummary;
+    chunkStatsAsync(baseIds: readonly string[]): Promise<ReturnType<ChunkDatabase['chunkStats']>>;
+    docChunkStatusAsync(baseId: string, expectedModel?: string): Promise<ReturnType<ChunkDatabase['docChunkStatus']>>;
     /** Aggregate chunk stats for `stats()`: counts, embedding presence/dimensions, model tags. */
     chunkStats(baseIds: readonly string[]): {
         count: number;

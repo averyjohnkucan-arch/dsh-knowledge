@@ -15,6 +15,7 @@ import type { ConfigOverrides } from './domain.js';
 import type { LocalModelStatus } from './embed.js';
 import type { LocalModelSummary } from './localModels.js';
 import { type OcrModelStatus } from './ocr.js';
+import type { Store } from './store.js';
 import { type OllamaPullStatus } from './ollama.js';
 import type { AddFileDocumentRequest, AddFilesRequest, AddFilesResult, AddTextDocumentRequest, BaseConfig, BaseStats, BaseSummary, CreateBaseRequest, ContextWindow, DeleteImpact, DocumentDetail, DocumentSourceType, DocumentSummary, DirectoryImportResult, DirectorySyncItem, EmbeddingProvider, ImportDirectoryRequest, ImportUrlRequest, KnowledgeBase, KnowledgeChunk, KnowledgeConfig, KnowledgeDocument, SearchRequest, SearchResult, PathImportResult, ReindexDocumentResult, ReindexDocumentsResult, UpdateBaseRequest } from './types.js';
 export type * from './types.js';
@@ -421,7 +422,11 @@ export declare class KnowledgeService extends Service {
      * once by the recursive operations.
      */
     private outermostSelectedIds;
-    listDocuments(baseId: string): DocumentSummary[];
+    listDocumentsForUi(baseId: string): Promise<DocumentSummary[]>;
+    listDocuments(baseId: string, summary?: {
+        withChunks: Set<string>;
+        missingEmbedding: Set<string>;
+    }): DocumentSummary[];
     /** Pre-order DFS outline of one base's directory tree (kb_list outline mode). */
     listBaseOutline(baseId: string): {
         baseId: string;
@@ -590,7 +595,8 @@ export declare class KnowledgeService extends Service {
             snippet: string;
         }>;
     };
-    stats(baseId?: string): BaseStats;
+    statsForUi(baseId?: string): Promise<BaseStats>;
+    stats(baseId?: string, summary?: ReturnType<Store['chunkStats']>): BaseStats;
     search(request: SearchRequest, execution?: SearchExecutionOptions): Promise<SearchResult>;
     /** One retrieval pass. Multi-query orchestration lives in search() so each
      * variant cannot independently invoke an expensive reranker. */
