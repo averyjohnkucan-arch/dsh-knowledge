@@ -322,6 +322,7 @@ export declare class KnowledgeService extends Service {
      */
     private assertIndexTargetAlive;
     renameDocument(id: string, title: string): Promise<KnowledgeDocument>;
+    private readonly directoryReindexes;
     reindexDocument(id: string, options?: {
         mode?: 'reparse' | 'rechunk';
         strictSource?: boolean;

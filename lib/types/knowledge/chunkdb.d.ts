@@ -148,8 +148,17 @@ export declare class ChunkDatabase implements RetrievalLane {
     /** Durable candidate batches remain invisible to both retrieval lanes. */
     stageDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[]): void;
     getStagedDocumentGeneration(docId: string): StagedDocumentGeneration | undefined;
-    /** Replace the live generation and its recovery record in ONE transaction. */
+    /** Publish a single generation through the same atomic RAM-batch path. */
     publishDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[], previousCreatedAt: number, atomicMetadata?: boolean): void;
+    /** One WAL transaction, with a savepoint isolating each document's failure.
+     * Nothing is acknowledged or added to the vector cache before COMMIT. */
+    publishDocumentGenerations(entries: readonly {
+        doc: KnowledgeDocument;
+        chunks: KnowledgeChunk[];
+        previousCreatedAt: number;
+        atomicMetadata?: boolean;
+    }[]): Array<Error | undefined>;
+    private publishDocumentGenerationRows;
     pendingDocumentGenerations(): PendingDocumentGeneration[];
     stagedDocumentHeaders(): KnowledgeDocument[];
     discardPublishedGeneration(doc: KnowledgeDocument): void;
