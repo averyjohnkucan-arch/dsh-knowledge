@@ -31,6 +31,7 @@ export declare class MarkdownSnapshots {
     private memory;
     private writes;
     private deleted;
+    private purging;
     constructor(root?: string | undefined);
     private key;
     save(doc: KnowledgeDocument, text: string, chunks: readonly KnowledgeChunk[]): Promise<string>;
@@ -38,6 +39,8 @@ export declare class MarkdownSnapshots {
     has(base: string, doc: string, revision: string): Promise<boolean>;
     load(baseId: string, documentId: string, revision: string): Promise<MarkdownSnapshot | undefined>;
     removeRevision(base: string, doc: string, revision: string): Promise<void>;
+    /** Remove derived revisions without permanently retiring a live document. */
+    clearDocument(base: string, doc: string): Promise<boolean>;
     removeBase(base: string): Promise<void>;
     removeDocument(base: string, doc: string): Promise<void>;
 }
