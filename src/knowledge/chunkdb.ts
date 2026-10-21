@@ -1201,9 +1201,10 @@ export class ChunkDatabase implements RetrievalLane {
         const timer=setTimeout(()=>{reject(timeout());void worker.terminate()},Math.max(1,end-Date.now()))
         worker.once('message',(message:{ok:boolean;value:{total:number;hits:Array<{row:ChunkRow;score:number}>};error?:string})=>{
           clearTimeout(timer)
-          if(message.ok)resolve({total:message.value.total,hits:message.value.hits.map(hit=>({...rowToChunk(hit.row),score:hit.score}))})
-          else reject(Date.now()>=end||message.error?.includes('deadline')?timeout():new Error(message.error))
-          void worker.terminate()
+          try{
+            if(message.ok)resolve({total:message.value.total,hits:message.value.hits.map(hit=>({...rowToChunk(hit.row),score:hit.score}))})
+            else reject(Date.now()>=end||message.error?.includes('deadline')?timeout():new Error(message.error))
+          }catch(error){reject(error)}finally{void worker.terminate()}
         })
         worker.once('error',reject)
         worker.once('exit',()=>{clearTimeout(timer);this.summaryWorkers.delete(worker);reject(new Error('Knowledge vector search worker stopped'))})

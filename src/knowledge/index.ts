@@ -4603,6 +4603,7 @@ function safeErrorMessage(error: unknown): string {
 }
 
 function retrievalErrorCode(error: unknown): string {
+  if(error instanceof Error && error.name==='TimeoutError')return 'timeout'
   if (error !== null && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
     return (error as { code: string }).code
   }
