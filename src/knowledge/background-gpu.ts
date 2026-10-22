@@ -32,6 +32,7 @@ export class BackgroundGpuAdmission {
       try { await scheduler.unload('knowledge:background') } finally { this.scheduler = undefined; this.driver = undefined }
     }
   }
+  hasOtherDemand(owner: object): boolean { return [...this.demand].some(value => value !== owner) }
   request(owner: object, active: boolean): void {
     if (active) this.demand.add(owner); else this.demand.delete(owner)
     // Do not block CPU work waiting for an interactive model to finish.

@@ -12,11 +12,11 @@ function fixture() {
   return {manager,cpu,extraCpu,npu,igpu,cuda}
 }
 describe('OCR foreground resource handoff',()=>{
-  it('releases NVIDIA, NPU and surplus CPU sessions while keeping CPU and Intel available',async()=>{
+  it('releases NVIDIA, NPU and surplus CPU sessions while keeping only CPU available',async()=>{
     const {manager,cpu,extraCpu,npu,igpu,cuda}=fixture()
     const release=await manager.enterForeground()
     expect(cpu.enabled).toBe(true);expect(npu.enabled).toBe(false)
-    expect(extraCpu.enabled).toBe(false);expect(igpu.enabled).toBe(true);expect(cuda.enabled).toBe(false)
+    expect(extraCpu.enabled).toBe(false);expect(igpu.enabled).toBe(false);expect(cuda.enabled).toBe(false)
     expect(cpu.process.stopAndWait).not.toHaveBeenCalled();expect(npu.process.stopAndWait).toHaveBeenCalledOnce()
     expect(cuda.process.stopAndWait).toHaveBeenCalledOnce()
     await expect(manager.recognize(Buffer.from('png'))).resolves.toBe('OCR evidence')
@@ -92,18 +92,18 @@ it('reroutes queued GPU pages through the bounded CPU/NPU lanes during foregroun
  expect(cuda.process.request).toHaveBeenCalledTimes(1);release()
 })
 
-it('feeds all idle accelerators before queueing more CUDA work while reserving CPU', async () => {
+it('feeds all four device types while bounding CPU OCR to one session', async () => {
   const {manager,cpu,npu,igpu,cuda}=fixture()
   let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve})
-  for (const lane of [cuda,npu,igpu]) lane.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:1}})
+  for (const lane of [cpu,cuda,npu,igpu]) lane.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:1}})
   const jobs=Array.from({length:12},()=>manager.recognize(Buffer.from('page')))
   await new Promise<void>(resolve=>setImmediate(resolve))
   expect(cuda.process.request).toHaveBeenCalledTimes(1)
-  expect(cpu.process.request).not.toHaveBeenCalled();expect(npu.process.request).toHaveBeenCalledOnce();expect(igpu.process.request).toHaveBeenCalledOnce()
+  expect(cpu.process.request).toHaveBeenCalled();expect(npu.process.request).toHaveBeenCalledOnce();expect(igpu.process.request).toHaveBeenCalledOnce()
   finish();expect(await Promise.all(jobs)).toEqual(Array(12).fill('OCR evidence'))
   const status=await manager.status(),device=status.devices.find(device=>device.device==='CUDA:0')
   expect(device).toMatchObject({enabled:true,pending:0})
-  expect([cuda,npu,igpu].reduce((sum,lane)=>sum+lane.process.request.mock.calls.length,0)).toBe(12)
+  expect([cpu,cuda,npu,igpu].reduce((sum,lane)=>sum+lane.process.request.mock.calls.length,0)).toBe(12)
 })
 
 it('shares CUDA backend qualification only for matching provider and source model identity', async () => {
@@ -152,4 +152,25 @@ it('sends a page to idle NPU before queueing behind busy CUDA',async()=>{
  expect(npu.process.request).toHaveBeenCalledOnce()
  expect(cuda.process.request).not.toHaveBeenCalled()
  cuda.pending=0
+})
+
+it('releases idle CUDA model copies for another stage but preserves short rendering gaps', async () => {
+  const {knowledgeGpuAdmission}=await import('../src/knowledge/background-gpu.js')
+  const availability=await import('../src/knowledge/embedding-device-availability.js')
+  const probe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:true,freeMiB:0,reason:'available'})
+  const owner={}
+  const {manager,cuda}=fixture()
+  manager.configure({localOcrGpuWorkers:1})
+  Object.assign(manager,{usedAt:Date.now()-5000,intelAvailability:{sample:async()=>({available:true})}})
+  knowledgeGpuAdmission.request(owner,true)
+  const update=()=> (manager as unknown as {updateDevices():Promise<void>}).updateDevices()
+  try {
+    await update();expect(cuda.process.stopAndWait).not.toHaveBeenCalled()
+    Object.assign(manager,{usedAt:Date.now()-20000})
+    cuda.pending=1
+    await update();expect(cuda.process.stopAndWait).not.toHaveBeenCalled()
+    cuda.pending=0
+    await update();expect(cuda.process.stopAndWait).toHaveBeenCalledOnce()
+    expect(cuda.enabled).toBe(false)
+  } finally {knowledgeGpuAdmission.request(owner,false);probe.mockRestore()}
 })

@@ -48,14 +48,20 @@ class Layout:
    yield {'boxes':[{'label':v} for v in labels], 'input_img':labels}
 class Result:
  def __init__(self, labels): self.labels=labels
- def save_to_json(self, save_path):
-  pathlib.Path(save_path).write_text(json.dumps({'parsing_res_list':[{'block_label':v,'block_content':v+' evidence'} for v in self.labels]}))
+ @property
+ def json(self):
+  return {'res':{'parsing_res_list':[{'block_label':v,'block_content':v+' evidence'} for v in self.labels]}}
 class Pipeline:
+ def __init__(self):
+  self.paddlex_pipeline=self
+  self._pipeline=self
+  self.layout_det_model=Layout().predict
  def predict(self, input, **kwargs):
   assert input in (['table'],['chart'])
   yield Result(input)
 g['layout_pipeline']=lambda:Layout()
-g['pipeline']=lambda charts:Pipeline()
+engine=Pipeline()
+g['pipeline']=lambda charts:engine
 r=m['extract']('source.pdf',True,True)
 assert r['pageCount']==4
 assert [b['page'] for b in r['blocks']]==[3,4]
@@ -64,10 +70,83 @@ assert [b['type'] for b in r['blocks']]==['table']
 class Empty:
  def predict(self, **kwargs):
   yield {'boxes':[], 'input_img':'unused'}
-g['layout_pipeline']=lambda:Empty()
+engine.layout_det_model=Empty().predict
 assert m['extract']('source.pdf',True,True)=={'blocks':[],'pageCount':1}
 print('ok')
 `],{cwd:process.cwd(),encoding:'utf8'})
     expect(output.trim()).toBe('ok')
   })
+})
+
+it('uses reference crops for accelerated table pages and rejects screening false positives', () => {
+  const output=execFileSync('python3',['-c',`
+import runpy
+m=runpy.run_path('scripts/structure-v3.py');g=m['extract'].__globals__
+class Detector:
+ def __init__(self):
+  self.runner='accelerated';self._dsh_reference_runner='reference';self.refined=[]
+ def __call__(self,input,**kwargs):
+  if isinstance(input,str):
+   assert kwargs['threshold']==0.25
+   for page,label in [('plain','text'),('table','table'),('false_positive','chart')]:
+    yield {'input_img':page,'boxes':[{'label':label}], 'crop':'approximate'}
+  else:
+   assert self.runner=='reference'
+   page=input[0];self.refined.append(page)
+   yield {'input_img':page,'boxes':[{'label':'table' if page=='table' else 'text'}], 'crop':'exact'}
+class Engine:
+ def __init__(self):self.paddlex_pipeline=self;self.layout_det_model=Detector()
+engine=Engine();g['pipeline']=lambda charts:engine
+class Result:
+ json={'res':{'parsing_res_list':[{'block_label':'table','block_content':'original cells'}]}}
+def predict(image,charts,layout):
+ assert image=='table' and layout['crop']=='exact'
+ yield Result()
+g['predict_page']=predict
+result=m['extract']('source.pdf',True,True)
+assert result=={'pageCount':3,'blocks':[{'page':2,'type':'table','text':'original cells'}]}
+assert engine.layout_det_model.refined==['table','false_positive']
+assert engine.layout_det_model.runner=='accelerated'
+print('ok')
+`],{cwd:process.cwd(),encoding:'utf8'})
+  expect(output.trim()).toBe('ok')
+})
+
+it('renders only the requested PDF pages and restores their absolute page numbers', () => {
+  const output=execFileSync('python3',['-c',String.raw`
+import runpy,sys,types,threading
+m=runpy.run_path('scripts/structure-v3.py');g=m['extract_range'].__globals__
+lock=threading.Lock()
+sys.modules['paddlex.inference.utils.io.readers']=types.SimpleNamespace(pdfium_lock=lock)
+rendered=[];closed=[]
+class Page:
+ def __init__(self,index):self.index=index
+ def close(self):closed.append(self.index)
+class Doc:
+ def __len__(self):return 8
+ def __getitem__(self,index):return Page(index)
+ def close(self):closed.append('doc')
+class Reader:
+ def __init__(self):self._backend=self
+ def load(self,source):
+  with lock:return Doc()
+ def _render_page(self,page,*,page_index):
+  assert page_index==page.index+1
+  rendered.append(page.index);return page.index
+reader=Reader()
+g['pipeline']=lambda charts:types.SimpleNamespace(paddlex_pipeline=types.SimpleNamespace(layout_det_model=types.SimpleNamespace(batch_sampler=types.SimpleNamespace(pdf_reader=reader))))
+def extract(images,charts,tables):
+ assert images==[2,3] and tables
+ return {'pageCount':2,'blocks':[{'page':2,'type':'table','text':'original 123.45'}]}
+g['extract']=extract
+r=m['extract_range']('source.pdf',True,2,2)
+assert r=={'pageCount':8,'pageStart':2,'pageEnd':4,'blocks':[{'page':4,'type':'table','text':'original 123.45'}]}
+assert rendered==[2,3] and closed==[2,3,'doc']
+for start,limit in [(8,1),(-1,1),(0,9),(True,1)]:
+ try:m['extract_range']('source.pdf',True,start,limit)
+ except ValueError:pass
+ else:raise AssertionError('Invalid range accepted')
+print('ok')
+`],{cwd:process.cwd(),encoding:'utf8',timeout:5000})
+  expect(output.trim()).toBe('ok')
 })

@@ -164,7 +164,7 @@ export class EmbeddingAcceleration {
       while(!chosen) {
         if(this.stopped)throw Error('Embedding worker stopped')
         const cpuLanes=this.lanes.filter(l=>l.device==='CPU').slice(0,embeddingCpuLaneLimit(availableParallelism(),this.threads))
-        const eligible=this.lanes.filter(l=>(l.device!=='CPU'||cpuLanes.includes(l)&&(purpose==='query'||this.indexCpuAvailable()))&&l.enabled&&l.qualified!==false&&(!l.device.startsWith('GPU')||purpose==='index'&&(!this.foreground||l.device==='GPU:intel')&&!this.igpuReservations))
+        const eligible=this.lanes.filter(l=>(l.device!=='CPU'||cpuLanes.includes(l)&&(purpose==='query'||this.indexCpuAvailable()))&&l.enabled&&l.qualified!==false&&(!l.device.startsWith('GPU')||purpose==='index'&&!this.foreground&&!this.igpuReservations))
         if(!eligible.length){if(purpose==='index'&&!this.indexCpuAvailable()){await pause(20);continue}throw Error('No embedding device is available')}
         // Leave bulk work unassigned until a lane has capacity. Eagerly queuing
         // an entire document behind a slow CPU/NPU creates a long tail while
@@ -239,7 +239,7 @@ export class EmbeddingAcceleration {
     const cpus=this.lanes.filter(lane=>lane.device==='CPU'),first=cpus[0]
     try {
       if(this.npuRecoveryLane)await this.stopGpu(this.npuRecoveryLane)
-      await Promise.all(this.lanes.filter(lane=>lane.device==='GPU:main' || lane.device==='NPU' || yieldIgpu&&lane.device==='GPU:intel' || lane.device==='CPU' && lane!==first).map(lane=>this.stopGpu(lane)))
+      await Promise.all(this.lanes.filter(lane=>lane.device.startsWith('GPU:') || lane.device==='NPU' || lane.device==='CPU' && lane!==first).map(lane=>this.stopGpu(lane)))
       if(first && (first.cpuThreads ?? this.threads)>8){
         await this.stopGpu(first)
         const replacement=this.lane('CPU',first.milliseconds,false,8)
@@ -269,7 +269,7 @@ export class EmbeddingAcceleration {
           } else if(process.platform==='linux') decision=await this.intelAvailability.sample(owned())
         }
         if(main?!this.mainGpuAllowed:!this.igpuAllowed)decision={available:false,reason:'Disabled in embedding settings'}
-        if(this.stopped||(main?this.foreground:this.igpuReservations))decision.available=false
+        if(this.stopped||(this.foreground||!main&&this.igpuReservations))decision.available=false
         decisions.set(main,decision)
         const current=this.lanes.find(l=>l.device===`GPU:${main?'main':'intel'}`)
         if(!decision.available&&current?.enabled)await this.stopGpu(current)
@@ -285,7 +285,7 @@ export class EmbeddingAcceleration {
         const existing=this.lanes.find(l=>l.device===device)
         const decision=decisions.get(main)!
         let available=decision.available,reason=decision.reason
-        if(this.stopped||(main?this.foreground:this.igpuReservations))available=false
+        if(this.stopped||(this.foreground||!main&&this.igpuReservations))available=false
         let state=this.ready?.devices.find(d=>d.device===device || !main&&d.device==='GPU')
         if(!state) {state={device,name:main?'NVIDIA GPU':'Intel iGPU',qualified:false};this.ready!.devices.push(state)}
         state.blockedReason=available?undefined:reason
@@ -302,7 +302,7 @@ export class EmbeddingAcceleration {
           const cpu=this.lanes.find(l=>l.device==='CPU')!
           this.reference??=Promise.all(texts.map(text=>this.run(cpu,text,'query')))
           const [references,vectors]=await Promise.all([this.reference,Promise.all(texts.map(text=>this.run(candidate,text)))])
-          if(this.stopped||(main?this.foreground:this.igpuReservations)||!candidate.enabled)throw Error('Embedding device yielded during validation')
+          if(this.stopped||(this.foreground||!main&&this.igpuReservations)||!candidate.enabled)throw Error('Embedding device yielded during validation')
           let cosine=Math.min(...references.map((a,index)=>a.reduce((sum,v,i)=>sum+v*vectors[index][i],0)))
           if(main&&this.fp16) {
             // Initialize both CUDA workers and measure full batches before

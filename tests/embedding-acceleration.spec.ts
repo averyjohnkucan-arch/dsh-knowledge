@@ -125,14 +125,14 @@ describe('foreground embedding CPU budget',()=>{
  })
 })
 
-it('keeps Intel available during chat but yields it for a nested Intel reservation',async()=>{
+it('releases Intel during chat and keeps accelerators stopped across nested reservations',async()=>{
  const {manager,cpu,npu}=fixture()
  const intel={...cpu,device:'GPU:intel',worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})}}
  Object.assign(manager,{lanes:[cpu,npu,intel]})
  const chat=await manager.enterForeground()
- expect(intel.enabled).toBe(true);expect(npu.enabled).toBe(false)
+ expect(intel.enabled).toBe(false);expect(npu.enabled).toBe(false)
  const otherModel=await manager.enterForeground(true)
- expect(intel.enabled).toBe(false);expect(intel.worker.stopAndWait).toHaveBeenCalledOnce()
+ expect(intel.enabled).toBe(false);expect(intel.worker.stopAndWait).toHaveBeenCalledTimes(2)
  otherModel();expect(npu.enabled).toBe(false)
  chat();expect(npu.enabled).toBe(true);manager.dispose()
 })

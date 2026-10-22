@@ -376,7 +376,7 @@ export class KnowledgeService extends Service {
     this.ctx.inject(['modelScheduler'], scope => {
       const scheduler = scope.get('modelScheduler') as BackgroundScheduler
       scope.effect(() => knowledgeGpuAdmission.attach(scheduler, async () => {
-        await Promise.all([embeddingAcceleration.yieldMainGpu(), embeddingFp16Acceleration.yieldMainGpu(), this.ocrAcceleration.yieldMainGpu()])
+        await Promise.all([embeddingAcceleration.yieldMainGpu(), embeddingFp16Acceleration.yieldMainGpu(), this.ocrAcceleration.yieldMainGpu(), this.structureV3.yieldMainGpu()])
       }))
     })
     this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
@@ -3399,7 +3399,7 @@ export class KnowledgeService extends Service {
 
   async enterEmbeddingForeground(yieldIgpu = false) {
     this.foregroundReservations++; this.applyEmbeddingCpuTuning(this.getConfig())
-    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(yieldIgpu), embeddingFp16Acceleration.enterForeground(yieldIgpu), this.ocrAcceleration.enterForeground(yieldIgpu), enterOcrPoolForeground()])
+    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(yieldIgpu), embeddingFp16Acceleration.enterForeground(yieldIgpu), this.ocrAcceleration.enterForeground(yieldIgpu), this.structureV3.enterForeground(), enterOcrPoolForeground()])
     const failed = releases.find(result => result.status === 'rejected')
     if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); this.foregroundReservations--;this.applyEmbeddingCpuTuning(this.getConfig());throw failed.reason }
     let done=false

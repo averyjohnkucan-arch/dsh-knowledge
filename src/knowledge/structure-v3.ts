@@ -1,3 +1,9 @@
+import { knowledgeGpuAdmission } from './background-gpu.js'
+import { acceleratorEnvironment } from './ocr-acceleration.js'
+import { registerBackgroundDevices, backgroundDevicePids, IntelEmbeddingAvailability, nvidiaEmbeddingAvailability } from './embedding-device-availability.js'
+import { enterStructureCpuWork } from './structure-cpu-budget.js'
+import { availableParallelism, freemem } from 'node:os'
+import { ProcessingQueue } from './processing-queue.js'
 import { stopOwnedProcess } from './owned-process.js'
 import { ensurePrivatePython } from './private-python.js'
 import { StructureProcess } from './structure-process.js'
@@ -11,15 +17,27 @@ import { parsedTextDocument } from './parsed-document.js'
 import { extractHtmlToMarkdown } from './parse.js'
 import type { ParsedBlock, ProcessingOutput } from './processing-types.js'
 
-export interface StructureStatus { status: 'not_downloaded' | 'installing' | 'ready' | 'error'; progress: number; message: string; device: 'cpu' }
+export interface StructureStatus { status: 'not_downloaded' | 'installing' | 'ready' | 'error'; progress: number; message: string; device: 'cpu'; activity?: { activeDocuments: number; foreground: boolean; devices: { device: string; active: number; pages: number; requests: number; seconds: number }[] } }
+interface StructureLane { process: StructureProcess; busy: boolean; device: string; disabled?: boolean; current?: Promise<unknown> }
 const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, import.meta.url))
 export class StructureV3Manager {
   private state: StructureStatus = { status: 'not_downloaded', progress: 0, message: '', device: 'cpu' }
   private children = new Set<ChildProcess>()
   private setup?: Promise<void>
-  private queue: Promise<unknown> = Promise.resolve()
+  private readonly concurrency = Math.max(1, Math.min(2, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (4 * 1024 ** 3))))
+  private readonly queue = new ProcessingQueue(this.concurrency + 1)
+  private readonly cpuQueue = new ProcessingQueue(this.concurrency)
+  private active = 0
+  private readonly measurements = new Map<string, {pages:number;requests:number;seconds:number}>()
+  private readonly stop = new AbortController()
+  private readonly workers: StructureLane[] = []
+  private foreground = 0
+  private readonly intelAvailability = new IntelEmbeddingAvailability()
+  private readonly unregisterDevices = registerBackgroundDevices(() => this.workers.map(lane => lane.process.pid))
+  private layoutFailed = new Set<string>()
+  private readonly reservedDevices = new Set<string>()
+  private reserveDevice(device: string): string { this.reservedDevices.add(device); return device }
   private stopped = false
-  private worker?: StructureProcess
   private workerRoot?: string
   root(): string { return join(localModelCacheDir(), 'structure-v3') }
   python(): string { return join(this.root(), 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') }
@@ -29,7 +47,21 @@ export class StructureV3Manager {
       const receipt = JSON.parse(await readFile(join(this.root(), 'ready.json'), 'utf8'))
       if (receipt.schema !== 1 || receipt.device !== 'cpu' || receipt.paddleocr !== '3.7.0') throw new Error('Unverified installation')
       await access(this.python())
-      return { status: 'ready', progress: 100, message: 'PP-StructureV3: English OCR, layout, tables and charts · CPU', device: 'cpu' }
+      let layout = ''
+      try {
+        const acceleration = JSON.parse(await readFile(join(this.root(), 'layout-openvino/ready.json'), 'utf8'))
+        if (acceleration.schema === 1 && acceleration.model === 'PP-DocLayout_plus-L' && Array.isArray(acceleration.devices)) {
+          const devices = acceleration.devices.filter((device: string) => ['NPU','GPU'].includes(device) && !this.layoutFailed.has(device))
+          if (devices.length) layout = ` · OpenVINO ${devices.join('/')} layout${this.foreground ? ' (paused for chat)' : ''}`
+        }
+      } catch { /* The standard CPU installation remains usable. */ }
+      let cuda = ''
+      try {
+        const gpu = JSON.parse(await readFile(join(this.root(), 'gpu-ready.json'), 'utf8'))
+        if (gpu.schema === 1 && gpu.precision === 'float32' && gpu.tf32 === false && !this.layoutFailed.has('CUDA')) cuda = this.foreground ? ' · CUDA paused for chat' : ' · CUDA FP32'
+      } catch { /* Optional GPU runtime is not installed. */ }
+      return { status: 'ready', progress: 100, message: `PP-StructureV3: English OCR, tables and charts · CPU${cuda}${layout}`, device: 'cpu',
+        activity:{activeDocuments:this.active,foreground:this.foreground>0,devices:[...new Set([...this.measurements.keys(),...this.workers.map(lane=>lane.device)])].map(device=>({device,active:this.workers.filter(lane=>lane.device===device&&lane.busy).length,...(this.measurements.get(device)??{pages:0,requests:0,seconds:0})}))} }
     } catch { return { status: 'not_downloaded', progress: 0, message: '', device: 'cpu' } }
   }
   private run(command: string, args: string[], timeout: number, signal?: AbortSignal, onText?: (text: string) => void, extraEnv: NodeJS.ProcessEnv = {}): Promise<void> {
@@ -66,40 +98,196 @@ export class StructureV3Manager {
     }).finally(() => { this.setup = undefined })
     return { ...this.state }
   }
-  async extract(bytes: Uint8Array, fingerprint: string, charts: boolean, timeout: number, signal?: AbortSignal, tablesOnly = false): Promise<ProcessingOutput> {
-    const task = async () => {
-      signal?.throwIfAborted()
-      if ((await this.status()).status !== 'ready') throw Object.assign(new Error('Install PP-StructureV3 in Knowledge → Local Models first'), { code: 'structure_not_ready' })
-      const dir = await mkdtemp(join(tmpdir(), 'dsh-structure-'))
-      try {
-        await writeFile(join(dir, 'source.pdf'), bytes)
-        if (this.stopped) throw new Error('Knowledge plugin is disabled')
-        if (!this.worker || this.workerRoot !== this.root()) {
-          this.worker?.dispose(); this.workerRoot = this.root()
-          this.worker = new StructureProcess(this.python(), [script('structure-v3.py'), '--worker'], {
-            ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '',
-            PADDLE_PDX_CACHE_HOME: join(this.root(), 'models'), HF_HOME: join(this.root(), 'hf-cache'), PYTHONUNBUFFERED: '1',
-          })
+  private async layoutDevice(tablesOnly = true): Promise<string> {
+    if (this.foreground) return 'CPU'
+    try {
+      const cuda = JSON.parse(await readFile(join(this.root(), 'gpu-ready.json'), 'utf8'))
+      if (cuda.schema === 1 && cuda.paddleocr === '3.7.0' && cuda.precision === 'float32' && cuda.tf32 === false && !this.layoutFailed.has('CUDA') && !this.reservedDevices.has('CUDA') && !this.workers.some(lane => lane.device === 'CUDA' && lane.busy)) {
+        const decision = knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(() => backgroundDevicePids()) : {available:false,freeMiB:0}
+        const resident = this.workers.some(lane => lane.device === 'CUDA' && lane.process.pid)
+        if (decision.available && (decision.freeMiB ?? 0) >= (resident ? 2048 : 8192) && !this.foreground && !this.reservedDevices.has('CUDA')) return this.reserveDevice('CUDA')
+      }
+    } catch { /* The optional CUDA runtime is not qualified. */ }
+    try {
+      const receipt = JSON.parse(await readFile(join(this.root(), 'layout-openvino/ready.json'), 'utf8'))
+      if (receipt.schema !== 1 || receipt.model !== 'PP-DocLayout_plus-L' || !Array.isArray(receipt.devices)) return 'CPU'
+      const free = (device: string) => receipt.devices.includes(device) && !this.layoutFailed.has(device) && !this.reservedDevices.has(device) && !this.workers.some(lane => lane.device === device && lane.busy)
+      if (tablesOnly && free('NPU')) return this.reserveDevice('NPU')
+      if (free('GPU')) {
+        let decision = await this.intelAvailability.sample(backgroundDevicePids())
+        // Engine counters need two samples. Do not pin an entire PDF to CPU
+        // merely because this is the first admission check after startup.
+        if (!decision.available && decision.reason === 'Measuring Intel GPU activity') {
+          await new Promise<void>(resolve => setTimeout(resolve, 200))
+          if (this.foreground || this.stopped || !free('GPU')) return 'CPU'
+          decision = await this.intelAvailability.sample(backgroundDevicePids())
         }
-        await this.worker.request({ input: join(dir, 'source.pdf'), output: join(dir, 'result.json'), charts, tablesOnly }, timeout, signal)
-        const result = JSON.parse(await readFile(join(dir, 'result.json'), 'utf8')) as { pageCount: number; blocks: { page: number; type: string; text: string }[] }
-        if (!Number.isInteger(result.pageCount) || result.pageCount < 1 || result.pageCount > 10000 || !Array.isArray(result.blocks)) throw new Error('Invalid PP-StructureV3 page count')
-        const blocks: ParsedBlock[] = []; let text = ''
-        for (const block of result.blocks) {
-          if (!Number.isInteger(block.page) || block.page < 1 || typeof block.text !== 'string') throw new Error('Invalid PP-StructureV3 result')
-          const content = block.text.includes('<table') ? await extractHtmlToMarkdown(block.text) : block.text
-          const start = text.length; text += content + '\n\n'
-          const type = block.type.includes('title') ? 'heading' : block.type === 'table' || block.type === 'chart' ? 'table' : 'text'
-          blocks.push({ id: `structure-${blocks.length}`, index: blocks.length, type, text: content, textStart: start, textEnd: start + content.length, pageIndex: block.page - 1 })
-        }
-        if (!tablesOnly && !text.trim()) throw new Error('PP-StructureV3 returned no readable text')
-        const output = parsedTextDocument(text, bytes, 'paddle', fingerprint)
-        return { ...output, document: { ...output.document, processorVersion: 'PaddleOCR 3.7.0 / PP-StructureV3 CPU', blocks,
-          completeness: 'complete' as const, pageCount: result.pageCount, processedPages: Array.from({ length: result.pageCount }, (_, index) => index) } }
-      } finally { await rm(dir, { recursive: true, force: true }) }
-    }
-    const pending = this.queue.then(task, task); this.queue = pending.catch(() => {}); return pending
+        if (decision.available && !this.foreground && !this.stopped && free('GPU')) return this.reserveDevice('GPU')
+      }
+    } catch { /* Optional acceleration is not installed. */ }
+    return 'CPU'
   }
-  dispose(): void { this.stopped = true; this.worker?.dispose(); for (const child of this.children) stopOwnedProcess(child, 'SIGTERM') }
+  async yieldMainGpu(): Promise<void> {
+    await Promise.all(this.workers.filter(lane => lane.device === 'CUDA').map(lane => this.stopLane(lane)))
+  }
+  private async stopLane(lane: StructureLane): Promise<void> {
+    lane.disabled = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try { await Promise.race([lane.current ?? Promise.resolve(), new Promise<void>(resolve => { timer = setTimeout(resolve, 10_000) })]).catch(() => {}) }
+    finally { if (timer) clearTimeout(timer); await lane.process.stopAndWait() }
+  }
+  async enterForeground(): Promise<() => void> {
+    this.foreground++
+    try {
+      await Promise.all(this.workers.filter(lane => lane.device !== 'CPU').map(lane => this.stopLane(lane)))
+    } catch (error) { this.foreground--; throw error }
+    let released = false
+    return () => { if (!released) { released = true; this.foreground-- } }
+  }
+  private worker(device: string): StructureLane {
+    for (let i = this.workers.length - 1; i >= 0; i--) {
+      if (this.workers[i].disabled && !this.workers[i].busy) { this.workers[i].process.dispose(); this.workers.splice(i, 1) }
+    }
+    let lane = this.workers.find(worker => !worker.busy && worker.device === device && !worker.disabled)
+    if (lane) return lane
+    const env: NodeJS.ProcessEnv = {
+      ...process.env, CUDA_VISIBLE_DEVICES: '', HIP_VISIBLE_DEVICES: '', ROCR_VISIBLE_DEVICES: '',
+      PADDLE_PDX_CACHE_HOME: join(this.root(), 'models'), HF_HOME: join(this.root(), 'hf-cache'), PYTHONUNBUFFERED: '1',
+    }
+    // Only an explicitly qualified receipt enables the optional Intel layout path.
+    if (device === 'NPU' || device === 'GPU') Object.assign(env, acceleratorEnvironment(join(localModelCacheDir(), 'ocr-accelerators')), {
+      PYTHONPATH: [join(this.root(), 'export-overlay'), process.env.PYTHONPATH].filter(Boolean).join(process.platform === 'win32' ? ';' : ':'),
+      DSH_STRUCTURE_LAYOUT_MODEL: join(this.root(), 'layout-openvino/layout.xml'),
+      DSH_STRUCTURE_LAYOUT_CACHE: join(this.root(), 'layout-openvino/compiled'),
+      DSH_STRUCTURE_LAYOUT_DEVICE: device,
+    })
+    else { delete env.DSH_STRUCTURE_LAYOUT_MODEL; delete env.DSH_STRUCTURE_LAYOUT_DEVICE }
+    env.DSH_STRUCTURE_DEVICE = device === 'CUDA' ? 'gpu:0' : 'cpu'
+    if (device === 'CUDA') {
+      delete env.CUDA_VISIBLE_DEVICES
+      const libraries = ['cuda_nvrtc','cuda_runtime','cuda_cupti','cudnn','cublas','cufft','curand','cusolver','cusparse','cusparselt','nccl','nvtx','nvjitlink','cufile']
+      env.LD_LIBRARY_PATH = [...libraries.map(name => join(this.root(), 'cuda-overlay/nvidia', name, 'lib')), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':')
+      env.PYTHONPATH = [join(this.root(), 'gpu-overlay'),join(this.root(), 'cuda-overlay'),process.env.PYTHONPATH].filter(Boolean).join(process.platform === 'win32' ? ';' : ':')
+      env.NVIDIA_TF32_OVERRIDE = '0'
+      env.FLAGS_allocator_strategy = 'auto_growth'
+      env.FLAGS_fraction_of_gpu_memory_to_use = '0.7'
+    }
+    lane = {process: new StructureProcess(this.python(), [script('structure-v3.py'), '--worker'], env), busy: false, device}
+    this.workers.push(lane)
+    return lane
+  }
+  async extract(bytes: Uint8Array, fingerprint: string, charts: boolean, timeout: number, signal?: AbortSignal, tablesOnly = false): Promise<ProcessingOutput> {
+    const failed = new AbortController()
+    const combined = AbortSignal.any([...(signal ? [signal] : []), this.stop.signal, failed.signal])
+    type Result = { pageCount: number; pageStart?: number; pageEnd?: number; blocks: { page: number; type: string; text: string }[] }
+    const ranged = tablesOnly && Buffer.from(bytes.subarray(0, 5)).toString() === '%PDF-'
+    const devices = new Set<string>()
+    let dir: string | undefined
+    this.active++; knowledgeGpuAdmission.request(this, !this.foreground)
+    try {
+      combined.throwIfAborted()
+      if ((await this.status()).status !== 'ready') throw Object.assign(new Error('Install PP-StructureV3 in Knowledge → Local Models first'), { code: 'structure_not_ready' })
+      dir = await mkdtemp(join(tmpdir(), 'dsh-structure-'))
+      const input = join(dir, 'source.pdf')
+      await writeFile(input, bytes)
+      if (this.workerRoot !== this.root()) {
+        for (const lane of this.workers) lane.process.dispose()
+        this.workers.length = 0; this.workerRoot = this.root()
+      }
+      let serial = 0
+      const run = async (device: string, start?: number, limit?: number): Promise<Result> => {
+        combined.throwIfAborted()
+        if (this.foreground && device === 'CUDA') return this.cpuQueue.run(() => run('CPU', start, limit), combined)
+        if (this.foreground) device = 'CPU'
+        const output = join(dir!, `result-${serial++}.json`)
+        const releaseCpu = device === 'CUDA' ? undefined : enterStructureCpuWork()
+        try {
+          const lane = this.worker(device)
+          lane.busy = true
+          try {
+            const started = performance.now()
+            lane.current = lane.process.request({input, output, charts, tablesOnly,
+              ...(start === undefined ? {} : {startPage:start,pageLimit:limit})}, timeout, combined)
+            await lane.current
+            const result = JSON.parse(await readFile(output, 'utf8')) as Result
+            if (!Number.isInteger(result.pageCount) || result.pageCount < 1 || result.pageCount > 10000 || !Array.isArray(result.blocks)) throw new Error('Invalid PP-StructureV3 page count')
+            if (start !== undefined && (result.pageStart !== start || result.pageEnd !== Math.min(result.pageCount, start + limit!))) throw new Error('Incomplete PP-StructureV3 page range')
+            for (const block of result.blocks) {
+              if (!Number.isInteger(block.page) || block.page < (start ?? 0) + 1 || block.page > (result.pageEnd ?? result.pageCount) || typeof block.text !== 'string' || typeof block.type !== 'string') throw new Error('Invalid PP-StructureV3 result')
+            }
+            devices.add(device)
+            const measured = this.measurements.get(device) ?? {pages:0,requests:0,seconds:0}
+            measured.pages += start === undefined ? result.pageCount : result.pageEnd! - start
+            measured.requests++; measured.seconds += (performance.now() - started) / 1000
+            this.measurements.set(device, measured)
+            return result
+          } catch (error) {
+            if (device === 'CPU' || combined.aborted || this.stopped) throw error
+            // Retry only this uncommitted range. Earlier ranges remain intact.
+            if (!lane.disabled) this.layoutFailed.add(device)
+            lane.disabled = true; await lane.process.stopAndWait()
+            return await (device === 'CUDA' ? this.cpuQueue.run(() => run('CPU', start, limit), combined) : run('CPU', start, limit))
+          } finally { lane.busy = false; lane.current = undefined }
+        } finally { releaseCpu?.(); await rm(output, {force:true}) }
+      }
+      const schedule = (claim: (device: string) => {start?:number;limit?:number} | undefined): Promise<Result | undefined> => this.queue.run(async () => {
+        const device = await this.layoutDevice(tablesOnly)
+        try {
+          const range = claim(device)
+          if (!range) return undefined
+          return await (device === 'CUDA' && !this.foreground ? run(device, range.start, range.limit) : this.cpuQueue.run(() => run(this.foreground ? 'CPU' : device, range.start, range.limit), combined))
+        } finally { this.reservedDevices.delete(device) }
+      }, combined)
+      // Discover page count while completing the first page. Subsequent ranges
+      // re-enter global admission, so fast devices can take work from long PDFs.
+      const first = (await schedule(() => ranged ? {start:0,limit:1} : {}))!
+      const results: Result[] = [first]
+      if (ranged && first.pageCount > 1) {
+        let next = 1
+        const consume = async () => {
+          while (next < first.pageCount) {
+            const result = await schedule(device => {
+              if (next >= first.pageCount) return undefined
+              const start = next
+              const limit = Math.min(device === 'CUDA' ? 8 : 1, first.pageCount - start)
+              next += limit
+              return {start,limit}
+            })
+            if (result) {
+              if (result.pageCount !== first.pageCount) throw new Error('PP-StructureV3 PDF changed during processing')
+              results.push(result)
+            }
+          }
+        }
+        const jobs = Array.from({length:this.concurrency + 1}, () => consume().catch(error => {failed.abort(error);throw error}))
+        const settled = await Promise.allSettled(jobs)
+        const rejected = settled.find(result => result.status === 'rejected')
+        if (rejected?.status === 'rejected') throw rejected.reason
+        results.sort((a,b) => a.pageStart! - b.pageStart!)
+        let end = 0
+        for (const result of results) {
+          if (result.pageStart !== end) throw new Error('Incomplete PP-StructureV3 page coverage')
+          end = result.pageEnd!
+        }
+        if (end !== first.pageCount) throw new Error('Incomplete PP-StructureV3 page coverage')
+      }
+      const blocks: ParsedBlock[] = []; let text = ''
+      for (const result of results) for (const block of result.blocks) {
+        const content = block.text.includes('<table') ? await extractHtmlToMarkdown(block.text) : block.text
+        const start = text.length; text += content + '\n\n'
+        const type = block.type.includes('title') ? 'heading' : block.type === 'table' || block.type === 'chart' ? 'table' : 'text'
+        blocks.push({id:`structure-${blocks.length}`,index:blocks.length,type,text:content,textStart:start,textEnd:start+content.length,pageIndex:block.page-1})
+      }
+      if (!tablesOnly && !text.trim()) throw new Error('PP-StructureV3 returned no readable text')
+      const output = parsedTextDocument(text, bytes, 'paddle', fingerprint)
+      return {...output, document:{...output.document,processorVersion:`PaddleOCR 3.7.0 / PP-StructureV3 ${[...devices].sort().join('+')}${ranged ? ' / bounded page ranges' : ''}`,blocks,
+        completeness:'complete' as const,pageCount:first.pageCount,processedPages:Array.from({length:first.pageCount},(_,index)=>index)}}
+    } finally {
+      if (dir) await rm(dir,{recursive:true,force:true})
+      this.active--; knowledgeGpuAdmission.request(this, this.active > 0 && !this.foreground)
+      if (!this.active) await Promise.all(this.workers.filter(lane => lane.device !== 'CPU').map(lane => this.stopLane(lane)))
+    }
+  }
+  dispose(): void { knowledgeGpuAdmission.request(this, false); this.unregisterDevices(); this.stopped = true; this.stop.abort(); for (const lane of this.workers) lane.process.dispose(); for (const child of this.children) stopOwnedProcess(child, 'SIGTERM') }
 }
 export const structureV3 = new StructureV3Manager()

@@ -69,7 +69,7 @@ export class OcrAcceleration {
   async enterForeground(yieldIgpu = false): Promise<() => void> {
     this.foreground++; if(yieldIgpu)this.igpuReservations++
     const cpu = this.lanes.filter(lane => lane.device.device === 'CPU')
-    try { await Promise.all(this.lanes.filter(lane => /^CUDA|^NPU/.test(lane.device.device) || yieldIgpu&&lane.device.device.startsWith('GPU') || cpu.includes(lane) && lane !== cpu[0]).map(lane => this.stopLane(lane))) }
+    try { await Promise.all(this.lanes.filter(lane => lane.device.device !== 'CPU' || cpu.includes(lane) && lane !== cpu[0]).map(lane => this.stopLane(lane))) }
     catch (error) { this.foreground--; if(yieldIgpu)this.igpuReservations--; throw error }
     let released = false
     return () => { if (!released) { released = true; this.foreground--; if(yieldIgpu)this.igpuReservations--; if (!this.foreground) for (const lane of this.lanes.filter(lane=>!lane.failed&&(lane.device.device==='CPU'||lane.device.device.startsWith('NPU')))) lane.enabled = true } }
@@ -90,14 +90,18 @@ export class OcrAcceleration {
     this.polling = true
     try {
       // Keep models warm across PDF rendering / structure gaps; foreground still wins.
-      const active = ocrDeviceWorkActive(0, this.usedAt, this.lanes.reduce((sum, lane) => sum + lane.pending, 0))
+      const pending = this.lanes.reduce((sum, lane) => sum + lane.pending, 0)
+      const active = ocrDeviceWorkActive(0, this.usedAt, pending)
+      // Keep short rendering gaps warm, but do not strand multiple OCR model
+      // copies in VRAM while structure/embedding needs the same device.
+      const yieldIdleCuda = pending === 0 && Date.now() - this.usedAt >= 10_000 && knowledgeGpuAdmission.hasOtherDemand(this)
       const idle = process.platform === 'linux' ? true : (await desktopIdle()).idleSeconds! >= 300
       const owned = () => backgroundDevicePids(new Set(this.lanes.flatMap(lane => lane.process.pid ? [lane.process.pid] : [])))
       const intel = active && idle ? await this.intelAvailability.sample(owned()) : { available: false }
       knowledgeGpuAdmission.request(this, !this.foreground && active && this.lanes.some(lane=>lane.pending>0))
       const nvidia: Awaited<ReturnType<typeof nvidiaEmbeddingAvailability>> = active && idle && knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(owned) : { available: false, reason: 'OCR is idle or foreground inference is active' }
-      if (this.stopped || this.igpuReservations) intel.available = false
-      if (this.stopped || this.foreground) nvidia.available = false
+      if (this.stopped || this.foreground || this.igpuReservations) intel.available = false
+      if (this.stopped || this.foreground || yieldIdleCuda) nvidia.available = false
       // Reserve headroom; each additional CUDA process can retain two model
       // arenas plus a context. Existing workers already count against free VRAM.
       const resident = this.lanes.filter(lane => lane.device.device.startsWith('CUDA') && lane.process.pid !== undefined).length
@@ -156,8 +160,12 @@ export class OcrAcceleration {
       const healthy=this.lanes.filter(lane=>!lane.failed&&lane.enabled&&(lane.retryAt??0)<=Date.now())
       if(!healthy.length)return undefined
       const accelerators=healthy.filter(lane=>lane.device.device!=='CPU')
-      const pool=accelerators.length?accelerators:healthy
+      // One CPU session also consumes pages while accelerators work. Keep the
+      // remaining cores available for rendering, parsing and device dispatch.
+      const pool=accelerators.length?[...accelerators,...healthy.filter(lane=>lane.device.device==='CPU').slice(0,1)]:healthy
       const choices=pool.filter(lane=>lane.pending < 1).sort((a,b)=>{
+        // Prefer idle accelerators, then let CPU take independent queued work.
+        if ((a.device.device==='CPU') !== (b.device.device==='CPU')) return a.device.device==='CPU'?1:-1
         // Keep each idle accelerator fed. Timing-only ranking can starve an
         // NPU forever when CUDA workers repeatedly become available first.
         if ((a.pending===0)!==(b.pending===0)) return a.pending===0?-1:1

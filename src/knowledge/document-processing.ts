@@ -20,7 +20,7 @@ export function processorFingerprint(config: KnowledgeConfig): string {
   return hash(JSON.stringify({
     ocrEnabled: config.ocrEnabled !== false,
     structureV3Charts: config.structureV3Charts ?? true,
-    version: 1, provider: config.documentProcessorProvider,
+    version: 2, provider: config.documentProcessorProvider,
     host: config.documentProcessorProvider === 'mineru-local' ? config.mineruLocalUrl : config.mineruApiHost,
     tier: config.mineruTier ?? 'basic',
     caption: { provider: config.imageCaptionProvider, model: config.imageCaptionModel, host: config.imageCaptionBaseUrl },
