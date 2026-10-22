@@ -49,3 +49,14 @@ it('an optional model failure keeps source text and records failure without an i
  expect(next.rawText).toBe('Original searchable source text.')
  expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(false)
 })
+
+it('a foreground interruption during embedding does not mark the model as failed',async()=>{
+ const {service,internal,doc,processing}=await fixture();const controller=new AbortController()
+ const config={...service.getConfigFor(doc.baseId),embeddingProvider:'openai',embeddingModel:'test'}
+ vi.spyOn(service,'getConfigFor').mockReturnValue(config as any)
+ vi.spyOn(internal,'embedWithRetry').mockImplementation(async()=>{controller.abort();throw controller.signal.reason})
+ await internal.enrichNextIdleChart(controller.signal)
+ expect(internal.store.getDocument(doc.id).processing.revision).toBe(processing.revision)
+ expect(internal.store.getDocument(doc.id).deferredChartEnrichment).toBeUndefined()
+ expect(internal.indexingFailures.has(doc.id)).toBe(false)
+})

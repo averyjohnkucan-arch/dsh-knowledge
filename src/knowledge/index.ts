@@ -5069,6 +5069,7 @@ export class KnowledgeService extends Service {
           if (guardedOnBatch !== undefined) await guardedOnBatch(done)
           this.indexing.set(docId, { baseId, title, phase: 'embedding', total: need.length, progress: Math.round((Math.min(i + batch.length, need.length) / need.length) * 100), controller: taskController })        }
       } catch (error) {
+        signal?.throwIfAborted()
         embeddingError = error instanceof Error ? error.message : String(error)
         embeddingErrorCode ??= 'embedding_provider'
         // Record it where /indexing-status can see it, with the REAL phase and
