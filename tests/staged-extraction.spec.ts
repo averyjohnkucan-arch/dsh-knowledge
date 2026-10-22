@@ -43,3 +43,10 @@ it('rejects stale prepared content instead of silently rerunning OCR in a later 
  expect(mocks.parse).toHaveBeenCalledOnce();expect(mocks.caption).toHaveBeenCalledOnce()
  expect(await artifacts.getJob('base','doc')).toMatchObject({state:'failed'})
 })
+
+it('defers detailed charts without delaying text extraction or calling the chart model',async()=>{
+ const input={bytes:new TextEncoder().encode('source'),fileName:'sample.pdf',config:{...config,deferredChartEnrichment:true}}
+ const output=await extractDocumentContent(input)
+ expect(await enrichDocumentContent(input,output)).toBe(output)
+ expect(mocks.caption).not.toHaveBeenCalled()
+})

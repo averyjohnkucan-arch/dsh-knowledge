@@ -52,6 +52,7 @@ export function processorErrorMessage(error: unknown): string {
 }
 
 export interface ProcessFileInput {
+  readonly managedCaption?: import('./managed-caption.js').ManagedCaption
   readonly structureV3?: StructureV3Manager
   /** Gate parsing only; optional structure enrichment must not hold parser capacity. */
   readonly runParsing?: <T>(task: () => Promise<T>) => Promise<T>
@@ -230,19 +231,20 @@ export async function extractDocumentContent(input: Pick<ProcessFileInput,
  * the source PDF through parseDocumentBuffer. Structure models retain their
  * own internal recognition where required to interpret a table or chart. */
 export async function enrichDocumentContent(input: Pick<ProcessFileInput,
-  'bytes' | 'fileName' | 'config' | 'signal' | 'structureV3'>, output: ProcessingOutput,
+  'bytes' | 'fileName' | 'config' | 'signal' | 'structureV3' | 'managedCaption'>, output: ProcessingOutput,
   progress: (value: ProcessingProgress) => void = () => {}): Promise<ProcessingOutput> {
   const {config, bytes} = input
   const pdf = extensionOf(input.fileName) === 'pdf'
   input.signal?.throwIfAborted()
   if (!output.document.text.trim()) throw Object.assign(new Error('parsed document is empty'), { code: 'empty_result' })
     // Captioning remains opt-in, but now runs identically on import and reparse.
-    if (pdf && config.imageCaptionProvider !== 'off') {
+    if (pdf && config.imageCaptionProvider !== 'off' && !(config.deferredChartEnrichment && config.imageCaptionProvider === 'paddle')) {
       progress({ stage: 'enriching' })
       try {
         const { captionPdfImages } = await loadCaptionModule()
         input.signal?.throwIfAborted()
         const caption = await captionPdfImages(bytes, {
+          managedCaption: input.managedCaption,
           structureV3: input.structureV3, signal: input.signal, charts: config.structureV3Charts,
           provider: config.imageCaptionProvider, model: config.imageCaptionModel,
           baseUrl: config.imageCaptionBaseUrl, apiKey: config.imageCaptionApiKey,

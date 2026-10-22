@@ -1,3 +1,5 @@
+import { IdleEnrichment } from './idle-enrichment.js'
+import { createManagedCaption } from './managed-caption.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { ImportCheckpoints } from './import-checkpoints.js'
 import { runImportStages, type ImportStageProgress } from './import-stages.js'
@@ -323,10 +325,10 @@ export class KnowledgeService extends Service {
       const resourcePolicy=this.foregroundReservations ? 'Foreground inference reserves accelerators; background work uses CPU.'
         : pipeline.stage==='chunking' ? 'Chunking uses CPU text processing; GPU, iGPU and NPU have no compatible chunking kernel.'
         : pipeline.stage==='ocr' ? 'CPU, NVIDIA GPU and iGPU run OCR when available. Full-page NPU OCR is excluded by the current model checks; NPU layout runs in parsing.'
-        : pipeline.stage==='parsing' ? 'CPU and NVIDIA GPU interpret tables/charts; NPU and iGPU screen page layouts. Each device takes compatible queued work.'
+        : pipeline.stage==='parsing' ? (this.getConfigFor(run.baseId).deferredChartEnrichment ? 'Detailed chart parsing is deferred until imports and vectorization finish and DSH is idle.' : this.getConfigFor(run.baseId).imageCaptionProvider === 'paddle' ? 'CPU and NVIDIA GPU interpret tables/charts; NPU and iGPU screen page layouts.' : 'Optional brief image descriptions use the selected vision provider; source text is already extracted.')
         : !embeddingKey(this.getConfigFor(run.baseId)) ? 'No embedding model is selected; documents retain text and lexical chunks without vectors.'
         : 'Embedding devices depend on the selected model. The accelerated FP16 model supports CPU, NVIDIA GPU, iGPU and NPU; Intel input-length limits and other model reservations still apply.'
-      const devices=pipeline.stage==='ocr'?this.ocrAcceleration.runtimeDevices():pipeline.stage==='parsing'?this.structureV3.runtimeDevices():pipeline.stage==='vectorization' && this.getConfigFor(run.baseId).embeddingProvider==='local'?(this.getConfigFor(run.baseId).embeddingModel===FP16_EMBEDDING_MODEL?embeddingFp16Acceleration:embeddingAcceleration).runtimeDevices():undefined
+      const devices=pipeline.stage==='ocr'?this.ocrAcceleration.runtimeDevices():pipeline.stage==='parsing' && this.getConfigFor(run.baseId).imageCaptionProvider==='paddle' && !this.getConfigFor(run.baseId).deferredChartEnrichment?this.structureV3.runtimeDevices():pipeline.stage==='vectorization' && this.getConfigFor(run.baseId).embeddingProvider==='local'?(this.getConfigFor(run.baseId).embeddingModel===FP16_EMBEDDING_MODEL?embeddingFp16Acceleration:embeddingAcceleration).runtimeDevices():undefined
       return {...run,pipeline:{...pipeline,resourcePolicy,devices}}
     })
   }
@@ -513,6 +515,9 @@ export class KnowledgeService extends Service {
       }
     }).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     this.armUrlRefreshTimer()
+    const enrichmentTimer = setInterval(() => { void this.idleEnrichment.tick() }, 1000)
+    enrichmentTimer.unref()
+    this.ctx.effect(() => () => { clearInterval(enrichmentTimer); this.idleEnrichment.stop() }, 'knowledge: idle enrichment')
     this.externalFolders = new ExternalFolders(() => this.requireStore().listBases()
       .filter(base => base.storageMode === 'external' && base.externalPath)
       .map(base => ({ id: base.id, path: base.externalPath!, enabled: base.syncEnabled !== false,
@@ -528,6 +533,87 @@ export class KnowledgeService extends Service {
   }
 
   // ── scheduled URL refresh (Cherry's snapshot + manual refresh, automated) ──
+
+  private deferredChartDocumentId?: string
+  private readonly idleEnrichment = new IdleEnrichment(
+    () => this.shuttingDown || this.foregroundReservations > 0 || this.importStageProgress.size > 0
+      || this.embeddingBackfills.size > 0 || [...this.indexing.keys()].some(id => id !== this.deferredChartDocumentId)
+      || this.processingMeter.snapshots().some(run => run.active),
+    signal => this.enrichNextIdleChart(signal),
+  )
+
+  /** Keep the old searchable generation until chart text and its vectors are ready. */
+  private async enrichNextIdleChart(signal: AbortSignal): Promise<boolean> {
+    const store = this.requireStore()
+    let document: KnowledgeDocument | undefined
+    for (const base of store.listBases()) {
+      if (!this.getConfigFor(base.id).deferredChartEnrichment || base.embeddingBackfillPending) continue
+      document = store.listDocuments(base.id, {includeRawText: false}).find(doc =>
+        doc.sourceType === 'file' && /\.pdf$/i.test(doc.fileName ?? doc.title)
+        && doc.processing && !doc.incomplete && !doc.embeddingError
+        && doc.deferredChartEnrichment?.revision !== doc.processing.revision)
+      if (document) break
+    }
+    if (!document?.processing) return false
+    const original = document
+    const revision = document.processing.revision
+    const unchanged = () => store.getDocument(original.id)?.processing?.revision === revision && !!store.getBase(original.baseId)
+    this.deferredChartDocumentId = document.id
+    this.indexing.set(document.id, {baseId: document.baseId, title: document.title, phase: 'parsing', total: 0, progress: 0})
+    this.processingProgress.set(document.id, {stage: 'enriching'})
+    this.ctx.logger.info(`knowledge: idle chart enrichment started for ${document.id}`)
+    this.vectorPhaseDocuments.add(document.id)
+    try {
+      signal.throwIfAborted()
+      const bytes = document.sourcePath ? await readFile(document.sourcePath)
+        : document.rawFilePath ? await store.raw?.read(document.rawFilePath) : undefined
+      if (!bytes || createHash('sha256').update(bytes).digest('hex') !== document.processing.sourceHash) throw new Error('Chart source is missing or changed; reimport the document')
+      const parsed = await this.artifacts.load(document.baseId, document.id, document.processing)
+      const {captionPdfImages} = await import('./caption.js')
+      const caption = await captionPdfImages(bytes, {provider: 'paddle', model: 'PP-Chart2Table', baseUrl: '', apiKey: '', embeddingBaseUrl: '', charts: true, structureV3: this.structureV3, signal})
+      signal.throwIfAborted()
+      if (!unchanged()) return true
+      if (!caption.trim()) {
+        await store.putDocument({...store.getDocument(document.id)!, deferredChartEnrichment: {revision, status: 'completed'}, updatedAt: Date.now()})
+        return true
+      }
+      const assets = []
+      for (const asset of parsed.assets) {
+        const stored = await this.artifacts.readAsset(document.baseId, document.id, document.processing, asset.id)
+        if (!stored) throw new Error('Original document asset is missing')
+        assets.push({id: asset.id, bytes: stored.bytes})
+      }
+      const textStart = parsed.text.length + 2
+      const text = `${parsed.text}\n\n${caption}`
+      const enriched: ParsedDocument = {...parsed, text,
+        blocks: [...parsed.blocks, {id: 'deferred-chart-caption', index: parsed.blocks.length, type: 'caption', text: caption, textStart, textEnd: text.length}],
+        warnings: [...parsed.warnings, {code: 'generated_chart', message: 'Chart/table data was added by idle enrichment; verify values against the original.'}],
+      }
+      const processing = await this.artifacts.save(document.baseId, document.id, {document: enriched, assets})
+      const config = this.getConfigFor(document.baseId)
+      const processed = {text, parsed: enriched, processing}
+      const built = await this.buildChunks(document.baseId, document.id, document.title, text, config, this.processingChunks(processed, config), undefined, signal, processing.revision)
+      if (built.embeddingError) throw new Error('Chart embedding failed; original searchable generation retained')
+      signal.throwIfAborted()
+      if (!unchanged() || !this.getConfigFor(document.baseId).deferredChartEnrichment) return true
+      const next: KnowledgeDocument = {...store.getDocument(document.id)!, rawText: text, processing,
+        contentHash: sha256(text), charCount: text.length, tokenCount: estimateTokens(text), chunkCount: built.chunks.length,
+        deferredChartEnrichment: {revision: processing.revision, status: 'completed'}, updatedAt: Date.now()}
+      await this.commitIndexedGeneration(next, built.chunks, text, config, signal)
+      await this.touchBase(document.baseId)
+    } catch (error) {
+      if (!signal.aborted && unchanged()) {
+        await store.putDocument({...store.getDocument(document.id)!, deferredChartEnrichment: {revision, status: 'failed'}, updatedAt: Date.now()})
+        this.ctx.logger.warn(`knowledge: optional chart enrichment failed for ${document.id}; searchable text retained`)
+      }
+    } finally {
+      this.indexing.delete(document.id)
+      this.vectorPhaseDocuments.delete(document.id)
+      this.processingProgress.delete(document.id)
+      this.deferredChartDocumentId = undefined
+    }
+    return true
+  }
 
   private urlRefreshTimer: ReturnType<typeof setInterval> | null = null
   private urlRefreshing = false
@@ -2276,7 +2362,7 @@ export class KnowledgeService extends Service {
     try {
       const prepared = this.preparedImport.getStore()
       if (prepared === null) throw Object.assign(new Error('Source changed after staged import inventory'), {code:'prepared_source_changed'})
-      return await processDocumentFile({ ...input, ...(prepared ? {prepared} : {}), structureV3: this.structureV3, config, artifacts: this.artifacts, signal: budget.signal,
+      return await processDocumentFile({ ...input, ...(prepared ? {prepared} : {}), structureV3: this.structureV3, managedCaption: this.managedCaption, config, artifacts: this.artifacts, signal: budget.signal,
         runParsing: async task => {
           const result = await this.processingQueue.run(task, budget.signal)
           this.documentAdmission.parsed()
@@ -2672,7 +2758,7 @@ export class KnowledgeService extends Service {
             if(skipped.has(job.id))return
             const output=await checkpoints.load(job.id,'ocr'),source=await bytes(job)
             if(createHash('sha256').update(source).digest('hex')!==output.document.sourceHash)throw new Error('Source changed between OCR and parsing')
-            const enriched=await enrichDocumentContent({bytes:source,fileName:job.fileName,config,signal,structureV3:this.structureV3},output)
+            const enriched=await enrichDocumentContent({bytes:source,fileName:job.fileName,config,signal,structureV3:this.structureV3,managedCaption:this.managedCaption},output)
             await checkpoints.save(job.id,'parsing',enriched)
             await checkpoints.remove(job.id,'ocr')
           } else if(stage==='chunking') {
@@ -3570,6 +3656,7 @@ export class KnowledgeService extends Service {
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
   async enterEmbeddingForeground(yieldIgpu = false) {
+    this.idleEnrichment.interrupt()
     this.foregroundReservations++; this.applyEmbeddingCpuTuning(this.getConfig())
     const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(yieldIgpu), embeddingFp16Acceleration.enterForeground(yieldIgpu), this.ocrAcceleration.enterForeground(yieldIgpu), this.structureV3.enterForeground(), enterOcrPoolForeground()])
     const failed = releases.find(result => result.status === 'rejected')
@@ -3606,6 +3693,7 @@ export class KnowledgeService extends Service {
 
   // ── local OCR (scanned-PDF recognition, Cherry's local-document posture) ──
 
+  private readonly managedCaption = createManagedCaption({get: name => this.ctx.get(name)})
   readonly structureV3 = new StructureV3Manager()
   getStructureStatus() { return this.structureV3.status() }
   prepareStructure() { return this.structureV3.prepare() }

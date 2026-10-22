@@ -36,6 +36,7 @@ export interface BaseConfig {
   embeddingBatchSize?: number
   siblingChunks?: number
   ocrEnabled?: boolean
+  deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
   documentProcessorProvider?: 'builtin' | 'mineru' | 'mineru-local'
   mineruApiKey?: string
@@ -51,7 +52,7 @@ export interface BaseConfig {
   chunkTokenLimit?: number
   conflictStrategy?: 'keep' | 'replace' | 'rename'
   urlRefreshHours?: number
-  imageCaptionProvider?: 'off' | 'paddle' | 'openai' | 'ollama'
+  imageCaptionProvider?: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'
   imageCaptionModel?: string
   imageCaptionBaseUrl?: string
   imageCaptionApiKey?: string
@@ -228,7 +229,7 @@ export interface KnowledgeConfig {
   chunkTokenLimit: number
   conflictStrategy: 'keep' | 'replace' | 'rename'
   urlRefreshHours: number
-  imageCaptionProvider: 'off' | 'paddle' | 'openai' | 'ollama'
+  imageCaptionProvider: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'
   imageCaptionModel: string
   imageCaptionBaseUrl: string
   imageCaptionApiKey: string
@@ -237,6 +238,7 @@ export interface KnowledgeConfig {
   hfEndpoint: string
   mineruPythonIndexUrl?: string
   ocrEnabled?: boolean
+  deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
   documentProcessorProvider: 'builtin' | 'mineru' | 'mineru-local'
   mineruApiKey: string

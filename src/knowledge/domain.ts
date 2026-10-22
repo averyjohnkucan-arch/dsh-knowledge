@@ -40,6 +40,7 @@ export const baseConfigSchema = z.object({
   // Mirrors BaseConfig: every base-settable field must survive the durable
   // boundary — a missing key here makes zod strip the override on save.
   ocrEnabled: z.boolean().optional(),
+  deferredChartEnrichment: z.boolean().optional(),
   structureV3Charts: z.boolean().optional(),
   documentProcessorProvider: z.enum(['builtin', 'mineru', 'mineru-local']).optional(),
   mineruApiKey: z.string().optional(),
@@ -55,7 +56,7 @@ export const baseConfigSchema = z.object({
   chunkTokenLimit: z.number().int().gte(0).optional(),
   conflictStrategy: z.enum(['keep', 'replace', 'rename']).optional(),
   urlRefreshHours: z.number().int().gte(0).optional(),
-  imageCaptionProvider: z.enum(['off', 'paddle', 'openai', 'ollama']).optional(),
+  imageCaptionProvider: z.enum(['off', 'paddle', 'dsh', 'openai', 'ollama']).optional(),
   imageCaptionModel: z.string().optional(),
   imageCaptionBaseUrl: z.string().optional(),
   imageCaptionApiKey: z.string().optional(),
@@ -100,6 +101,7 @@ export const documentProcessingInfoSchema = z.object({
 })
 
 export const documentSchema = z.object({
+  deferredChartEnrichment: z.object({revision: z.string(), status: z.enum(['completed', 'failed'])}).optional(),
   markdownRevision: z.string().optional(),
   indexingSettingsFingerprint: z.string().optional(),
   id: z.string(),
@@ -156,6 +158,7 @@ export const configOverridesSchema = z.object({
   hfEndpoint: z.string().optional(),
   mineruPythonIndexUrl: z.string().optional(),
   ocrEnabled: z.boolean().optional(),
+  deferredChartEnrichment: z.boolean().optional(),
   structureV3Charts: z.boolean().optional(),
   documentProcessorProvider: z.enum(['builtin', 'mineru', 'mineru-local']).optional(),
   mineruApiKey: z.string().optional(),
@@ -171,7 +174,7 @@ export const configOverridesSchema = z.object({
   chunkTokenLimit: z.number().int().gte(0).optional(),
   conflictStrategy: z.enum(['keep', 'replace', 'rename']).optional(),
   urlRefreshHours: z.number().int().gte(0).optional(),
-  imageCaptionProvider: z.enum(['off', 'paddle', 'openai', 'ollama']).optional(),
+  imageCaptionProvider: z.enum(['off', 'paddle', 'dsh', 'openai', 'ollama']).optional(),
   imageCaptionModel: z.string().optional(),
   imageCaptionBaseUrl: z.string().optional(),
   imageCaptionApiKey: z.string().optional(),
@@ -228,8 +231,9 @@ export interface ConfigOverrides {
   conflictStrategy?: 'keep' | 'replace' | 'rename'
   urlRefreshHours?: number
   ocrEnabled?: boolean
+  deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
-  imageCaptionProvider?: 'off' | 'paddle' | 'openai' | 'ollama'
+  imageCaptionProvider?: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'
   imageCaptionModel?: string
   imageCaptionBaseUrl?: string
   imageCaptionApiKey?: string

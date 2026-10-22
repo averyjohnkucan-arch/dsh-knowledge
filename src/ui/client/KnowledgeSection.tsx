@@ -1553,7 +1553,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
               {embeddingMigrationActive && <p style={{ fontSize: 12, color: C.muted }} role="status">Vectorization runs after queued parsing/OCR across all knowledge bases. Deferred semantic merging uses saved text without repeating OCR; lexical retrieval remains available.</p>}
               {processingSummary.filter(row => row.baseId === selectedBase.id).map(row => <div key={row.id} style={{ fontSize: 12, color: C.muted, margin: '8px 0 12px' }} role="status">
                 {row.pipeline && <div style={{ marginBottom: 6 }}>
-                  <strong>{({ocr:'1/4 · OCR and source extraction',parsing:'2/4 · Parsing tables and charts',chunking:'3/4 · Chunking',vectorization:'4/4 · Vectorization'} as const)[row.pipeline.stage]}</strong>
+                  <strong>{({ocr:'1/4 · OCR and source extraction',parsing:'2/4 · Optional image enrichment',chunking:'3/4 · Chunking',vectorization:'4/4 · Vectorization'} as const)[row.pipeline.stage]}</strong>
                   {' · '}{row.pipeline.completed.toLocaleString()} / {row.pipeline.total.toLocaleString()} stage documents · {row.pipeline.running} running
                   {row.pipeline.failed > 0 && ` · ${row.pipeline.failed} failed`}
                   {row.pipeline.resourcePolicy && <div style={{marginTop:4}}>{row.pipeline.resourcePolicy}</div>}
