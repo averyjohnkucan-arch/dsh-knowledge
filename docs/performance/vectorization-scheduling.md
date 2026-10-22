@@ -14,3 +14,5 @@ Startup raw-source recovery now registers its complete parsing backlog before as
 
 
 CUDA OCR recognition batches now group crops by their batch-one padded width, preserving preprocessing and output order. CUDA explicitly disables TF32 after fixed-page comparisons showed text drift; FP32 width-preserving batches matched the CPU single-line reference on three repeated sample pages. These samples are consistency checks, not full-corpus ground truth.
+
+Intel CPU/iGPU OCR explicitly requests FP32. On three fixed page rasters repeated twice, default iGPU precision changed the faint scan substantially; explicit FP32 matched the CPU reference in all six outputs. NPU uses a separate static-shape path and requires separate validation. Numeric qualification tolerates spacing before percent signs while preserving the sign itself.

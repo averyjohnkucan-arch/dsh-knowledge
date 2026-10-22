@@ -34,6 +34,7 @@ class Session:
    else:model.reshape({model.input(0).any_name:ov.PartialShape([shape[0],3,ov.Dimension(32,4096),ov.Dimension(32,4096)])})
    t=time.perf_counter();props={'PERFORMANCE_HINT':'LATENCY', 'CACHE_DIR':str(compiled_cache)}
    if requested=='CPU':props.update(INFERENCE_NUM_THREADS=cpu_threads,NUM_STREAMS=1)
+   if requested in ('CPU','GPU'):props['INFERENCE_PRECISION_HINT']='f32'
    compiled=self.core.compile_model(model,requested,props);self.compile_s+=time.perf_counter()-t;self.compiles+=1
   self.cache[key]=compiled
   while len(self.cache)>16:self.cache.popitem(last=False)
