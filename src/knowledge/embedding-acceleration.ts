@@ -1,3 +1,5 @@
+import { embeddingCpuLaneLimit } from './structure-cpu-budget.js'
+import { knowledgeGpuAdmission } from './background-gpu.js'
 import { registerBackgroundDevices, IntelEmbeddingAvailability, nvidiaEmbeddingAvailability } from './embedding-device-availability.js'
 import { EmbeddingBatcher, EmbeddingQueueTimeout } from './embedding-batcher.js'
 import { availableParallelism, freemem } from 'node:os'
@@ -23,9 +25,12 @@ export class EmbeddingAcceleration {
   private unregisterDevices?: () => void
   constructor(private readonly fp16 = false) { this.registerDevices() }
   private registerDevices(): void { this.unregisterDevices ??= registerBackgroundDevices(() => this.lanes.flatMap(lane => [lane.worker.pid, ...(lane.extraWorkers ?? []).map(worker => worker.pid)])) }
+  private activeIndexBatches = 0
+  private indexCpuAvailable: () => boolean = () => true
+  setIndexCpuAvailability(available: () => boolean): void { this.indexCpuAvailable = available }
   private cache = ''; private lanes: Lane[] = []; private ready?: EmbeddingAccelerationStatus; private setup?: Promise<void>; private setupChild?: ChildProcess
   private readonly intelAvailability = new IntelEmbeddingAvailability()
-  private used = false; private foreground = 0; private timer?: ReturnType<typeof setInterval>; private checking = false; private polling = false; private stopped = false
+  private used = false; private foreground = 0; private igpuReservations = 0; private timer?: ReturnType<typeof setInterval>; private checking = false; private polling = false; private stopped = false
   private npuRevalidation?: Promise<void>; private npuRecoveryLane?: Lane
   private warming?: Promise<void>; private warmed = false; private reference?:Promise<number[][]>; private gpuRetryAt=new Map<string,number>()
   private igpuAllowed = true; private mainGpuAllowed = true; private mainGpuCopies = 1; private gpuTried = new Set<string>(); private threads = 8; private cpuInstances = 1; private tuningKey = ''; private needsReload = false
@@ -81,7 +86,7 @@ export class EmbeddingAcceleration {
       const receipt=JSON.parse(await readFile(join(this.root(),'ready.json'),'utf8')) as {schema:number;format?:string;modelId:string;devices:Device[]}
       if(receipt.schema!==1||this.fp16&&receipt.format!=='canonical-fp16-v1'||receipt.modelId!==(this.fp16 ? FP16_EMBEDDING_MODEL : OPENVINO_EMBEDDING_MODEL)||!receipt.devices.some(d=>d.device==='CPU'&&d.qualified))throw Error('Missing qualified CPU fallback')
       this.lanes=receipt.devices.filter(d=>d.qualified&&['CPU','NPU'].includes(d.device)).flatMap(d=>Array.from({length:d.device==='CPU'?this.cpuInstances:1},()=>this.lane(d.device,d.medianMs??150)))
-      if (this.foreground) { for (const lane of this.lanes.filter(lane => lane.device === 'CPU').slice(1)) { lane.enabled=false;lane.batcher?.pause() } }
+      if (this.foreground) { for (const lane of [...this.lanes.filter(lane => lane.device === 'CPU').slice(1), ...this.lanes.filter(lane => lane.device === 'NPU')]) { lane.enabled=false;lane.batcher?.pause() } }
       this.ready={status:'ready',message:this.fp16 ? 'One FP16 vector space across CPU, NPU, Intel iGPU and optional NVIDIA CUDA. GPU workers yield for foreground inference.' : 'OpenVINO CPU/NPU model; separate vector space from the ONNX model. GPU workers require verified idle state and matching vectors.',devices:receipt.devices}
       return this.ready
     } catch {return {status:'not_installed',message:'Download and validate the separate OpenVINO embedding model to enable NPU execution.',devices:[]}}
@@ -142,17 +147,25 @@ export class EmbeddingAcceleration {
     })().finally(()=>{this.warming=undefined})
     return this.warming
   }
+  async yieldMainGpu(): Promise<void> {
+    await Promise.all(this.lanes.filter(lane => lane.device === 'GPU:main').map(lane => this.stopGpu(lane)))
+  }
   async embed(texts:readonly string[], purpose: 'query'|'index' = 'index'):Promise<number[][]> {
     if((await this.status()).status!=='ready')throw Error('OpenVINO embedding model is not installed and validated')
-    if(purpose==='index')await this.warm()
     this.used = true
     if(!this.timer){this.timer=setInterval(()=>{void this.updateGpus()},1000);this.timer.unref?.()}
-    return await Promise.all(texts.map(async text=>{
+    if(purpose==='index')this.activeIndexBatches++
+    try {
+      // Publish demand before warming so CUDA admission/qualification can
+      // overlap CPU/NPU initialization instead of waiting behind it.
+      if(purpose==='index'){void this.updateGpus();await this.warm()}
+      return await Promise.all(texts.map(async text=>{
       let chosen:Lane|undefined
       while(!chosen) {
         if(this.stopped)throw Error('Embedding worker stopped')
-        const eligible=this.lanes.filter(l=>l.enabled&&l.qualified!==false&&(!l.device.startsWith('GPU')||purpose==='index'&&!this.foreground))
-        if(!eligible.length)throw Error('No embedding device is available')
+        const cpuLanes=this.lanes.filter(l=>l.device==='CPU').slice(0,embeddingCpuLaneLimit(availableParallelism(),this.threads))
+        const eligible=this.lanes.filter(l=>(l.device!=='CPU'||cpuLanes.includes(l)&&(purpose==='query'||this.indexCpuAvailable()))&&l.enabled&&l.qualified!==false&&(!l.device.startsWith('GPU')||purpose==='index'&&(!this.foreground||l.device==='GPU:intel')&&!this.igpuReservations))
+        if(!eligible.length){if(purpose==='index'&&!this.indexCpuAvailable()){await pause(20);continue}throw Error('No embedding device is available')}
         // Leave bulk work unassigned until a lane has capacity. Eagerly queuing
         // an entire document behind a slow CPU/NPU creates a long tail while
         // faster devices sit idle. CUDA retains enough rows for two batches.
@@ -164,21 +177,33 @@ export class EmbeddingAcceleration {
         if(!chosen)await Promise.race(eligible.map(l=>l.current??l.tail)).catch(()=>{})
       }
       try{return await this.run(chosen,text,purpose)}catch(error){
-        if(chosen.device==='CPU')throw error
-        if(!(error instanceof EmbeddingQueueTimeout) && !String(error).includes('NPU_LONG_INPUT') && !String(error).includes('IGPU_LONG_INPUT') && !String(error).includes('yield')) {
+        if(chosen.device==='CPU' && !String(error).includes('yield'))throw error
+        if(chosen.device!=='CPU' && !(error instanceof EmbeddingQueueTimeout) && !String(error).includes('NPU_LONG_INPUT') && !String(error).includes('IGPU_LONG_INPUT') && !String(error).includes('yield')) {
           chosen.enabled=false;chosen.qualified=false;chosen.batcher?.pause();chosen.worker.dispose();chosen.extraWorkers?.forEach(worker=>worker.dispose())
           this.gpuRetryAt.set(chosen.device,Date.now()+60_000)
           const state=this.ready?.devices.find(d=>d.device===chosen.device)
           if(state){state.qualified=false;state.error=`Device failed at runtime; CPU fallback active: ${String(error).slice(-1500)}`}
           if(chosen.device.startsWith('GPU')) {this.lanes=this.lanes.filter(lane=>lane!==chosen);this.gpuTried.delete(chosen.device)}
         }
-        const cpu=this.lanes.filter(l=>l.device==='CPU').sort((a,b)=>a.pending-b.pending)[0]
-        if(!cpu)throw error;return await this.run(cpu,text,purpose)
+        // Foreground handoff pauses extra CPU lanes too. Never enqueue fallback
+        // on a disabled lane, and retry an interrupted CPU job on the surviving one.
+        while (!this.stopped) {
+          if(purpose==='index'&&!this.indexCpuAvailable()){
+            const gpu=this.lanes.find(l=>l.device==='GPU:main'&&l.enabled&&l.qualified!==false&&!this.foreground&&l.pending<32)
+            if(gpu)return await this.run(gpu,text,purpose)
+            await pause(20);continue
+          }
+          const cpu=this.lanes.filter(l=>l.device==='CPU').slice(0,embeddingCpuLaneLimit(availableParallelism(),this.threads)).find(l=>l.enabled&&l.qualified!==false&&l.pending<1)
+          if (!cpu) { await pause(5); continue }
+          try { return await this.run(cpu,text,purpose) }
+          catch (fallback) { if (!String(fallback).includes('yield')) throw fallback }
+        }
+        throw Error('Embedding worker stopped')
       }
-    }))
+    })) } finally { if(purpose==='index')this.activeIndexBatches-- }
   }
   private async revalidateNpu():Promise<void>{
-    if(this.npuRevalidation||this.stopped)return
+    if(this.npuRevalidation||this.stopped||this.foreground)return
     const failed=this.lanes.find(lane=>lane.device==='NPU'&&!lane.enabled)
     const cpu=this.lanes.find(lane=>lane.device==='CPU'&&lane.enabled)
     if(!failed||!cpu||(this.gpuRetryAt.get('NPU')??0)>Date.now())return
@@ -189,7 +214,7 @@ export class EmbeddingAcceleration {
         const [reference,vector]=await Promise.all([this.run(cpu,text,'query'),this.run(candidate,text,'query')])
         const cosine=reference.reduce((sum,value,index)=>sum+value*vector[index],0)
         if(cosine<.995)throw Error('NPU recovery vectors did not match CPU reference')
-        if(this.stopped||!this.lanes.includes(failed))throw Error('NPU recovery yielded during plugin disposal')
+        if(this.stopped||this.foreground||!this.lanes.includes(failed))throw Error('NPU recovery yielded during plugin disposal')
         candidate.qualified=true;this.lanes[this.lanes.indexOf(failed)]=candidate
         const state=this.ready?.devices.find(device=>device.device==='NPU')
         if(state){state.qualified=true;state.minimumCosine=cosine;state.medianMs=candidate.milliseconds;delete state.error}
@@ -209,24 +234,25 @@ export class EmbeddingAcceleration {
     let timer:ReturnType<typeof setTimeout>|undefined
     try{await Promise.race([lane.current??Promise.resolve(),new Promise<void>(resolve=>{timer=setTimeout(resolve,10_000)})]).catch(()=>{})}finally{if(timer)clearTimeout(timer);await Promise.all([lane.worker,...lane.extraWorkers??[]].map(worker=>worker.stopAndWait()))}
   }
-  async enterForeground():Promise<()=>void>{
-    this.foreground++
+  async enterForeground(yieldIgpu = false):Promise<()=>void>{
+    this.foreground++; if(yieldIgpu)this.igpuReservations++
     const cpus=this.lanes.filter(lane=>lane.device==='CPU'),first=cpus[0]
     try {
-      await Promise.all(this.lanes.filter(lane=>lane.device.startsWith('GPU') || lane.device==='CPU' && lane!==first).map(lane=>this.stopGpu(lane)))
+      if(this.npuRecoveryLane)await this.stopGpu(this.npuRecoveryLane)
+      await Promise.all(this.lanes.filter(lane=>lane.device==='GPU:main' || lane.device==='NPU' || yieldIgpu&&lane.device==='GPU:intel' || lane.device==='CPU' && lane!==first).map(lane=>this.stopGpu(lane)))
       if(first && (first.cpuThreads ?? this.threads)>8){
         await this.stopGpu(first)
         const replacement=this.lane('CPU',first.milliseconds,false,8)
         this.lanes[this.lanes.indexOf(first)]=replacement
       }
-    }catch(error){this.foreground--;throw error}
+    }catch(error){this.foreground--;if(yieldIgpu)this.igpuReservations--;throw error}
     let done=false
-    return()=>{if(!done){done=true;this.foreground--;if(!this.foreground)for(const lane of this.lanes.filter(lane=>lane.device==='CPU'&&lane.qualified!==false)){lane.enabled=true;lane.batcher?.resume()}}}
+    return()=>{if(!done){done=true;this.foreground--;if(yieldIgpu)this.igpuReservations--;if(!this.foreground)for(const lane of this.lanes.filter(lane=>['CPU','NPU'].includes(lane.device)&&lane.qualified!==false)){lane.enabled=true;lane.batcher?.resume()}}}
   }
   private async updateGpus():Promise<void>{
     if(this.stopped||!this.used||this.ready?.status!=='ready')return
     void this.revalidateNpu()
-    if(this.foreground){await Promise.all(this.lanes.filter(l=>l.device.startsWith('GPU')&&l.enabled).map(l=>this.stopGpu(l)));return}
+    knowledgeGpuAdmission.request(this, this.mainGpuAllowed && !this.foreground && (this.activeIndexBatches>0 || this.lanes.some(lane=>lane.pending>0)))
     if(this.polling)return
     this.polling=true
     const decisions=new Map<boolean,{available:boolean;reason:string;freeMiB?:number}>()
@@ -238,12 +264,12 @@ export class EmbeddingAcceleration {
         let decision:{available:boolean;reason:string;freeMiB?:number}={available:desktopAvailable,reason:desktopAvailable?'Desktop is idle':'Waiting for desktop idle'}
         if(this.fp16) {
           if(main) {
-            decision=await nvidiaEmbeddingAvailability(owned)
+            decision=knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(owned) : {available:false,reason:'Waiting for shared GPU admission'}
             if(process.platform!=='linux'&&!desktopAvailable)decision={available:false,reason:'Waiting for verified desktop idle'}
           } else if(process.platform==='linux') decision=await this.intelAvailability.sample(owned())
         }
         if(main?!this.mainGpuAllowed:!this.igpuAllowed)decision={available:false,reason:'Disabled in embedding settings'}
-        if(this.foreground||this.stopped)decision.available=false
+        if(this.stopped||(main?this.foreground:this.igpuReservations))decision.available=false
         decisions.set(main,decision)
         const current=this.lanes.find(l=>l.device===`GPU:${main?'main':'intel'}`)
         if(!decision.available&&current?.enabled)await this.stopGpu(current)
@@ -259,7 +285,7 @@ export class EmbeddingAcceleration {
         const existing=this.lanes.find(l=>l.device===device)
         const decision=decisions.get(main)!
         let available=decision.available,reason=decision.reason
-        if(this.foreground||this.stopped)available=false
+        if(this.stopped||(main?this.foreground:this.igpuReservations))available=false
         let state=this.ready?.devices.find(d=>d.device===device || !main&&d.device==='GPU')
         if(!state) {state={device,name:main?'NVIDIA GPU':'Intel iGPU',qualified:false};this.ready!.devices.push(state)}
         state.blockedReason=available?undefined:reason
@@ -276,7 +302,7 @@ export class EmbeddingAcceleration {
           const cpu=this.lanes.find(l=>l.device==='CPU')!
           this.reference??=Promise.all(texts.map(text=>this.run(cpu,text,'query')))
           const [references,vectors]=await Promise.all([this.reference,Promise.all(texts.map(text=>this.run(candidate,text)))])
-          if(this.foreground||this.stopped||!candidate.enabled)throw Error('Embedding device yielded during validation')
+          if(this.stopped||(main?this.foreground:this.igpuReservations)||!candidate.enabled)throw Error('Embedding device yielded during validation')
           let cosine=Math.min(...references.map((a,index)=>a.reduce((sum,v,i)=>sum+v*vectors[index][i],0)))
           if(main&&this.fp16) {
             // Initialize both CUDA workers and measure full batches before
@@ -301,7 +327,7 @@ export class EmbeddingAcceleration {
   }
   async remove():Promise<void>{this.dispose();const {rm}=await import('node:fs/promises');await rm(this.root(),{recursive:true,force:true});this.ready=undefined;this.stopped=false}
   release():void{this.npuRecoveryLane?.batcher?.pause();this.npuRecoveryLane?.worker.dispose();this.warmed=false;this.reference=undefined;for(const lane of this.lanes){lane.batcher?.pause();lane.worker.dispose();lane.extraWorkers?.forEach(worker=>worker.dispose())}this.lanes=[]}
-  dispose():void{this.unregisterDevices?.();this.unregisterDevices=undefined;this.stopped=true;if(this.timer)clearInterval(this.timer);this.timer=undefined;this.setupChild && stopOwnedProcess(this.setupChild);this.release()}
+  dispose():void{knowledgeGpuAdmission.request(this,false);this.unregisterDevices?.();this.unregisterDevices=undefined;this.stopped=true;if(this.timer)clearInterval(this.timer);this.timer=undefined;this.setupChild && stopOwnedProcess(this.setupChild);this.release()}
 }
 export const embeddingAcceleration=new EmbeddingAcceleration()
 

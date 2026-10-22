@@ -12,12 +12,12 @@ function fixture() {
   return {manager,cpu,extraCpu,npu,igpu,cuda}
 }
 describe('OCR foreground resource handoff',()=>{
-  it('releases GPUs and surplus CPU sessions while keeping one CPU and NPU running',async()=>{
+  it('releases NVIDIA, NPU and surplus CPU sessions while keeping CPU and Intel available',async()=>{
     const {manager,cpu,extraCpu,npu,igpu,cuda}=fixture()
     const release=await manager.enterForeground()
-    expect(cpu.enabled).toBe(true);expect(npu.enabled).toBe(true)
-    expect(extraCpu.enabled).toBe(false);expect(igpu.enabled).toBe(false);expect(cuda.enabled).toBe(false)
-    expect(cpu.process.stopAndWait).not.toHaveBeenCalled();expect(npu.process.stopAndWait).not.toHaveBeenCalled()
+    expect(cpu.enabled).toBe(true);expect(npu.enabled).toBe(false)
+    expect(extraCpu.enabled).toBe(false);expect(igpu.enabled).toBe(true);expect(cuda.enabled).toBe(false)
+    expect(cpu.process.stopAndWait).not.toHaveBeenCalled();expect(npu.process.stopAndWait).toHaveBeenCalledOnce()
     expect(cuda.process.stopAndWait).toHaveBeenCalledOnce()
     await expect(manager.recognize(Buffer.from('png'))).resolves.toBe('OCR evidence')
     expect(cuda.process.request).not.toHaveBeenCalled()
@@ -70,12 +70,12 @@ describe('CUDA OCR admission',()=>{
 
 describe('OCR queue backpressure',()=>{
  it('waits for healthy lanes instead of spilling busy pages into extra CPU workers',async()=>{
-  const {manager,cpu,npu}=fixture();const release=await manager.enterForeground()
+  const {manager,cpu,npu}=fixture();const release=await manager.enterForeground(true)
   let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve})
   for(const lane of [cpu,npu])lane.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:10}})
   const jobs=Array.from({length:12},()=>manager.recognize(Buffer.from('page')))
   await new Promise(resolve=>setTimeout(resolve,20))
-  expect(cpu.process.request).toHaveBeenCalledTimes(1);expect(npu.process.request).toHaveBeenCalledTimes(1)
+  expect(cpu.process.request).toHaveBeenCalledTimes(1);expect(npu.process.request).not.toHaveBeenCalled()
   finish();expect(await Promise.all(jobs)).toEqual(Array(12).fill('OCR evidence'));release()
  })
 })
@@ -125,4 +125,12 @@ it('keeps more CPU OCR capacity when CUDA is absent and reduces contention with 
   expect(cpu.enabled).toBe(true);expect(extraCpu.enabled).toBe(false)
   for(const lane of (manager as any).lanes)if(lane.device.device.startsWith('CUDA'))lane.enabled=false
   await (manager as any).balanceCpu();expect(extraCpu.enabled).toBe(true)
+})
+
+it('yields Intel before granting an Intel model reservation',async()=>{
+ const {manager,igpu,npu}=fixture()
+ const release=await manager.enterForeground(true)
+ expect(igpu.enabled).toBe(false);expect(igpu.process.stopAndWait).toHaveBeenCalledOnce()
+ expect(npu.enabled).toBe(false)
+ release();expect(npu.enabled).toBe(true)
 })

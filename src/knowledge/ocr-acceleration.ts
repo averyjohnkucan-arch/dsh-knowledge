@@ -1,3 +1,4 @@
+import { knowledgeGpuAdmission } from './background-gpu.js'
 import { MIN_OCR_AGREEMENT, ocrTextAgreement } from './ocr-quality.js'
 import { stopOwnedProcess } from './owned-process.js'
 import { ensurePrivatePython } from './private-python.js'
@@ -39,7 +40,7 @@ export class OcrAcceleration {
   private preparation?: Promise<void>
   private setupChild?: ChildProcess
   private stopped = false
-  private foreground = 0
+  private igpuReservations = 0; private foreground = 0
   private usedAt = 0
   private polling = false
   private timer?: ReturnType<typeof setInterval>
@@ -57,7 +58,7 @@ export class OcrAcceleration {
     return { device: { ...device }, process: new StructureProcess(cuda ? this.gpuPython() : this.python(),
       cuda ? [script('ocr-cuda-worker.py'), '--models', join(localModelCacheDir(), 'ocr'), '--cache', join(this.root(), 'compiled')]
       : [script('ocr-accelerator-worker.py'), '--worker', '--models', join(localModelCacheDir(), 'ocr'), '--cache', join(this.root(), 'compiled'), '--device', device.device, '--threads', '8'],
-      env, 'DSH_OCR_RESULT '), pending: 0, tail: Promise.resolve(), samples: [], runs: 0, failed: false, enabled: !device.device.startsWith('GPU') && (!this.foreground || device.device !== 'CPU' || !this.lanes.some(lane => lane.device.device === 'CPU')) }
+      env, 'DSH_OCR_RESULT '), pending: 0, tail: Promise.resolve(), samples: [], runs: 0, failed: false, enabled: !device.device.startsWith('GPU') && (!this.foreground || device.device === 'CPU' && !this.lanes.some(lane => lane.device.device === 'CPU')) }
   }
   private async stopLane(lane: Lane): Promise<void> {
     lane.enabled = false
@@ -65,13 +66,13 @@ export class OcrAcceleration {
     try { await Promise.race([lane.current ?? Promise.resolve(), new Promise<void>(resolve => { timer = setTimeout(resolve, 10_000) })]).catch(() => {}) }
     finally { if (timer) clearTimeout(timer); await lane.process.stopAndWait() }
   }
-  async enterForeground(): Promise<() => void> {
-    this.foreground++
+  async enterForeground(yieldIgpu = false): Promise<() => void> {
+    this.foreground++; if(yieldIgpu)this.igpuReservations++
     const cpu = this.lanes.filter(lane => lane.device.device === 'CPU')
-    try { await Promise.all(this.lanes.filter(lane => /^GPU|^CUDA/.test(lane.device.device) || cpu.includes(lane) && lane !== cpu[0]).map(lane => this.stopLane(lane))) }
-    catch (error) { this.foreground--; throw error }
+    try { await Promise.all(this.lanes.filter(lane => /^CUDA|^NPU/.test(lane.device.device) || yieldIgpu&&lane.device.device.startsWith('GPU') || cpu.includes(lane) && lane !== cpu[0]).map(lane => this.stopLane(lane))) }
+    catch (error) { this.foreground--; if(yieldIgpu)this.igpuReservations--; throw error }
     let released = false
-    return () => { if (!released) { released = true; this.foreground--; if (!this.foreground) for (const lane of cpu) lane.enabled = true } }
+    return () => { if (!released) { released = true; this.foreground--; if(yieldIgpu)this.igpuReservations--; if (!this.foreground) for (const lane of this.lanes.filter(lane=>!lane.failed&&(lane.device.device==='CPU'||lane.device.device.startsWith('NPU')))) lane.enabled = true } }
   }
   private async balanceCpu(): Promise<void> {
     const cpu = this.lanes.filter(lane => lane.device.device === 'CPU')
@@ -81,17 +82,22 @@ export class OcrAcceleration {
       else if (!lane.failed) lane.enabled = true
     }))
   }
+  async yieldMainGpu(): Promise<void> {
+    await Promise.all(this.lanes.filter(lane => lane.device.device.startsWith('CUDA')).map(lane => this.stopLane(lane)))
+  }
   private async updateDevices(): Promise<void> {
     if (this.stopped || this.polling || !this.loadedRoot) return
     this.polling = true
     try {
       // Keep models warm across PDF rendering / structure gaps; foreground still wins.
-      const active = ocrDeviceWorkActive(this.foreground, this.usedAt, this.lanes.reduce((sum, lane) => sum + lane.pending, 0))
+      const active = ocrDeviceWorkActive(0, this.usedAt, this.lanes.reduce((sum, lane) => sum + lane.pending, 0))
       const idle = process.platform === 'linux' ? true : (await desktopIdle()).idleSeconds! >= 300
       const owned = () => backgroundDevicePids(new Set(this.lanes.flatMap(lane => lane.process.pid ? [lane.process.pid] : [])))
       const intel = active && idle ? await this.intelAvailability.sample(owned()) : { available: false }
-      const nvidia: Awaited<ReturnType<typeof nvidiaEmbeddingAvailability>> = active && idle ? await nvidiaEmbeddingAvailability(owned) : { available: false, reason: 'OCR is idle or foreground inference is active' }
-      if (this.stopped || this.foreground) { intel.available = false; nvidia.available = false }
+      knowledgeGpuAdmission.request(this, !this.foreground && active && this.lanes.some(lane=>lane.pending>0))
+      const nvidia: Awaited<ReturnType<typeof nvidiaEmbeddingAvailability>> = active && idle && knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(owned) : { available: false, reason: 'OCR is idle or foreground inference is active' }
+      if (this.stopped || this.igpuReservations) intel.available = false
+      if (this.stopped || this.foreground) nvidia.available = false
       // Reserve headroom; each additional CUDA process can retain two model
       // arenas plus a context. Existing workers already count against free VRAM.
       const resident = this.lanes.filter(lane => lane.device.device.startsWith('CUDA') && lane.process.pid !== undefined).length
@@ -149,7 +155,9 @@ export class OcrAcceleration {
       if(this.stopped)return undefined
       const healthy=this.lanes.filter(lane=>!lane.failed&&lane.enabled&&(lane.retryAt??0)<=Date.now())
       if(!healthy.length)return undefined
-      const choices=healthy.filter(lane=>lane.pending < (lane.device.device.startsWith('CUDA') ? 16 : 1)).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)
+      const accelerators=healthy.filter(lane=>lane.device.device!=='CPU')
+      const pool=accelerators.length?accelerators:healthy
+      const choices=pool.filter(lane=>lane.pending < (lane.device.device.startsWith('CUDA') ? 16 : 1)).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)
       lane=choices[0]
       // Busy is not failure. Backpressure avoids spawning extra CPU fallback
       // workers alongside the foreground eight-thread CPU session.
@@ -247,5 +255,5 @@ export class OcrAcceleration {
     return this.state
   }
   releaseWorkers(): void { for (const lane of this.lanes) lane.process.dispose(); this.lanes = []; this.loadedRoot = undefined; this.modelHash = undefined; this.cudaQualifiedHash = undefined; this.cudaQualification = undefined }
-  dispose(): void { this.stopped = true; if (this.timer) clearInterval(this.timer); this.unregisterDevices(); this.setupChild && stopOwnedProcess(this.setupChild); this.releaseWorkers() }
+  dispose(): void { knowledgeGpuAdmission.request(this,false); this.stopped = true; if (this.timer) clearInterval(this.timer); this.unregisterDevices(); this.setupChild && stopOwnedProcess(this.setupChild); this.releaseWorkers() }
 }

@@ -1,3 +1,4 @@
+import { knowledgeGpuAdmission, type BackgroundScheduler } from './background-gpu.js'
 import { disposePdfParsers } from './parse.js'
 import { availableParallelism, freemem } from 'node:os'
 import { passageHash, passageUrl } from './citation-source.js'
@@ -302,9 +303,7 @@ export class KnowledgeService extends Service {
   private readonly processingMeter = new ProcessingMeter()
   storageWriteDiagnostics() { return this.requireStore().writeDiagnostics?.() ?? null }
   processingSummary() {
-    const parsing = this.hasParsingWork()
-    return this.processingMeter.snapshots().map(row => row.active && row.id.startsWith('embedding:') && parsing
-      ? { ...row, etaSeconds: null, waitingReason: 'Waiting for parsing/OCR across all knowledge bases' } : row)
+    return this.processingMeter.snapshots()
   }
   private readonly indexing = new Map<string, { baseId: string; title: string; phase: 'parsing' | 'embedding'; total: number; progress: number; controller?: AbortController }>()
   /**
@@ -374,6 +373,12 @@ export class KnowledgeService extends Service {
     this.ctx.effect(() => async () => { await Promise.all([disposeOcrWorker(), disposePdfParsers()]) }, 'knowledge: dispose OCR and PDF workers')
     this.ctx.effect(() => () => { embeddingAcceleration.dispose(); embeddingFp16Acceleration.dispose() }, 'knowledge: dispose embedding accelerators')
     this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
+    this.ctx.inject(['modelScheduler'], scope => {
+      const scheduler = scope.get('modelScheduler') as BackgroundScheduler
+      scope.effect(() => knowledgeGpuAdmission.attach(scheduler, async () => {
+        await Promise.all([embeddingAcceleration.yieldMainGpu(), embeddingFp16Acceleration.yieldMainGpu(), this.ocrAcceleration.yieldMainGpu()])
+      }))
+    })
     this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
     if (store === undefined) { this.resolveStore(); return }
     this.markdownSnapshots = new MarkdownSnapshots(store.raw !== undefined ? join(dirname(resolveChunkStorePath(this.baseConfig.chunkStorePath)), 'knowledge-markdown') : undefined)
@@ -460,13 +465,15 @@ export class KnowledgeService extends Service {
       await this.resumeInterruptedDocuments(resumeIds)
     })
     void resume.catch(error => this.ctx.logger.warn(`knowledge: interrupted-import recovery failed: ${error instanceof Error ? error.message : String(error)}`))
-    void resume.then(async () => {
+    void Promise.resolve().then(async () => {
       for (const base of store.listBases()) {
         const config = this.getConfigFor(base.id), key = embeddingKey(config)
         const legacyFormat = (key?.endsWith(':canonical-single-v1') === true || key?.endsWith(':full-context-v1') === true || key?.endsWith(':canonical-fp16-v1') === true)
           && store.chunkStats([base.id]).embeddingModelCounts.some(entry => entry.model !== key)
         if (legacyFormat && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
-        if ((base.embeddingBackfillPending || legacyFormat) && config.resumeInterruptedOnStartup) await this.backfillBaseEmbeddings(base.id)
+        if ((base.embeddingBackfillPending || legacyFormat) && config.resumeInterruptedOnStartup) {
+          void this.backfillBaseEmbeddings(base.id).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${String(error)}`))
+        }
       }
     }).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${error instanceof Error ? error.message : String(error)}`))
     this.armUrlRefreshTimer()
@@ -925,20 +932,34 @@ export class KnowledgeService extends Service {
     return next
   }
 
+  private readonly syncClaims = new Set<string>()
   private readonly vectorPhaseDocuments = new Set<string>()
   private readonly parseEpochs = new Map<string, number>()
   private readonly deferredVectorDocuments = new Map<string, boolean>()
   private hasParsingWork(): boolean {
-    return this.syncingRoots.size > 0
-      || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
-      || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id))
+    return [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+      || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id) && !this.folderOcrSources.has(id))
   }
-  private async waitForParsing(signal?: AbortSignal): Promise<void> {
-    while (this.hasParsingWork()) {
+  private readonly folderOcrSources = new Map<string, Set<string> | null>()
+  private hasOcrWork(): boolean {
+    // Unexamined source jobs may still need OCR. Completed extraction can
+    // overlap CPU normalization/chunking with accelerator embedding.
+    return [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+      || [...this.folderOcrSources.values()].some(paths => paths === null || paths.size > 0)
+      || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id)
+        && !this.folderOcrSources.has(id)
+        && !/\.(?:md|markdown|mdx|txt|csv|json|log|html?|xml)$/i.test(task.title)
+        && !['normalizing', 'indexing', 'completed'].includes(this.processingProgress.get(id)?.stage ?? 'queued'))
+  }
+  private async yieldEmbeddingWork(signal?: AbortSignal): Promise<void> {
+    do {
       signal?.throwIfAborted()
-      if (this.shuttingDown) throw new Error('Knowledge plugin is shutting down')
-      await new Promise(resolve => setTimeout(resolve, 100))
-    }
+      if (this.shuttingDown) throw new Error('Knowledge plugin stopped')
+      if (!this.hasOcrWork()) break
+      await new Promise<void>(resolve => setTimeout(resolve, 50))
+    } while (true)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    signal?.throwIfAborted()
   }
 
   private readonly embeddingBackfills = new Set<string>()
@@ -978,27 +999,29 @@ export class KnowledgeService extends Service {
     // Return the config save before inventorying or starting model inference.
     await new Promise<void>(resolve => setImmediate(resolve))
     const store = this.requireStore()
-    while (!this.shuttingDown && [...this.indexing.values()].some(entry => entry.baseId === baseId)) {
-      await new Promise<void>(resolve => setTimeout(resolve, 100))
-    }
     if (this.shuttingDown || !store.getBase(baseId)) return
     const passKey = embeddingKey(this.getConfigFor(baseId))
     const meterId = `embedding:${baseId}`
     const forceRevision = store.getBase(baseId)?.embeddingBackfillRevision
     const missing = forceRevision ? undefined : store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
     const documents = store.listDocuments(baseId, { includeRawText: false })
-      .filter(doc => doc.sourceType !== 'directory' && (doc.semanticChunkingPending || (forceRevision ? doc.vectorizationRevision !== forceRevision : missing!.has(doc.id))))
+      .filter(doc => !doc.incomplete && !this.indexing.has(doc.id) && doc.sourceType !== 'directory' && (doc.semanticChunkingPending || (forceRevision ? doc.vectorizationRevision !== forceRevision : missing!.has(doc.id))))
     this.processingMeter.start(meterId, baseId)
     this.processingMeter.add(meterId, documents.length)
     this.directoryWriteBatches.set(baseId, (this.directoryWriteBatches.get(baseId) ?? 0) + 1)
     let completed = false
     try {
-      await orderedEmbeddingLanes(documents, this.getConfigFor(baseId).embeddingProvider === 'local' ? 2 : 1, async doc => {
+      await orderedEmbeddingLanes(documents, this.getConfigFor(baseId).embeddingProvider === 'local' ? 8 : 1, async doc => {
         if (this.shuttingDown || !store.getBase(baseId)) throw new Error('Embedding backfill stopped')
         if (passKey !== embeddingKey(this.getConfigFor(baseId))) throw new Error('Embedding model changed; restarting vector inventory')
         await new Promise<void>(resolve => setImmediate(resolve))
-        await this.waitForParsing()
+        await this.yieldEmbeddingWork()
         this.processingMeter.begin(meterId)
+        while (this.syncClaims.has(doc.id)) {
+          if (this.shuttingDown) throw new Error('Embedding backfill stopped')
+          await new Promise<void>(resolve => setTimeout(resolve, 50))
+        }
+        if (this.indexing.has(doc.id)) { this.processingMeter.settle(meterId, 'skipped'); return }
         try {
           await this.embedExistingDocument(doc.id, forceRevision)
           this.processingMeter.settle(meterId, 'processed')
@@ -1033,7 +1056,6 @@ export class KnowledgeService extends Service {
     if (this.indexing.has(id)) throw new Error('Document is already being indexed')
     const config = this.getConfigFor(document.baseId), key = embeddingKey(config)
     if (!key) throw new Error('No embedding model configured')
-    await this.waitForParsing()
     if (document.semanticChunkingPending) {
       this.vectorPhaseDocuments.add(id)
       try {
@@ -1067,7 +1089,7 @@ export class KnowledgeService extends Service {
       }
       const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8, config.embeddingBatchSize) : config.embeddingBatchSize)
       for (let i = 0; i < missing.length; i += batchSize) {
-        await this.waitForParsing(controller.signal)
+        await this.yieldEmbeddingWork(controller.signal)
         controller.signal.throwIfAborted()
         this.assertIndexTargetAlive(id, document.baseId)
         const indices = missing.slice(i, i + batchSize)
@@ -1959,7 +1981,10 @@ export class KnowledgeService extends Service {
       try { return await task }
       finally { if (this.directoryReindexes.get(id)?.task === task) this.directoryReindexes.delete(id) }
     }
-    return this.documentAdmission.run(header?.fileName ?? header?.title ?? '', () => retryDocument(() => this.reindexDocumentAttempt(id, options)))
+    const rebuild = () => retryDocument(() => this.reindexDocumentAttempt(id, options))
+    return options.mode === 'rechunk'
+      ? this.documentAdmission.runReady(rebuild)
+      : this.documentAdmission.run(header?.fileName ?? header?.title ?? '', rebuild)
   }
 
   private async reindexDocumentAttempt(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
@@ -2065,6 +2090,7 @@ export class KnowledgeService extends Service {
     let rebuilt: Awaited<ReturnType<KnowledgeService['sourceTextOf']>>
     try {
       if (options.mode === 'rechunk') {
+        this.processingProgress.set(id, { stage: 'normalizing' })
         let parsed: ParsedDocument | undefined
         if (document.processing !== undefined) {
           try { parsed = await this.artifacts.load(document.baseId, document.id, document.processing) }
@@ -2197,7 +2223,11 @@ export class KnowledgeService extends Service {
     this.processingProgress.set(input.documentId, { stage: 'queued' })
     try {
       return await processDocumentFile({ ...input, structureV3: this.structureV3, config, artifacts: this.artifacts, signal: budget.signal,
-        runParsing: task => this.processingQueue.run(task, budget.signal),
+        runParsing: async task => {
+          const result = await this.processingQueue.run(task, budget.signal)
+          this.documentAdmission.parsed()
+          return result
+        },
         onProgress: progress => { this.processingProgress.set(input.documentId, progress) },
       })
     } catch (error) {
@@ -2434,6 +2464,8 @@ export class KnowledgeService extends Service {
     this.processingMeter.start(root.id, root.baseId, true)
     this.indexing.set(root.id, { baseId: root.baseId, title: root.title, phase: 'parsing', total: 0, progress: 0 })
     try {
+      this.folderOcrSources.set(root.id, null)
+      const ocrSources = new Set<string>()
       // Inventory supported files before parsing so the denominator includes queued work.
       const countFiles = async (path: string, depth: number): Promise<void> => {
         if (this.shuttingDown || !store.getBase(root.baseId)) throw new Error('Folder synchronization stopped')
@@ -2442,10 +2474,14 @@ export class KnowledgeService extends Service {
         try { entries = await readdir(path, { withFileTypes: true }) } catch { return }
         for (const entry of entries) {
           if (entry.isDirectory()) await countFiles(join(path, entry.name), depth + 1)
-          else if (entry.isFile() && DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) this.processingMeter.add(root.id)
+          else if (entry.isFile() && DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+            this.processingMeter.add(root.id)
+            if (!/\.(?:md|markdown|mdx|txt|csv|json|log|html?|xml)$/i.test(entry.name)) ocrSources.add(join(path, entry.name))
+          }
         }
       }
       await countFiles(canonicalSource, 0)
+      this.folderOcrSources.set(root.id, ocrSources)
       this.processingMeter.discovered(root.id)
       const boundRoot = await this.bindDocumentSourcePath(root, canonicalSource)
       items.push({
@@ -2472,6 +2508,7 @@ export class KnowledgeService extends Service {
       await this.touchBase(root.baseId)
     } finally {
       await Promise.allSettled(fileJobs)
+      this.folderOcrSources.delete(root.id)
       this.indexing.delete(root.id)
       this.processingMeter.finish(root.id)
     }
@@ -2667,7 +2704,7 @@ export class KnowledgeService extends Service {
       const lightweight = lightFormat && (await stat(fullPath).catch(() => ({ size: Infinity }))).size <= 1024 ** 2
       // More lightweight producers can fill RAM write batches while the shared
       // parser gate retains its existing CPU/OCR limit. Heavy files stay capped.
-      if (!lightweight) while (heavyJobs.size >= this.processingConcurrency) await Promise.race(heavyJobs)
+      if (!lightweight) while (heavyJobs.size >= this.processingConcurrency * 4) await Promise.race(heavyJobs)
       const fileJob = this.documentAdmission.run(entry.name, async () => {
         this.processingMeter.begin(meterId)
         let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
@@ -2716,7 +2753,7 @@ export class KnowledgeService extends Service {
       }, undefined, !lightweight)
       fileJobs.add(fileJob)
       if (!lightweight) heavyJobs.add(fileJob)
-      void fileJob.finally(() => { fileJobs.delete(fileJob); heavyJobs.delete(fileJob) }).catch(() => {})
+      void fileJob.finally(() => { fileJobs.delete(fileJob); heavyJobs.delete(fileJob); this.folderOcrSources.get(meterId)?.delete(fullPath) }).catch(() => {})
       // Replace each finished file immediately. A long scan must not stall
       // the other slots at an artificial batch boundary.
       if (fileJobs.size >= this.processingConcurrency * 16) await Promise.race(fileJobs)
@@ -2778,6 +2815,21 @@ export class KnowledgeService extends Service {
    * replacement cannot be silently treated as a successful old-snapshot
    * rebuild. */
   private async syncDirectoryFile(document: KnowledgeDocument, sourcePath: string, fileName: string, checkLegacySettings = false): Promise<'updated' | 'unchanged'> {
+    this.syncClaims.add(document.id)
+    try { return await this.syncDirectoryFileClaimed(document, sourcePath, fileName, checkLegacySettings) }
+    finally { this.syncClaims.delete(document.id) }
+  }
+
+  private async syncDirectoryFileClaimed(document: KnowledgeDocument, sourcePath: string, fileName: string, checkLegacySettings: boolean): Promise<'updated' | 'unchanged'> {
+    // Text reconciliation can overlap vectorization; serialize this file and
+    // re-read its committed generation instead of reporting a false failure.
+    if (/\.(?:md|markdown|mdx|txt|csv|json|log|html?|xml)$/i.test(fileName)) {
+      while (this.indexing.has(document.id)) {
+        if (this.shuttingDown) throw new Error('Folder synchronization stopped')
+        await new Promise<void>(resolve => setTimeout(resolve, 50))
+      }
+      document = this.requireStore().getDocument(document.id) ?? document
+    }
     if (this.indexing.has(document.id)) throw new Error(`"${document.title}" is still being indexed — try again when it finishes`)
     const store = this.requireStore()
     const fileStat = await stat(sourcePath)
@@ -3345,9 +3397,9 @@ export class KnowledgeService extends Service {
 
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
-  async enterEmbeddingForeground() {
+  async enterEmbeddingForeground(yieldIgpu = false) {
     this.foregroundReservations++; this.applyEmbeddingCpuTuning(this.getConfig())
-    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(), embeddingFp16Acceleration.enterForeground(), this.ocrAcceleration.enterForeground(), enterOcrPoolForeground()])
+    const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(yieldIgpu), embeddingFp16Acceleration.enterForeground(yieldIgpu), this.ocrAcceleration.enterForeground(yieldIgpu), enterOcrPoolForeground()])
     const failed = releases.find(result => result.status === 'rejected')
     if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); this.foregroundReservations--;this.applyEmbeddingCpuTuning(this.getConfig());throw failed.reason }
     let done=false
@@ -4602,7 +4654,7 @@ export class KnowledgeService extends Service {
           for (let i = 0; i < segments.length; i += batchSize) {
             signal?.throwIfAborted()
             this.assertIndexTargetAlive(docId, baseId)
-            if (this.vectorPhaseDocuments.has(docId)) await this.waitForParsing(signal)
+            if (this.vectorPhaseDocuments.has(docId)) await this.yieldEmbeddingWork(signal)
             const batch = segments.slice(i, i + batchSize)
             const embedded = await this.embedTextsOnce(config, batch.map(segment => segment.text))
             if (embedded.length !== batch.length) throw new Error('Semantic embedding count mismatch')
@@ -4792,6 +4844,8 @@ export class KnowledgeService extends Service {
   /** Embed one batch through the configured provider (empty input → empty output). */
   private async embedTextsOnce(config: KnowledgeConfig, texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
     if (texts.length === 0) return []
+    embeddingAcceleration.setIndexCpuAvailability(() => !this.hasParsingWork())
+    embeddingFp16Acceleration.setIndexCpuAvailability(() => !this.hasParsingWork())
     return embedTexts(
       config.embeddingProvider,
       config.embeddingBaseUrl,

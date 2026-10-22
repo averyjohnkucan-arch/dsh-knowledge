@@ -68,6 +68,18 @@ async function sync(service:KnowledgeService,id:string){
  throw Error('Sync did not finish')
 }
 describe('future-only Markdown and settings-aware folder sync',()=>{
+ it('waits for a text document vector pass instead of failing folder reconciliation',async()=>{
+  const {service,base}=await mount(false), root=await directory()
+  await writeFile(join(root,'article.md'),'Stable astronomy evidence.')
+  await service.importDirectoryTree(base.id,root);await service.waitForIdle()
+  const doc=service.listDocuments(base.id).find(d=>d.sourceType==='file')!
+  const internal=service as any
+  internal.indexing.set(doc.id,{baseId:base.id,title:doc.title,phase:'embedding'})
+  const pending=internal.syncDirectoryFile(doc,join(root,'article.md'),'article.md')
+  await new Promise(resolve=>setTimeout(resolve,70))
+  internal.indexing.delete(doc.id)
+  await expect(pending).resolves.toBe('unchanged')
+ })
  it('opens existing retention-off sources and rejects changed, foreign, or deleted passages',async()=>{
   const {service,base,handler}=await mount(false)
   const doc=await service.addTextDocument({baseId:base.id,title:'Existing source',content:'first line\nexact supporting passage'})
@@ -212,3 +224,4 @@ describe('future-only Markdown and settings-aware folder sync',()=>{
   expect(reopened.getDocumentMetadata('doc')).toMatchObject({markdownRevision:'saved-rev',indexingSettingsFingerprint:'fingerprint'});reopened.close()
  })
 })
+
