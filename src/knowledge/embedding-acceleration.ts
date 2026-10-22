@@ -181,14 +181,32 @@ export class EmbeddingAcceleration {
         if(chosen.device==='CPU' && !String(error).includes('yield'))throw error
         if(chosen.device!=='CPU' && !(error instanceof EmbeddingQueueTimeout) && !String(error).includes('NPU_LONG_INPUT') && !String(error).includes('IGPU_LONG_INPUT') && !String(error).includes('yield')) {
           chosen.enabled=false;chosen.qualified=false;chosen.batcher?.pause();chosen.worker.dispose();chosen.extraWorkers?.forEach(worker=>worker.dispose())
-          this.gpuRetryAt.set(chosen.device,Date.now()+60_000)
+          this.gpuRetryAt.set(chosen.device.startsWith('GPU:')?chosen.device.slice(4):chosen.device,Date.now()+60_000)
           const state=this.ready?.devices.find(d=>d.device===chosen.device)
           if(state){state.qualified=false;state.error=`Device failed at runtime; CPU fallback active: ${String(error).slice(-1500)}`}
-          if(chosen.device.startsWith('GPU')) {this.lanes=this.lanes.filter(lane=>lane!==chosen);this.gpuTried.delete(chosen.device)}
+          if(chosen.device.startsWith('GPU')) {this.lanes=this.lanes.filter(lane=>lane!==chosen);this.gpuTried.delete(chosen.device.slice(4))}
         }
         // Foreground handoff pauses extra CPU lanes too. Never enqueue fallback
         // on a disabled lane, and retry an interrupted CPU job on the surviving one.
+        const lengthFallback = /(?:NPU|IGPU)_LONG_INPUT/.test(String(error))
         while (!this.stopped) {
+          if (lengthFallback && purpose==='index' && !this.foreground && !this.igpuReservations) {
+            // A device-specific token limit is not a CPU-only requirement.
+            // Use a qualified CUDA lane instead of stranding long passages
+            // behind CPU while the GPU drains its regular queue.
+            const gpu=this.lanes.find(l=>l.device==='GPU:main'&&l.enabled&&l.qualified!==false&&l.pending<(this.fp16?32*(1+(l.extraWorkers?.length??0)):1))
+            if (gpu) {
+              try { return await this.run(gpu,text,purpose) }
+              catch (failure) {
+                if (!String(failure).includes('yield')) {
+                  gpu.enabled=false;gpu.qualified=false;gpu.batcher?.pause();gpu.worker.dispose();gpu.extraWorkers?.forEach(worker=>worker.dispose())
+                  this.lanes=this.lanes.filter(lane=>lane!==gpu);this.gpuTried.delete('main');this.gpuRetryAt.set('main',Date.now()+60_000)
+                  const state=this.ready?.devices.find(device=>device.device==='GPU:main')
+                  if(state){state.qualified=false;state.error=`CUDA length fallback failed; CPU recovery active: ${String(failure).slice(-1500)}`}
+                }
+              }
+            }
+          }
           if(purpose==='index'&&!this.indexCpuAvailable()){
             const gpu=this.lanes.find(l=>l.device==='GPU:main'&&l.enabled&&l.qualified!==false&&!this.foreground&&l.pending<32)
             if(gpu)return await this.run(gpu,text,purpose)
@@ -316,15 +334,22 @@ export class EmbeddingAcceleration {
             const warm=await Promise.all(warmInputs.map(text=>this.run(candidate,text)))
             cosine=Math.min(cosine,...warm.map((b,index)=>references[Math.floor(index/32)].reduce((sum,v,i)=>sum+v*b[i],0)))
           }
-          if(cosine<.995)throw Error('GPU embedding vectors did not match CPU reference')
+          if(state)state.minimumCosine=cosine
+          if(cosine<.995)throw Error(`GPU embedding vectors did not match CPU reference (minimum cosine ${cosine.toFixed(8)})`)
           candidate.qualified=true
           const result:Device={device,name:main?`NVIDIA GPU (${this.mainGpuCopies} worker${this.mainGpuCopies>1?'s':''}, available only)`:'Intel iGPU (available only)',qualified:true,minimumCosine:cosine,medianMs:candidate.milliseconds}
-          if(state)Object.assign(state,result);else this.ready!.devices.push(result)
+          if(state){Object.assign(state,result);delete state.error;delete state.blockedReason}else this.ready!.devices.push(result)
         }catch(error){
           await this.stopGpu(candidate);this.lanes=this.lanes.filter(l=>l!==candidate)
           if(String(error).includes('yield')){this.gpuTried.delete(key);this.gpuRetryAt.set(key,Date.now()+15_000)}
-          else if(state)Object.assign(state,{qualified:false,error:String(error)})
-          else this.ready?.devices.push({device,qualified:false,error:String(error)})
+          else {
+            // A transient failed qualification must not exclude a device for
+            // the rest of a multi-hour import. Every retry repeats the same
+            // reference checks before any indexing work is admitted.
+            this.gpuTried.delete(key);this.gpuRetryAt.set(key,Date.now()+300_000)
+            if(state)Object.assign(state,{qualified:false,error:String(error)})
+            else this.ready?.devices.push({device,qualified:false,error:String(error)})
+          }
         }
       }
     }finally{this.checking=false}

@@ -189,3 +189,49 @@ it('does not qualify indexing GPUs for readiness queries and yields idle GPU mem
   expect(gpu.worker.stopAndWait).toHaveBeenCalledOnce();expect(gpu.enabled).toBe(false)
  }finally{knowledgeGpuAdmission.request(owner,false);gpuProbe.mockRestore();desktop.mockRestore()}
 })
+
+ it.each(['NPU_LONG_INPUT','IGPU_LONG_INPUT'])('routes %s to qualified CUDA capacity rather than a CPU-only backlog',async(code)=>{
+  const {manager,cpu,npu}=fixture()
+  npu.worker.request.mockRejectedValue(new Error(code))
+  const gpu={...cpu,device:'GPU:main',milliseconds:10,qualified:true,worker:{...cpu.worker,request:vi.fn(async()=>({vector:vector(),elapsedMs:10}))}}
+  Object.assign(manager,{lanes:[cpu,npu,gpu]})
+  expect(await manager.embed(['long passage'])).toEqual([vector()])
+  expect(npu.worker.request).toHaveBeenCalledOnce()
+  expect(gpu.worker.request).toHaveBeenCalledOnce()
+  expect(cpu.worker.request).not.toHaveBeenCalled()
+ })
+ it('keeps long-input fallback on CPU while foreground inference reserves accelerators',async()=>{
+  const {manager,cpu,npu}=fixture()
+  npu.worker.request.mockImplementation(async()=>{Object.assign(manager,{foreground:1});throw Error('NPU_LONG_INPUT')})
+  const gpu={...cpu,device:'GPU:main',milliseconds:10,qualified:true,worker:{...cpu.worker,request:vi.fn(async()=>({vector:vector(),elapsedMs:10}))}}
+  Object.assign(manager,{lanes:[cpu,npu,gpu]})
+  expect(await manager.embed(['long passage'])).toEqual([vector()])
+  expect(gpu.worker.request).not.toHaveBeenCalled()
+  expect(cpu.worker.request).toHaveBeenCalledOnce()
+ })
+
+it('retries failed GPU qualification after cooldown without weakening reference checks',async()=>{
+ const {manager,cpu}=fixture();const internal=manager as any
+ vi.mocked(internal.updateGpus).mockRestore()
+ const availability=await import('../src/knowledge/embedding-device-availability.js')
+ const policy=await import('../src/knowledge/resource-policy.js')
+ const gpuProbe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:true,freeMiB:16000,reason:'available'})
+ const desktop=vi.spyOn(policy,'desktopIdle').mockResolvedValue({idleSeconds:600} as never)
+ let now=1_000_000,correct=false
+ const clock=vi.spyOn(Date,'now').mockImplementation(()=>now)
+ Object.assign(manager,{used:true,fp16:true,activeIndexBatches:1,mainGpuAllowed:false,intelAvailability:{sample:async()=>({available:true,reason:'available'})},lanes:[cpu]})
+ const factory=vi.spyOn(internal,'lane').mockImplementation(()=>({...cpu,device:'GPU',worker:{...cpu.worker,
+  request:vi.fn(async()=>({vector:correct?vector():[0,1,...Array(1022).fill(0)],elapsedMs:10})),stopAndWait:vi.fn(async()=>{}),dispose:vi.fn()
+ }}))
+ try{
+  await internal.updateGpus()
+  const failed=manager.snapshot.devices.find(device=>device.device==='GPU:intel')!
+  expect(failed).toMatchObject({qualified:false,minimumCosine:0})
+  expect(failed.error).toContain('minimum cosine 0.00000000')
+  await internal.updateGpus();expect(factory).toHaveBeenCalledTimes(1)
+  now+=300_001;correct=true
+  await internal.updateGpus();expect(factory).toHaveBeenCalledTimes(2)
+  expect(manager.snapshot.devices.find(device=>device.device==='GPU:intel')).toMatchObject({qualified:true,minimumCosine:1})
+  expect(manager.snapshot.devices.find(device=>device.device==='GPU:intel')!.error).toBeUndefined()
+ }finally{clock.mockRestore();gpuProbe.mockRestore();desktop.mockRestore();factory.mockRestore()}
+})
