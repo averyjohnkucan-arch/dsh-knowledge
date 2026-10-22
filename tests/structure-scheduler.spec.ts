@@ -328,3 +328,43 @@ it('keeps rich work queued when concurrent probes consume the final CUDA lanes',
   expect((await choices).sort()).toEqual(['CUDA','CUDA:1','WAIT'])
  }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
 })
+
+it.each([false,true])('reclaims an idle secondary CUDA cache under memory pressure (probe admitted: %s)',async admitted=>{
+  const {mkdtemp,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path')
+  const availability=await import('../src/knowledge/embedding-device-availability.js')
+  let reclaimed=false
+  const probe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockImplementation(async()=>reclaimed
+    ? {available:true,freeMiB:10000,reason:'available'}
+    : {available:admitted,freeMiB:admitted?1500:956,reason:'Not enough free VRAM for background embeddings'})
+  const root=await mkdtemp(join(tmpdir(),'structure-cache-pressure-')),manager=new StructureV3Manager()
+  vi.spyOn(manager,'root').mockReturnValue(root)
+  await writeFile(join(root,'gpu-ready.json'),JSON.stringify({schema:1,paddleocr:'3.7.0',precision:'float32',tf32:false}))
+  const primary={device:'CUDA',busy:false,initialized:true,process:{pid:101,dispose:vi.fn(),stopAndWait:vi.fn(async()=>{})}}
+  const secondary={device:'CUDA:1',busy:false,initialized:true,process:{pid:102,dispose:vi.fn(),stopAndWait:vi.fn(async()=>{reclaimed=true})}}
+  const internal=manager as any;internal.workers.push(primary,secondary)
+  try{
+    expect(await internal.layoutDevice(true,true)).toBe('CUDA')
+    expect(secondary.process.stopAndWait).toHaveBeenCalledOnce()
+    expect(primary.process.stopAndWait).not.toHaveBeenCalled()
+    expect(internal.cudaMemoryReduced).toBe(true)
+    expect(await internal.layoutDevice(true,true)).toBe('WAIT')
+    expect(secondary.process.stopAndWait).toHaveBeenCalledOnce()
+  }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
+})
+
+it.each(['busy','reserved','foreign'])('does not reclaim a secondary CUDA worker for %s conditions',async condition=>{
+  const {mkdtemp,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path')
+  const availability=await import('../src/knowledge/embedding-device-availability.js')
+  const probe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:false,freeMiB:956,reason:condition==='foreign'?'Another inference process reserves the main GPU':'Not enough free VRAM for background embeddings'})
+  const root=await mkdtemp(join(tmpdir(),'structure-no-reclaim-')),manager=new StructureV3Manager()
+  vi.spyOn(manager,'root').mockReturnValue(root)
+  await writeFile(join(root,'gpu-ready.json'),JSON.stringify({schema:1,paddleocr:'3.7.0',precision:'float32',tf32:false}))
+  const worker=(device:string,busy=false)=>({device,busy,initialized:true,process:{pid:device==='CUDA'?101:102,dispose:vi.fn(),stopAndWait:vi.fn(async()=>{})}})
+  const primary=worker('CUDA'),secondary=worker('CUDA:1',condition==='busy'),internal=manager as any
+  internal.workers.push(primary,secondary);if(condition==='reserved')internal.reservedDevices.add('CUDA:1')
+  try{
+    expect(await internal.layoutDevice(true,true)).toBe('CPU')
+    expect(secondary.process.stopAndWait).not.toHaveBeenCalled()
+    expect(internal.cudaMemoryReduced).toBe(false)
+  }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
+})
