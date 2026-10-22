@@ -783,6 +783,30 @@ describe('KnowledgeService', () => {
     }
   })
 
+  it('reports semantic segment inference as embedding with advancing progress', async () => {
+    const service = await mountService()
+    const base = await service.createBase({ name: 'semantic-progress' })
+    const observations: Array<{ phase: string; progress: number }> = []
+    const embed = vi.spyOn(service as unknown as { embedTextsOnce(config: unknown, texts: string[]): Promise<number[][]> }, 'embedTextsOnce')
+      .mockImplementation(async (_config, texts) => {
+        const status = service.indexingStatus().find(row => row.title === 'semantic progress')
+        if (status) observations.push({ phase: status.phase, progress: status.progress })
+        return texts.map(() => [1, 0, 0])
+      })
+    try {
+      const doc = await service.addTextDocument({ baseId: base.id, title: 'semantic progress',
+        content: ['First astronomy paragraph. '.repeat(30), 'Second geology paragraph. '.repeat(30), 'Third biology paragraph. '.repeat(30)].join('\n\n') })
+      await service.setConfig({ semanticChunk: true, semanticChunkCandidateTokens: 128, embeddingBatchSize: 1,
+        embeddingProvider: 'openai', embeddingBaseUrl: 'http://127.0.0.1:1', embeddingModel: 'test-embed' })
+      await service.reindexDocument(doc.id, { mode: 'rechunk' })
+      await service.waitForIdle()
+      expect(observations.length).toBeGreaterThan(1)
+      expect(observations.every(row => row.phase === 'embedding')).toBe(true)
+      expect(observations[0].progress).toBe(0)
+      expect(observations.some(row => row.progress > 0)).toBe(true)
+    } finally { embed.mockRestore() }
+  })
+
   it('rejects unsupported file types before creating a row', async () => {
     const service = await mountService()
     const base = await service.createBase({ name: 'reject-ext' })

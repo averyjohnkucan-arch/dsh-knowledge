@@ -4651,6 +4651,13 @@ export class KnowledgeService extends Service {
         try {
           const merger = createSemanticMerger(segments, config.chunkSize, config.semanticChunkThreshold)
           const batchSize = Math.max(1, config.embeddingBatchSize)
+          // Semantic merging performs real embedding inference. Expose that
+          // work instead of leaving large documents at parsing/normalizing 0%.
+          const semanticTask = this.indexing.get(docId)
+          if (semanticTask) {
+            semanticTask.phase = 'embedding'; semanticTask.total = segments.length; semanticTask.progress = 0
+            this.processingProgress.delete(docId)
+          }
           for (let i = 0; i < segments.length; i += batchSize) {
             signal?.throwIfAborted()
             this.assertIndexTargetAlive(docId, baseId)
@@ -4659,6 +4666,7 @@ export class KnowledgeService extends Service {
             const embedded = await this.embedTextsOnce(config, batch.map(segment => segment.text))
             if (embedded.length !== batch.length) throw new Error('Semantic embedding count mismatch')
             batch.forEach((segment, index) => merger.add(segment, embedded[index]))
+            if (semanticTask) semanticTask.progress = Math.round(100 * Math.min(i + batch.length, segments.length) / segments.length)
           }
           merged = merger.finish()
         } catch (error) {
