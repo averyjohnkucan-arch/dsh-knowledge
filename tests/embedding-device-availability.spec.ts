@@ -25,3 +25,14 @@ describe('embedding GPU availability', () => {
     expect(foreignNvidiaGraphics('0 2993 G 20 - - - - - gnome-shell',new Set())).toBe(true)
   })
 })
+
+it('allows known desktop rendering but still yields to compute activity and unknown applications',()=>{
+ const separate='drm-driver: i915\ndrm-client-id: 7\ndrm-engine-render: 100000000 ns\ndrm-engine-compute: 60000000 ns\ndrm-engine-video: 30000000 ns\n'
+ for(const name of ['Xwayland','gnome-shell','ChatGPT']){
+  expect(parseIntelActivity(separate,name)).toEqual({client:'7',nanoseconds:60000000})
+  expect(intelActivityAvailable(0,parseIntelActivity(separate,name)!.nanoseconds,1000)).toBe(false)
+  expect(parseIntelActivity(separate.replace('60000000 ns','0 ns'),name)).toEqual({client:'7',nanoseconds:0})
+ }
+ expect(parseIntelActivity(separate,'python')).toEqual({client:'7',nanoseconds:190000000})
+ expect(parseIntelActivity(separate.replace('drm-engine-compute: 60000000 ns\n',''),'Xwayland')).toEqual({client:'7',nanoseconds:130000000})
+})
