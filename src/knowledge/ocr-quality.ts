@@ -1,5 +1,10 @@
 /** Linear-time OCR agreement, tolerant of case/spacing and small decoder differences. */
 export function ocrTextAgreement(reference: string, candidate: string): number {
+  // High global text overlap must not hide a changed decimal, sign or value.
+  // Keep numeric order too: swapping table values can preserve word overlap.
+  const numbers = (text: string) => (text.normalize('NFKC').match(/[+\-−]?\s*\d+(?:[.,]\d+)*(?:%|‰)?/gu) ?? [])
+    .map(value => value.replace(/\s/gu, '').replace('−', '-'))
+  if (JSON.stringify(numbers(reference)) !== JSON.stringify(numbers(candidate))) return 0
   const clean = (text: string) => text.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
   const a = Array.from(clean(reference)), b = Array.from(clean(candidate))
   if (a.join('') === b.join('')) return 1

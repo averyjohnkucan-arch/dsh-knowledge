@@ -17,3 +17,12 @@ describe('tolerant OCR backend qualification',()=>{
   expect(ocrTextAgreement(page.repeat(100),page.repeat(100))).toBe(1)
  })
 })
+
+it('rejects changed numeric meaning even when the surrounding page is identical', () => {
+  const context = 'The reported measurement was recorded and independently reviewed. '.repeat(30)
+  for (const [before, after] of [['1.25', '125'], ['-12', '12'], ['17%', '17'], ['10 20', '20 10']]) {
+    expect(ocrTextAgreement(context + before, context + after)).toBe(0)
+  }
+  expect(ocrTextAgreement(context + '−12', context + '-12')).toBe(1)
+  expect(ocrTextAgreement(context + '17', context.replaceAll('.', ',') + '17')).toBe(1)
+})
