@@ -11,3 +11,6 @@ Semantic chunking progress now reports the paragraph-embedding pass as embedding
 
 
 Startup raw-source recovery now registers its complete parsing backlog before asynchronous reads and exposes the active file as parsing. Both OCR and parsing admission barriers include that backlog, preventing vector backfill from occupying accelerators between resumed files. Every success, failure and shutdown path releases the markers; failed imports retain their normal error state.
+
+
+CUDA OCR recognition batches now group crops by their batch-one padded width, preserving preprocessing and output order. CUDA explicitly disables TF32 after fixed-page comparisons showed text drift; FP32 width-preserving batches matched the CPU single-line reference on three repeated sample pages. These samples are consistency checks, not full-corpus ground truth.
