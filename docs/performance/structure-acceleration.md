@@ -31,3 +31,9 @@ Batches larger than eight and FP16 chart decoding did not show consistent gains;
 The isolated candidate passes TypeScript, production build and 50 focused tests covering resource handoff, range scheduling, partial-range rejection, failed-range retry, quality normalization and OCR cache handoff. Live range scheduling recovered completed documents and progressed without reported failures. Per-device page/request/time counters are exposed in structure status for subsequent measurement.
 
 Sustained full-corpus throughput and the embedding stage still require verification. Optional accelerator runtimes and qualification receipts are local artifacts; a CPU-only installation remains supported. No model weights or machine-specific runtime binaries are committed.
+
+## Concurrent CUDA qualification
+
+A controlled sample with the same four eight-page requests completed in 19.35 s and 15.32 s with one warm CUDA worker, versus 12.67 s and 11.97 s with two. All checked content matched. The earlier single-worker round still showed warmup/live-load effects; comparison against the warmer 15.32 s round suggests approximately 17–22% lower elapsed time for this sample, not a whole-corpus guarantee.
+
+The scheduler now admits at most two CUDA workers, requiring 8 GiB of free VRAM for a new worker and reserving that budget for other workers still loading. Warm workers require 2 GiB headroom. Two CPU-backed structure lanes remain bounded separately. Foreground handoff releases both CUDA workers. No decoding precision or token limit changed.

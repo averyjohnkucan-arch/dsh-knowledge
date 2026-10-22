@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EmbeddingBatcher } from '../src/knowledge/embedding-batcher.js'
 import { EmbeddingAcceleration } from '../src/knowledge/embedding-acceleration.js'
-afterEach(()=>vi.useRealTimers())
+const managers: EmbeddingAcceleration[] = []
+afterEach(()=>{for(const manager of managers.splice(0))manager.dispose();vi.useRealTimers()})
 const vector=()=>[1,...Array(1023).fill(0)]
 function fixture() {
  const cpu={device:'CPU',milliseconds:100,pending:0,enabled:true,tail:Promise.resolve(),worker:{request:vi.fn(async()=>({vector:vector(),elapsedMs:100})),stopAndWait:vi.fn(async()=>{}),dispose:vi.fn()}}
  const npu={...cpu,device:'NPU',milliseconds:1,worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{}),request:vi.fn(async()=>{throw Error('Device disappeared')})}}
- const manager=new EmbeddingAcceleration()
+ const manager=new EmbeddingAcceleration();managers.push(manager)
+ // These fixtures exercise fake lanes; background hardware probing would
+ // otherwise launch real calibration requests and make assertions race.
+ vi.spyOn(manager as unknown as {updateGpus():Promise<void>},'updateGpus').mockResolvedValue(undefined)
  Object.assign(manager,{warmed:true,ready:{status:'ready',message:'validated',devices:[]},lanes:[cpu,npu]})
  return {manager,cpu,npu}
 }

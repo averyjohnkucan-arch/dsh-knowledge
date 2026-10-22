@@ -18,14 +18,15 @@ import { extractHtmlToMarkdown } from './parse.js'
 import type { ParsedBlock, ProcessingOutput } from './processing-types.js'
 
 export interface StructureStatus { status: 'not_downloaded' | 'installing' | 'ready' | 'error'; progress: number; message: string; device: 'cpu'; activity?: { activeDocuments: number; foreground: boolean; devices: { device: string; active: number; pages: number; requests: number; seconds: number }[] } }
-interface StructureLane { process: StructureProcess; busy: boolean; device: string; disabled?: boolean; current?: Promise<unknown> }
+interface StructureLane { process: StructureProcess; busy: boolean; device: string; disabled?: boolean; initialized?: boolean; current?: Promise<unknown> }
+const isCuda = (device: string) => device === 'CUDA' || device === 'CUDA:1'
 const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, import.meta.url))
 export class StructureV3Manager {
   private state: StructureStatus = { status: 'not_downloaded', progress: 0, message: '', device: 'cpu' }
   private children = new Set<ChildProcess>()
   private setup?: Promise<void>
   private readonly concurrency = Math.max(1, Math.min(2, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (4 * 1024 ** 3))))
-  private readonly queue = new ProcessingQueue(this.concurrency + 1)
+  private readonly queue = new ProcessingQueue(this.concurrency + 2)
   private readonly cpuQueue = new ProcessingQueue(this.concurrency)
   private active = 0
   private readonly measurements = new Map<string, {pages:number;requests:number;seconds:number}>()
@@ -58,7 +59,7 @@ export class StructureV3Manager {
       let cuda = ''
       try {
         const gpu = JSON.parse(await readFile(join(this.root(), 'gpu-ready.json'), 'utf8'))
-        if (gpu.schema === 1 && gpu.precision === 'float32' && gpu.tf32 === false && !this.layoutFailed.has('CUDA')) cuda = this.foreground ? ' · CUDA paused for chat' : ' · CUDA FP32'
+        if (gpu.schema === 1 && gpu.precision === 'float32' && gpu.tf32 === false && !['CUDA','CUDA:1'].every(device => this.layoutFailed.has(device))) cuda = this.foreground ? ' · CUDA paused for chat' : ' · CUDA FP32'
       } catch { /* Optional GPU runtime is not installed. */ }
       return { status: 'ready', progress: 100, message: `PP-StructureV3: English OCR, tables and charts · CPU${cuda}${layout}`, device: 'cpu',
         activity:{activeDocuments:this.active,foreground:this.foreground>0,devices:[...new Set([...this.measurements.keys(),...this.workers.map(lane=>lane.device)])].map(device=>({device,active:this.workers.filter(lane=>lane.device===device&&lane.busy).length,...(this.measurements.get(device)??{pages:0,requests:0,seconds:0})}))} }
@@ -102,10 +103,18 @@ export class StructureV3Manager {
     if (this.foreground) return 'CPU'
     try {
       const cuda = JSON.parse(await readFile(join(this.root(), 'gpu-ready.json'), 'utf8'))
-      if (cuda.schema === 1 && cuda.paddleocr === '3.7.0' && cuda.precision === 'float32' && cuda.tf32 === false && !this.layoutFailed.has('CUDA') && !this.reservedDevices.has('CUDA') && !this.workers.some(lane => lane.device === 'CUDA' && lane.busy)) {
+      if (cuda.schema === 1 && cuda.paddleocr === '3.7.0' && cuda.precision === 'float32' && cuda.tf32 === false) {
         const decision = knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(() => backgroundDevicePids()) : {available:false,freeMiB:0}
-        const resident = this.workers.some(lane => lane.device === 'CUDA' && lane.process.pid)
-        if (decision.available && (decision.freeMiB ?? 0) >= (resident ? 2048 : 8192) && !this.foreground && !this.reservedDevices.has('CUDA')) return this.reserveDevice('CUDA')
+        if (decision.available && !this.foreground && !this.stopped) {
+          for (const device of ['CUDA','CUDA:1']) {
+            if (this.layoutFailed.has(device) || this.reservedDevices.has(device) || this.workers.some(lane => lane.device === device && lane.busy)) continue
+            const resident = this.workers.some(lane => lane.device === device && !lane.disabled && lane.initialized && lane.process.pid)
+            // Reserve room for another worker still loading: its process may
+            // exist before the CUDA allocator reflects the full model footprint.
+            const loading = [...this.reservedDevices].filter(value => isCuda(value) && !this.workers.some(lane => lane.device === value && lane.initialized && !lane.disabled)).length
+            if ((decision.freeMiB ?? 0) >= (resident ? 2048 : 8192) + loading * 8192) return this.reserveDevice(device)
+          }
+        }
       }
     } catch { /* The optional CUDA runtime is not qualified. */ }
     try {
@@ -128,7 +137,7 @@ export class StructureV3Manager {
     return 'CPU'
   }
   async yieldMainGpu(): Promise<void> {
-    await Promise.all(this.workers.filter(lane => lane.device === 'CUDA').map(lane => this.stopLane(lane)))
+    await Promise.all(this.workers.filter(lane => isCuda(lane.device)).map(lane => this.stopLane(lane)))
   }
   private async stopLane(lane: StructureLane): Promise<void> {
     lane.disabled = true
@@ -162,8 +171,8 @@ export class StructureV3Manager {
       DSH_STRUCTURE_LAYOUT_DEVICE: device,
     })
     else { delete env.DSH_STRUCTURE_LAYOUT_MODEL; delete env.DSH_STRUCTURE_LAYOUT_DEVICE }
-    env.DSH_STRUCTURE_DEVICE = device === 'CUDA' ? 'gpu:0' : 'cpu'
-    if (device === 'CUDA') {
+    env.DSH_STRUCTURE_DEVICE = isCuda(device) ? 'gpu:0' : 'cpu'
+    if (isCuda(device)) {
       delete env.CUDA_VISIBLE_DEVICES
       const libraries = ['cuda_nvrtc','cuda_runtime','cuda_cupti','cudnn','cublas','cufft','curand','cusolver','cusparse','cusparselt','nccl','nvtx','nvjitlink','cufile']
       env.LD_LIBRARY_PATH = [...libraries.map(name => join(this.root(), 'cuda-overlay/nvidia', name, 'lib')), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':')
@@ -197,10 +206,10 @@ export class StructureV3Manager {
       let serial = 0
       const run = async (device: string, start?: number, limit?: number): Promise<Result> => {
         combined.throwIfAborted()
-        if (this.foreground && device === 'CUDA') return this.cpuQueue.run(() => run('CPU', start, limit), combined)
+        if (this.foreground && isCuda(device)) return this.cpuQueue.run(() => run('CPU', start, limit), combined)
         if (this.foreground) device = 'CPU'
         const output = join(dir!, `result-${serial++}.json`)
-        const releaseCpu = device === 'CUDA' ? undefined : enterStructureCpuWork()
+        const releaseCpu = isCuda(device) ? undefined : enterStructureCpuWork()
         try {
           const lane = this.worker(device)
           lane.busy = true
@@ -215,6 +224,7 @@ export class StructureV3Manager {
             for (const block of result.blocks) {
               if (!Number.isInteger(block.page) || block.page < (start ?? 0) + 1 || block.page > (result.pageEnd ?? result.pageCount) || typeof block.text !== 'string' || typeof block.type !== 'string') throw new Error('Invalid PP-StructureV3 result')
             }
+            lane.initialized = true
             devices.add(device)
             const measured = this.measurements.get(device) ?? {pages:0,requests:0,seconds:0}
             measured.pages += start === undefined ? result.pageCount : result.pageEnd! - start
@@ -226,7 +236,7 @@ export class StructureV3Manager {
             // Retry only this uncommitted range. Earlier ranges remain intact.
             if (!lane.disabled) this.layoutFailed.add(device)
             lane.disabled = true; await lane.process.stopAndWait()
-            return await (device === 'CUDA' ? this.cpuQueue.run(() => run('CPU', start, limit), combined) : run('CPU', start, limit))
+            return await (isCuda(device) ? this.cpuQueue.run(() => run('CPU', start, limit), combined) : run('CPU', start, limit))
           } finally { lane.busy = false; lane.current = undefined }
         } finally { releaseCpu?.(); await rm(output, {force:true}) }
       }
@@ -235,7 +245,7 @@ export class StructureV3Manager {
         try {
           const range = claim(device)
           if (!range) return undefined
-          return await (device === 'CUDA' && !this.foreground ? run(device, range.start, range.limit) : this.cpuQueue.run(() => run(this.foreground ? 'CPU' : device, range.start, range.limit), combined))
+          return await (isCuda(device) && !this.foreground ? run(device, range.start, range.limit) : this.cpuQueue.run(() => run(this.foreground ? 'CPU' : device, range.start, range.limit), combined))
         } finally { this.reservedDevices.delete(device) }
       }, combined)
       // Discover page count while completing the first page. Subsequent ranges
@@ -249,7 +259,7 @@ export class StructureV3Manager {
             const result = await schedule(device => {
               if (next >= first.pageCount) return undefined
               const start = next
-              const limit = Math.min(device === 'CUDA' ? 8 : 1, first.pageCount - start)
+              const limit = Math.min(isCuda(device) ? 8 : 1, first.pageCount - start)
               next += limit
               return {start,limit}
             })
@@ -259,7 +269,7 @@ export class StructureV3Manager {
             }
           }
         }
-        const jobs = Array.from({length:this.concurrency + 1}, () => consume().catch(error => {failed.abort(error);throw error}))
+        const jobs = Array.from({length:this.concurrency + 2}, () => consume().catch(error => {failed.abort(error);throw error}))
         const settled = await Promise.allSettled(jobs)
         const rejected = settled.find(result => result.status === 'rejected')
         if (rejected?.status === 'rejected') throw rejected.reason

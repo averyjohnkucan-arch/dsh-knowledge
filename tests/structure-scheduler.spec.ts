@@ -20,6 +20,7 @@ describe('bounded structure worker pool', () => {
     vi.spyOn(manager, 'status').mockResolvedValue({status:'ready',progress:100,message:'',device:'cpu'})
     const first = manager.extract(new Uint8Array([1]), 'a', true, 1000)
     const second = manager.extract(new Uint8Array([2]), 'b', true, 1000)
+    await vi.waitFor(() => expect(state.active).toBe(2))
     const abort = new AbortController()
     const third = manager.extract(new Uint8Array([3]), 'c', true, 1000, abort.signal)
     const rejected = expect(third).rejects.toMatchObject({name:'AbortError'})
@@ -132,11 +133,11 @@ it('distributes one long PDF across devices in bounded ranges and commits comple
   const internal=manager as unknown as {layoutDevice():Promise<string>;worker(device:string):any;reservedDevices:Set<string>}
   const calls:Array<{device:string;start:number;limit:number;input:string}>=[]
   let active=0,peak=0
-  const lanes=['CUDA','NPU','GPU'].map(device=>({device,busy:false,process:{
+  const lanes=['CUDA','CUDA:1','NPU','GPU'].map(device=>({device,busy:false,process:{
     request:vi.fn(async(payload:{input:string;output:string;startPage:number;pageLimit:number})=>{
       calls.push({device,start:payload.startPage,limit:payload.pageLimit,input:payload.input})
       peak=Math.max(peak,++active)
-      await new Promise(resolve=>setTimeout(resolve,device==='CUDA'?1:15))
+      await new Promise(resolve=>setTimeout(resolve,device.startsWith('CUDA')?1:15))
       const end=Math.min(33,payload.startPage+payload.pageLimit)
       await writeFile(payload.output,JSON.stringify({pageCount:33,pageStart:payload.startPage,pageEnd:end,
         blocks:Array.from({length:end-payload.startPage},(_,i)=>({page:payload.startPage+i+1,type:'table',text:`page ${payload.startPage+i+1}`}))}))
@@ -155,13 +156,13 @@ it('distributes one long PDF across devices in bounded ranges and commits comple
     expect(result.document.blocks.map(block=>block.pageIndex)).toEqual(Array.from({length:33},(_,i)=>i))
     expect(result.document.processedPages).toHaveLength(33)
     expect(new Set(calls.map(call=>call.input)).size).toBe(1)
-    expect(new Set(calls.map(call=>call.device))).toEqual(new Set(['CUDA','NPU','GPU']))
-    expect(calls.filter(call=>call.device==='CUDA').some(call=>call.limit===8)).toBe(true)
-    expect(calls.filter(call=>call.device!=='CUDA').every(call=>call.limit===1)).toBe(true)
-    expect(peak).toBe(3)
+    expect(new Set(calls.map(call=>call.device))).toEqual(new Set(['CUDA','CUDA:1','NPU','GPU']))
+    expect(calls.filter(call=>call.device.startsWith('CUDA')).some(call=>call.limit===8)).toBe(true)
+    expect(calls.filter(call=>!call.device.startsWith('CUDA')).every(call=>call.limit===1)).toBe(true)
+    expect(peak).toBe(4)
     const metrics=(manager as unknown as {measurements:Map<string,{pages:number;requests:number;seconds:number}>}).measurements
     expect([...metrics.values()].reduce((sum,value)=>sum+value.pages,0)).toBe(33)
-    expect(metrics.size).toBe(3)
+    expect(metrics.size).toBe(4)
     expect([...metrics.values()].every(value=>value.requests>0&&value.seconds>0)).toBe(true)
   } finally {manager.dispose()}
 })
@@ -203,4 +204,21 @@ it('retries only the failed range on CPU and retains already completed pages', a
     expect(calls.filter(call=>call.start===0)).toHaveLength(1)
     expect(calls.filter(call=>call.start===1)).toEqual([{device:'CUDA',start:1,limit:8},{device:'CPU',start:1,limit:8}])
   } finally {manager.dispose()}
+})
+
+it.each([[25000,['CUDA','CUDA:1']],[12000,['CUDA','CPU']],[4000,['CPU','CPU']]] as const)('reserves loading VRAM before admitting parallel CUDA workers: %i MiB', async (free,expected) => {
+  const {mkdtemp,rm}=await import('node:fs/promises')
+  const {tmpdir}=await import('node:os')
+  const {join}=await import('node:path')
+  const availability=await import('../src/knowledge/embedding-device-availability.js')
+  const probe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:true,freeMiB:free,reason:'available'})
+  const root=await mkdtemp(join(tmpdir(),'structure-vram-'))
+  const manager=new StructureV3Manager()
+  vi.spyOn(manager,'root').mockReturnValue(root)
+  await writeFile(join(root,'gpu-ready.json'),JSON.stringify({schema:1,paddleocr:'3.7.0',precision:'float32',tf32:false}))
+  const internal=manager as unknown as {layoutDevice():Promise<string>}
+  try {
+    expect((await Promise.all([internal.layoutDevice(),internal.layoutDevice()])).sort()).toEqual([...expected].sort())
+    expect(await internal.layoutDevice()).toBe('CPU')
+  }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
 })
