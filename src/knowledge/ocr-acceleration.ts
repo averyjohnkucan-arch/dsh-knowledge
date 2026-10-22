@@ -1,3 +1,4 @@
+import type { PipelineDeviceState } from './import-stages.js'
 import { knowledgeGpuAdmission } from './background-gpu.js'
 import { MIN_OCR_AGREEMENT, ocrTextAgreement } from './ocr-quality.js'
 import { stopOwnedProcess } from './owned-process.js'
@@ -129,6 +130,13 @@ export class OcrAcceleration {
   root(): string { return join(localModelCacheDir(), 'ocr-accelerators') }
   python(): string { return join(this.root(), 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') }
   get concurrency(): number { return Math.max(1, this.lanes.filter(lane => !lane.failed && lane.enabled).length) }
+  runtimeDevices(): PipelineDeviceState[] {
+    return [...this.lanes.map(lane=>{
+      const state:PipelineDeviceState['state']=lane.pending>0?'running':lane.failed?'unavailable':lane.enabled?'ready':'waiting'
+      return {device:lane.device.device,activeTasks:lane.pending,state,
+        reason:lane.pending>0?'Processing queued OCR pages':this.foreground && lane.device.device!=='CPU'?'Reserved for foreground inference':lane.failed?(lane.device.error??'OCR worker failed; fallback active'):lane.enabled?'Waiting for OCR pages':lane.device.error??'Waiting for device admission or CPU capacity'}
+    }),...this.excludedDevices.map(device=>({device:device.device,activeTasks:0,state:'unavailable' as const,reason:device.error??'Device is not qualified for this OCR model'}))]
+  }
   async status(): Promise<OcrAccelerationStatus> {
     if (this.state) return this.state
     if (this.loadedRoot === this.root()) return { status: 'ready', message: 'Calibrated local OCR devices', devices: [...this.lanes.map(lane => ({ ...lane.device, qualified: lane.device.qualified && !lane.failed, enabled: lane.enabled && !lane.failed, pending: lane.pending, completed: lane.completed ?? 0 })), ...this.excludedDevices] }

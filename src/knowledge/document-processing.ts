@@ -9,6 +9,11 @@ import { extractWithMineruLocal } from './mineru-local.js'
 import { parsedTextDocument } from './parsed-document.js'
 import { retryDocument, DOCUMENT_MAX_ATTEMPTS, markAttemptsExhausted } from './document-retry.js'
 
+let captionModule: Promise<typeof import('./caption.js')> | undefined
+function loadCaptionModule() {
+  return captionModule ??= import('./caption.js').catch(error => {captionModule=undefined;throw error})
+}
+
 export interface ProcessedFile {
   readonly text: string
   readonly parsed: ParsedDocument
@@ -61,6 +66,8 @@ export interface ProcessFileInput {
   readonly onProgress?: (progress: ProcessingProgress) => void
   /** Startup-only recovery, never silently reuse artifacts for explicit reparse. */
   readonly resume?: boolean
+  /** Validated output from the import-wide extraction/parsing stages. */
+  readonly prepared?: ProcessingOutput
 }
 
 /** All file entry points use this function. Cloud is only contacted when the
@@ -127,11 +134,53 @@ async function processDocumentFileAttempt(input: ProcessFileInput, attempt: numb
     else if (!progressTimer) progressTimer = setTimeout(() => { void flushProgress() }, 1000)
     input.onProgress?.(value)
   }
-  const warnings: ProcessingWarning[] = []
   try {
-    let output: ProcessingOutput | undefined
-    const pdf = extensionOf(input.fileName) === 'pdf'
-    const parse = async (): Promise<ProcessingOutput> => {
+    let output: ProcessingOutput
+    const parse = () => extractDocumentContent({ ...input,
+      resumeJobId: matching?.state === 'running' ? matching.progress.jobId : undefined,
+      onProgress: progress,
+    })
+    if (input.prepared) {
+      if (input.prepared.document.sourceHash !== sourceHash || input.prepared.document.optionsFingerprint !== fingerprint)
+        throw Object.assign(new Error('Prepared document no longer matches its source or settings'), {code:'prepared_source_changed'})
+      output = input.prepared
+    } else {
+      output = await (input.runParsing ? input.runParsing(parse) : parse())
+      output = await enrichDocumentContent(input, output, progress)
+    }
+    if (!output.document.text.trim()) throw Object.assign(new Error('parsed document is empty'), { code: 'empty_result' })
+    input.signal?.throwIfAborted()
+    output = { ...output, document: { ...output.document, optionsFingerprint: fingerprint } }
+    progress({ stage: 'normalizing' })
+    await flushProgress()
+    const processing = await artifacts.save(baseId, documentId, output)
+    input.signal?.throwIfAborted()
+    await artifacts.saveJob({ ...job, state: 'completed', artifact: processing, progress: { stage: 'completed' }, updatedAt: Date.now() })
+    return { text: output.document.text, parsed: output.document, processing }
+  } catch (error) {
+    await flushProgress().catch(() => {})
+    const canceled = input.signal?.aborted === true
+    const uncertain = ['submission_unknown', 'job_lost'].includes(processorErrorCode(error))
+    const recoveryExhausted = input.resume && (job.startupAttempts ?? 0) >= DOCUMENT_MAX_ATTEMPTS
+    const retrying = !canceled && !uncertain && !recoveryExhausted && attempt < DOCUMENT_MAX_ATTEMPTS
+    await artifacts.saveJob({ ...job, state: canceled ? 'canceled' : retrying || uncertain ? 'running' : 'failed', errorCode: processorErrorCode(error), progress: { ...job.progress, stage: canceled ? 'canceled' : retrying ? 'queued' : uncertain ? job.progress.stage : 'failed' }, updatedAt: Date.now() }).catch(() => {})
+    if (recoveryExhausted && typeof error === 'object' && error !== null) throw markAttemptsExhausted(error)
+    throw error
+  }
+}
+
+/** Source decoding/OCR without table/chart inference or artifact publication.
+ * PDF decoding is a prerequisite for selecting and rendering OCR pages. */
+export async function extractDocumentContent(input: Pick<ProcessFileInput,
+  'bytes' | 'fileName' | 'mimeType' | 'config' | 'signal' | 'onProgress'> & {resumeJobId?: string}): Promise<ProcessingOutput> {
+  const {config, bytes} = input
+  const fingerprint = processorFingerprint(config)
+  const pdf = extensionOf(input.fileName) === 'pdf'
+  const warnings: ProcessingWarning[] = []
+  const progress = (value: ProcessingProgress) => input.onProgress?.(value)
+  let output: ProcessingOutput | undefined
+  input.signal?.throwIfAborted()
+
       let remoteFailure: unknown
       if (pdf && config.documentProcessorProvider === 'mineru-local') {
         try {
@@ -142,7 +191,7 @@ async function processDocumentFileAttempt(input: ProcessFileInput, attempt: numb
             timeoutMs: config.documentProcessingTimeoutMs ?? 1_800_000,
           }, {
             signal: input.signal, onProgress: progress,
-            ...(matching?.state === 'running' && matching.progress.jobId !== undefined ? { resumeJobId: matching.progress.jobId } : {}),
+            ...(input.resumeJobId !== undefined ? { resumeJobId: input.resumeJobId } : {}),
           })
         } catch (error) {
           input.signal?.throwIfAborted()
@@ -174,14 +223,24 @@ async function processDocumentFileAttempt(input: ProcessFileInput, attempt: numb
         }
       }
       return output
-    }
-    output = await (input.runParsing ? input.runParsing(parse) : parse())
-    if (!output.document.text.trim()) throw Object.assign(new Error('parsed document is empty'), { code: 'empty_result' })
+
+}
+
+/** Parsing/enrichment consumes completed extraction; it never reruns OCR of
+ * the source PDF through parseDocumentBuffer. Structure models retain their
+ * own internal recognition where required to interpret a table or chart. */
+export async function enrichDocumentContent(input: Pick<ProcessFileInput,
+  'bytes' | 'fileName' | 'config' | 'signal' | 'structureV3'>, output: ProcessingOutput,
+  progress: (value: ProcessingProgress) => void = () => {}): Promise<ProcessingOutput> {
+  const {config, bytes} = input
+  const pdf = extensionOf(input.fileName) === 'pdf'
+  input.signal?.throwIfAborted()
+  if (!output.document.text.trim()) throw Object.assign(new Error('parsed document is empty'), { code: 'empty_result' })
     // Captioning remains opt-in, but now runs identically on import and reparse.
     if (pdf && config.imageCaptionProvider !== 'off') {
       progress({ stage: 'enriching' })
       try {
-        const { captionPdfImages } = await import('./caption.js')
+        const { captionPdfImages } = await loadCaptionModule()
         input.signal?.throwIfAborted()
         const caption = await captionPdfImages(bytes, {
           structureV3: input.structureV3, signal: input.signal, charts: config.structureV3Charts,
@@ -203,22 +262,7 @@ async function processDocumentFileAttempt(input: ProcessFileInput, attempt: numb
         output = { ...output, document: { ...output.document, warnings: [...output.document.warnings, { code: 'caption_failed', message: processorErrorMessage(error) }] } }
       }
     }
-    input.signal?.throwIfAborted()
-    output = { ...output, document: { ...output.document, optionsFingerprint: fingerprint } }
-    progress({ stage: 'normalizing' })
-    await flushProgress()
-    const processing = await artifacts.save(baseId, documentId, output)
-    input.signal?.throwIfAborted()
-    await artifacts.saveJob({ ...job, state: 'completed', artifact: processing, progress: { stage: 'completed' }, updatedAt: Date.now() })
-    return { text: output.document.text, parsed: output.document, processing }
-  } catch (error) {
-    await flushProgress().catch(() => {})
-    const canceled = input.signal?.aborted === true
-    const uncertain = ['submission_unknown', 'job_lost'].includes(processorErrorCode(error))
-    const recoveryExhausted = input.resume && (job.startupAttempts ?? 0) >= DOCUMENT_MAX_ATTEMPTS
-    const retrying = !canceled && !uncertain && !recoveryExhausted && attempt < DOCUMENT_MAX_ATTEMPTS
-    await artifacts.saveJob({ ...job, state: canceled ? 'canceled' : retrying || uncertain ? 'running' : 'failed', errorCode: processorErrorCode(error), progress: { ...job.progress, stage: canceled ? 'canceled' : retrying ? 'queued' : uncertain ? job.progress.stage : 'failed' }, updatedAt: Date.now() }).catch(() => {})
-    if (recoveryExhausted && typeof error === 'object' && error !== null) throw markAttemptsExhausted(error)
-    throw error
-  }
+
+  input.signal?.throwIfAborted()
+  return output
 }

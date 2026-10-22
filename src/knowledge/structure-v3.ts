@@ -1,3 +1,4 @@
+import type { PipelineDeviceState } from './import-stages.js'
 import { knowledgeGpuAdmission } from './background-gpu.js'
 import { acceleratorEnvironment } from './ocr-acceleration.js'
 import { registerBackgroundDevices, backgroundDevicePids, IntelEmbeddingAvailability, nvidiaEmbeddingAvailability } from './embedding-device-availability.js'
@@ -51,6 +52,14 @@ export class StructureV3Manager {
   private workerRoot?: string
   root(): string { return join(localModelCacheDir(), 'structure-v3') }
   python(): string { return join(this.root(), 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python') }
+  runtimeDevices(): PipelineDeviceState[] {
+    return ['CPU','NPU','GPU','CUDA','CUDA:1'].map(device=>{
+      const activeTasks=this.workers.filter(lane=>lane.device===device&&lane.busy).length
+      const unavailable=this.layoutFailed.has(device)||(device==='CUDA:1'&&this.cudaMemoryReduced)
+      const state:PipelineDeviceState['state']=activeTasks>0?'running':unavailable?'unavailable':'waiting'
+      return {device,activeTasks,state,reason:activeTasks>0?(isCuda(device)||device==='CPU'?'Interpreting queued page content':'Screening page layouts'):this.foreground&&device!=='CPU'?'Reserved for foreground inference':device==='CUDA:1'&&this.cudaMemoryReduced?'Second CUDA worker retired after VRAM pressure':this.layoutFailed.has(device)?'Worker failed; compatible fallback active':this.reservedDevices.has(device)?'Reserved for a queued page':this.active>0?'Waiting for compatible page work or device/CPU admission':'No structure work queued'}
+    })
+  }
   async status(): Promise<StructureStatus> {
     if (this.state.status === 'installing' || this.state.status === 'error') return { ...this.state }
     try {
@@ -132,7 +141,7 @@ export class StructureV3Manager {
         // Queue waiters cannot use a busy/reserved lane. Avoid launching three
         // nvidia-smi subprocesses for each waiter while CUDA is already full.
         const hasFreeLane = this.cudaDevices().some(device => !this.layoutFailed.has(device) && !this.reservedDevices.has(device) && !this.workers.some(lane => lane.device === device && lane.busy))
-        if (richOnly && !hasFreeLane && knowledgeGpuAdmission.allowed && !this.cudaDevices().every(device => this.layoutFailed.has(device))) return 'WAIT'
+        if (richOnly && !hasFreeLane && knowledgeGpuAdmission.allowed && !this.cudaDevices().every(device => this.layoutFailed.has(device))) return this.cpuRequests < this.concurrency ? 'CPU' : 'WAIT'
         let decision = hasFreeLane && knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(() => backgroundDevicePids()) : {available:false,freeMiB:0,reason:'No free lane'}
         // Each Paddle worker can retain a large allocator cache after rich
         // inference. Two resident caches must not strand both idle workers
@@ -164,8 +173,9 @@ export class StructureV3Manager {
           }
         }
         // Another waiter may reserve the last lane during the async probe.
-        // Recheck after it resolves instead of sending rich work to slow CPU.
-        if (richOnly && knowledgeGpuAdmission.allowed && !this.cudaDevices().every(device => this.layoutFailed.has(device)) && this.cudaDevices().every(device => this.layoutFailed.has(device) || this.reservedDevices.has(device) || this.workers.some(lane => lane.device === device && lane.busy))) return 'WAIT'
+        // Recheck after it resolves; spare CPU capacity can process an independent
+        // rich page while CUDA is full, without reserving a CUDA queue slot.
+        if (richOnly && knowledgeGpuAdmission.allowed && !this.cudaDevices().every(device => this.layoutFailed.has(device)) && this.cudaDevices().every(device => this.layoutFailed.has(device) || this.reservedDevices.has(device) || this.workers.some(lane => lane.device === device && lane.busy))) return this.cpuRequests < this.concurrency ? 'CPU' : 'WAIT'
       }
     } catch { /* The optional CUDA runtime is not qualified. */ }
     if (richOnly) return 'CPU'

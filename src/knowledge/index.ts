@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { ImportCheckpoints } from './import-checkpoints.js'
+import { runImportStages, type ImportStageProgress } from './import-stages.js'
 import { knowledgeGpuAdmission, type BackgroundScheduler } from './background-gpu.js'
 import { disposePdfParsers } from './parse.js'
 import { availableParallelism, freemem } from 'node:os'
@@ -28,10 +31,10 @@ import { chunkText, createSemanticMerger, refineChunksByTokenLimit, splitSemanti
 import type { ChunkPiece } from './chunk.js'
 import { chunkParsedDocument } from './structured-chunk.js'
 import { ArtifactRepository } from './artifacts.js'
-import { processDocumentFile, processorFingerprint, processorErrorCode, processorErrorMessage, type ProcessedFile } from './document-processing.js'
+import { processDocumentFile, extractDocumentContent, enrichDocumentContent, processorFingerprint, processorErrorCode, processorErrorMessage, type ProcessedFile } from './document-processing.js'
 import { probeMineruLocal } from './mineru-local.js'
 import { MineruDeployment } from './mineru-deployment.js'
-import type { DocumentEvidence, ProcessingProgress, ParsedDocument } from './processing-types.js'
+import type { DocumentEvidence, ProcessingProgress, ParsedDocument, ProcessingOutput } from './processing-types.js'
 import { composeDocumentEvidence } from './evidence.js'
 import { ExternalFolders, externalFile, readableRoot, pickFolder } from './external-folders.js'
 import { DocumentAdmission, ProcessingQueue } from './processing-queue.js'
@@ -262,6 +265,15 @@ interface IndexingFailure {
   readonly expireAt: number
 }
 
+interface StagedDirectoryJob {
+  id:string
+  fileName:string
+  relativePath:string
+  existing?:KnowledgeDocument
+  run:()=>Promise<void>
+  documentId:()=>string|undefined
+}
+
 /** Raised by same-name conflict detection (`conflict: 'detect'`); the HTTP
  *  layer maps it to 409 Conflict so callers can re-submit with a strategy. */
 export class ConflictError extends Error {
@@ -302,8 +314,21 @@ export class KnowledgeService extends Service {
   readonly ocrAcceleration = new OcrAcceleration()
   private readonly processingMeter = new ProcessingMeter()
   storageWriteDiagnostics() { return this.requireStore().writeDiagnostics?.() ?? null }
+  private readonly importStageProgress = new Map<string, ImportStageProgress & {baseId:string}>()
+  private readonly preparedImport = new AsyncLocalStorage<ProcessingOutput | null>()
   processingSummary() {
-    return this.processingMeter.snapshots()
+    return this.processingMeter.snapshots().map(run => {
+      const pipeline=this.importStageProgress.get(run.id)
+      if(!pipeline)return run
+      const resourcePolicy=this.foregroundReservations ? 'Foreground inference reserves accelerators; background work uses CPU.'
+        : pipeline.stage==='chunking' ? 'Chunking uses CPU text processing; GPU, iGPU and NPU have no compatible chunking kernel.'
+        : pipeline.stage==='ocr' ? 'CPU, NVIDIA GPU and iGPU run OCR when available. Full-page NPU OCR is excluded by the current model checks; NPU layout runs in parsing.'
+        : pipeline.stage==='parsing' ? 'CPU and NVIDIA GPU interpret tables/charts; NPU and iGPU screen page layouts. Each device takes compatible queued work.'
+        : !embeddingKey(this.getConfigFor(run.baseId)) ? 'No embedding model is selected; documents retain text and lexical chunks without vectors.'
+        : 'Embedding devices depend on the selected model. The accelerated FP16 model supports CPU, NVIDIA GPU, iGPU and NPU; Intel input-length limits and other model reservations still apply.'
+      const devices=pipeline.stage==='ocr'?this.ocrAcceleration.runtimeDevices():pipeline.stage==='parsing'?this.structureV3.runtimeDevices():pipeline.stage==='vectorization' && this.getConfigFor(run.baseId).embeddingProvider==='local'?(this.getConfigFor(run.baseId).embeddingModel===FP16_EMBEDDING_MODEL?embeddingFp16Acceleration:embeddingAcceleration).runtimeDevices():undefined
+      return {...run,pipeline:{...pipeline,resourcePolicy,devices}}
+    })
   }
   private readonly indexing = new Map<string, { baseId: string; title: string; phase: 'parsing' | 'embedding'; total: number; progress: number; controller?: AbortController }>()
   /**
@@ -436,6 +461,7 @@ export class KnowledgeService extends Service {
         if (model?.status === 'unhealthy' && model.health === 'unchecked') void selfTestLocalModel(modelId)
       }
     }).catch(() => {})
+    void this.resumeStagedDirectoryImports().catch(error=>this.ctx.logger.warn(`knowledge: staged folder recovery failed: ${String(error)}`))
     // Resume documents a previous process left mid-embedding: their chunks are
     // partially persisted, so re-running the embed with hash reuse completes
     // them without re-embedding the batches that already landed. (openStore
@@ -445,6 +471,16 @@ export class KnowledgeService extends Service {
     // (Cherry's posture — a deliberate app quit must not re-spend the
     // embedding API; the user reindexes manually).
     const resume = store.recoverInterruptedImports(Date.now()).then(async ({ resume: resumeIds }) => {
+      // A recovering staged folder owns its descendants. Do not concurrently
+      // resume the same files through the old per-document processor path.
+      resumeIds=resumeIds.filter(id=>{
+        let doc=store.getDocument(id);const seen=new Set<string>()
+        while(doc && !seen.has(doc.id)) {
+          if(this.stagedRecoveryRoots.has(doc.id))return false
+          seen.add(doc.id);doc=doc.parentDirectoryId?store.getDocument(doc.parentDirectoryId):undefined
+        }
+        return true
+      })
       if (resumeIds.length === 0) return
       if (!this.getConfig().resumeInterruptedOnStartup) {
         const reason = 'import was interrupted by a shutdown; reindex to resume'
@@ -953,14 +989,14 @@ export class KnowledgeService extends Service {
   private readonly parseEpochs = new Map<string, number>()
   private readonly deferredVectorDocuments = new Map<string, boolean>()
   private hasParsingWork(): boolean {
-    return this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+    return [...this.importStageProgress.values()].some(run => run.stage !== 'vectorization') || this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
       || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id) && !this.folderOcrSources.has(id))
   }
   private readonly folderOcrSources = new Map<string, Set<string> | null>()
   private hasOcrWork(): boolean {
     // Unexamined source jobs may still need OCR. Completed extraction can
     // overlap CPU normalization/chunking with accelerator embedding.
-    return this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+    return [...this.importStageProgress.values()].some(run => run.stage !== 'vectorization') || this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
       || [...this.folderOcrSources.values()].some(paths => paths === null || paths.size > 0)
       || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id)
         && !this.folderOcrSources.has(id)
@@ -2238,7 +2274,9 @@ export class KnowledgeService extends Service {
     const budget = processingBudget(config.documentProcessingTimeoutMs ?? 1_800_000, signal)
     this.processingProgress.set(input.documentId, { stage: 'queued' })
     try {
-      return await processDocumentFile({ ...input, structureV3: this.structureV3, config, artifacts: this.artifacts, signal: budget.signal,
+      const prepared = this.preparedImport.getStore()
+      if (prepared === null) throw Object.assign(new Error('Source changed after staged import inventory'), {code:'prepared_source_changed'})
+      return await processDocumentFile({ ...input, ...(prepared ? {prepared} : {}), structureV3: this.structureV3, config, artifacts: this.artifacts, signal: budget.signal,
         runParsing: async task => {
           const result = await this.processingQueue.run(task, budget.signal)
           this.documentAdmission.parsed()
@@ -2439,6 +2477,32 @@ export class KnowledgeService extends Service {
   /** Synchronize a single source-root against disk. Root validation happens
    * before any write; child failures are preserved as itemized `partial`
    * outcomes instead of being rethrown after useful work succeeds. */
+  private readonly stagedRecoveryRoots = new Set<string>()
+  private async resumeStagedDirectoryImports(): Promise<void> {
+    const store=this.requireStore()
+    const roots=store.listBases().flatMap(base=>store.listDocuments(base.id,{includeRawText:false}))
+      .filter(doc=>doc.sourceType==='directory'&&doc.sourcePath&&doc.stagedImport)
+    // Register the entire recovery inventory before any asynchronous read so
+    // embedding recovery cannot overtake files that have not been extracted.
+    roots.forEach(root=>{
+      this.recoveryParsing.add(root.id)
+      if(this.getConfig().resumeInterruptedOnStartup && root.stagedImport!.startupAttempts<3)this.stagedRecoveryRoots.add(root.id)
+    })
+    await Promise.allSettled(roots.map(async root=>{
+      try {
+        if(!this.getConfig().resumeInterruptedOnStartup || root.stagedImport!.startupAttempts>=3) {
+          const {stagedImport:_pending,...rest}=root
+          await store.putDocument({...rest,embeddingError:'Folder import was interrupted; synchronize it manually to resume.',errorCode:'interrupted'})
+          return
+        }
+        const resumed={...root,stagedImport:{startupAttempts:root.stagedImport!.startupAttempts+1}}
+        await store.putDocument(resumed)
+        await this.syncDirectorySource(resumed,root.sourcePath!,'synced')
+      } catch(error) {this.ctx.logger.warn(`knowledge: staged folder recovery pending: ${String(error)}`)}
+      finally {this.recoveryParsing.delete(root.id)}
+    }))
+  }
+
   private async syncDirectorySource(
     root: KnowledgeDocument,
     sourcePath: string,
@@ -2448,7 +2512,18 @@ export class KnowledgeService extends Service {
     if (this.syncingRoots.has(root.id)) throw new Error('Source folder is already synchronizing')
     this.syncingRoots.add(root.id)
     this.directoryWriteBatches.set(root.baseId, (this.directoryWriteBatches.get(root.baseId) ?? 0) + 1)
-    try { return await this.performDirectorySync(root, sourcePath, mode, checkLegacySettings) }
+    try {
+      const stagedRoot={...root,stagedImport:{startupAttempts:this.recoveryParsing.has(root.id)?root.stagedImport?.startupAttempts??0:0}}
+      await this.requireStore().putDocument(stagedRoot)
+      const result=await this.performDirectorySync(stagedRoot, sourcePath, mode, checkLegacySettings)
+      const current=this.requireStore().getDocument(root.id)
+      if(current) {
+        const {stagedImport:_pending,...settled}=current
+        if(settled.errorCode==='interrupted') {const {embeddingError:_error,errorCode:_code,...clean}=settled;await this.requireStore().putDocument(clean)}
+        else await this.requireStore().putDocument(settled)
+      }
+      return result
+    }
     finally {
       this.syncingRoots.delete(root.id)
       const remaining = (this.directoryWriteBatches.get(root.baseId) ?? 1) - 1
@@ -2476,7 +2551,7 @@ export class KnowledgeService extends Service {
       childrenByParent.set(document.parentDirectoryId, children)
     }
     const items: DirectorySyncItem[] = []
-    const fileJobs = new Set<Promise<void>>()
+    const stagedJobs: StagedDirectoryJob[] = []
     this.processingMeter.start(root.id, root.baseId, true)
     this.indexing.set(root.id, { baseId: root.baseId, title: root.title, phase: 'parsing', total: 0, progress: 0 })
     try {
@@ -2515,15 +2590,13 @@ export class KnowledgeService extends Service {
         depth: 0,
         childrenByParent,
         items,
-        fileJobs,
-        heavyJobs: new Set<Promise<void>>(),
+        stagedJobs,
       })
-      await Promise.all(fileJobs)
+      await this.runDirectoryStages(root, stagedJobs, items)
       const current = store.getDocument(root.id)
       if (current !== undefined) await store.putDocument({ ...current, updatedAt: Date.now() })
       await this.touchBase(root.baseId)
     } finally {
-      await Promise.allSettled(fileJobs)
       this.folderOcrSources.delete(root.id)
       this.indexing.delete(root.id)
       this.processingMeter.finish(root.id)
@@ -2540,6 +2613,94 @@ export class KnowledgeService extends Service {
       deleted: count('deleted'),
       failed,
       items,
+    }
+  }
+
+  private async runDirectoryStages(root: KnowledgeDocument, jobs: StagedDirectoryJob[], items: DirectorySyncItem[]): Promise<void> {
+    const checkpoints = await ImportCheckpoints.create()
+    const controller = new AbortController()
+    this.processingControllers.set(root.id,controller)
+    const config = this.getConfigFor(root.baseId)
+    const skipped = new Set<string>()
+    let missingVectors: ReadonlySet<string> = new Set()
+    const check = () => {
+      controller.signal.throwIfAborted()
+      if (this.shuttingDown || !this.requireStore().getBase(root.baseId) || !this.requireStore().getDocument(root.id))
+        controller.abort(new Error('Folder synchronization stopped'))
+      controller.signal.throwIfAborted()
+    }
+    const bytes = async (job:StagedDirectoryJob) => {
+      check()
+      const base=this.requireStore().getBase(root.baseId)
+      if(base?.storageMode==='external' && base.externalPath)await externalFile(base.externalPath,job.id)
+      return readFile(job.id)
+    }
+    try {
+      await runImportStages({items:jobs,signal:controller.signal,
+        concurrency:stage=>stage==='ocr'?this.processingConcurrency:stage==='parsing'?Math.max(2,this.processingConcurrency):stage==='chunking'?this.processingConcurrency*4:8,
+        progress:progress=>{this.importStageProgress.set(root.id,{...progress,baseId:root.baseId})},
+        enterStage:async stage=>{
+          check()
+          if(stage!=='vectorization')return
+          // All chunk publications are complete. Only now release the barrier
+          // used by both automatic and manually requested embedding backfills.
+          this.importStageProgress.set(root.id,{stage,total:jobs.length,completed:0,running:0,failed:0,baseId:root.baseId})
+          this.recoveryParsing.delete(root.id)
+          this.folderOcrSources.set(root.id,new Set())
+          this.indexing.delete(root.id)
+          if(!embeddingKey(this.getConfigFor(root.baseId)))return
+          await this.backfillBaseEmbeddings(root.baseId)
+          while(this.embeddingBackfills.has(root.baseId)) {check();await new Promise(resolve=>setTimeout(resolve,50))}
+          // A pre-existing pass may have inventoried before this import. Its
+          // missing-vector pass is idempotent and reuses completed vectors.
+          await this.backfillBaseEmbeddings(root.baseId)
+          missingVectors=this.requireStore().docChunkStatus(root.baseId,embeddingKey(this.getConfigFor(root.baseId))).missingEmbedding
+        },
+        execute:async(stage,job,signal)=>{
+          check()
+          if(stage==='ocr') {
+            const fileStat=await stat(job.id),old=job.existing
+            const signature=`${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+            if(old && !old.incomplete && !old.embeddingError && old.sourceSignature===signature && old.indexingSettingsFingerprint===indexingSettingsFingerprint(config)) {skipped.add(job.id);return}
+            const source=await bytes(job)
+            if(old?.processing?.sourceHash===createHash('sha256').update(source).digest('hex') && old.processing.optionsFingerprint===processorFingerprint(config)) {
+              try {await this.artifacts.load(old.baseId,old.id,old.processing);skipped.add(job.id);return} catch { /* Missing artifacts need fresh extraction. */ }
+            }
+            const output=await retryDocument(()=>extractDocumentContent({bytes:source,fileName:job.fileName,config,signal}),{signal})
+            await checkpoints.save(job.id,'ocr',output)
+          } else if(stage==='parsing') {
+            if(skipped.has(job.id))return
+            const output=await checkpoints.load(job.id,'ocr'),source=await bytes(job)
+            if(createHash('sha256').update(source).digest('hex')!==output.document.sourceHash)throw new Error('Source changed between OCR and parsing')
+            const enriched=await enrichDocumentContent({bytes:source,fileName:job.fileName,config,signal,structureV3:this.structureV3},output)
+            await checkpoints.save(job.id,'parsing',enriched)
+            await checkpoints.remove(job.id,'ocr')
+          } else if(stage==='chunking') {
+            const output=skipped.has(job.id)?null:await checkpoints.load(job.id,'parsing')
+            await this.preparedImport.run(output,job.run)
+            if(output)await checkpoints.remove(job.id,'parsing')
+          } else {
+            const documentId=job.documentId(),document=documentId?this.requireStore().getDocument(documentId):undefined
+            if(!document || document.incomplete)throw new Error('Document did not complete publication')
+            if(document.embeddingError)throw new Error(document.embeddingError)
+            if(embeddingKey(this.getConfigFor(root.baseId)) && missingVectors.has(document.id))throw new Error('Document has missing embeddings')
+          }
+        },
+        failure:failure=>{
+          const job=jobs.find(job=>job.id===failure.id)!
+          if(failure.stage==='chunking' && items.some(item=>item.relativePath===job.relativePath && item.action==='failed'))return
+          const detail=this.directoryItemError(failure.error)
+          items.push({relativePath:job.relativePath,kind:'file',documentId:job.documentId(),action:'failed',error:detail})
+          if(failure.stage!=='vectorization') {
+            this.processingMeter.begin(root.id)
+            this.processingMeter.settle(root.id,'failed',{documentId:job.documentId(),title:job.relativePath,code:detail.code,message:detail.message})
+          }
+        },
+      })
+    } finally {
+      this.importStageProgress.delete(root.id)
+      if(this.processingControllers.get(root.id)===controller)this.processingControllers.delete(root.id)
+      await checkpoints.close()
     }
   }
 
@@ -2590,10 +2751,9 @@ export class KnowledgeService extends Service {
     depth: number
     childrenByParent: Map<string, KnowledgeDocument[]>
     items: DirectorySyncItem[]
-    fileJobs: Set<Promise<void>>
-    heavyJobs: Set<Promise<void>>
+    stagedJobs: StagedDirectoryJob[]
   }): Promise<void> {
-    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items, checkLegacySettings, fileJobs, heavyJobs } = args
+    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items, checkLegacySettings, stagedJobs } = args
     const store = this.requireStore()
     if (this.shuttingDown || !store.getBase(directory.baseId)) throw new Error('Folder synchronization stopped')
     if (store.getBase(directory.baseId)?.storageMode === 'external') await readableRoot(rootPath)
@@ -2699,7 +2859,7 @@ export class KnowledgeService extends Service {
           const childIndex = childPositions.get(child.id)
           if (childIndex !== undefined) children[childIndex] = bound
           items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
-          await this.syncDirectoryNode({ meterId, checkLegacySettings, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items, fileJobs, heavyJobs })
+          await this.syncDirectoryNode({ meterId, checkLegacySettings, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items, stagedJobs })
         } catch (error) {
           items.push({ relativePath, kind: 'directory', action: 'failed', error: this.directoryItemError(error) })
         }
@@ -2720,8 +2880,8 @@ export class KnowledgeService extends Service {
       const lightweight = lightFormat && (await stat(fullPath).catch(() => ({ size: Infinity }))).size <= 1024 ** 2
       // More lightweight producers can fill RAM write batches while the shared
       // parser gate retains its existing CPU/OCR limit. Heavy files stay capped.
-      if (!lightweight) while (heavyJobs.size >= this.processingConcurrency * 4) await Promise.race(heavyJobs)
-      const fileJob = this.documentAdmission.run(entry.name, async () => {
+      let publishedId = resolved.document?.id
+      const runFile = () => this.documentAdmission.run(entry.name, async () => {
         this.processingMeter.begin(meterId)
         let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
         try {
@@ -2757,22 +2917,18 @@ export class KnowledgeService extends Service {
             outcome = document.incomplete || document.embeddingError ? 'failed' : action === 'unchanged' ? 'skipped' : 'processed'
             if (document.embeddingError) throw markAttemptsExhausted(new Error(document.embeddingError))
             if (document.incomplete) throw new Error('Document processing did not finish')
+            publishedId = document.id
             items.push({ relativePath, kind: 'file', documentId: document.id, action })
           })
         } catch (error) {
           const detail = this.directoryItemError(error)
           items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: detail })
           this.processingMeter.settle(meterId, 'failed', { documentId: resolved.document?.id, title: relativePath, code: detail.code, message: detail.message })
-          return
+          throw error
         }
         this.processingMeter.settle(meterId, outcome)
       }, undefined, !lightweight)
-      fileJobs.add(fileJob)
-      if (!lightweight) heavyJobs.add(fileJob)
-      void fileJob.finally(() => { fileJobs.delete(fileJob); heavyJobs.delete(fileJob); this.folderOcrSources.get(meterId)?.delete(fullPath) }).catch(() => {})
-      // Replace each finished file immediately. A long scan must not stall
-      // the other slots at an artificial batch boundary.
-      if (fileJobs.size >= this.processingConcurrency * 16) await Promise.race(fileJobs)
+      stagedJobs.push({id:fullPath,fileName:entry.name,relativePath,existing:resolved.document,run:runFile,documentId:()=>publishedId})
     }
   }
 

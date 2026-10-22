@@ -196,6 +196,9 @@ export interface DeleteImpact {
 
 /** One imported document inside a knowledge base. */
 export interface KnowledgeDocument {
+  /** Restart marker for a folder whose staged import has not settled. */
+  readonly stagedImport?: { readonly startupAttempts: number }
+
   readonly markdownRevision?: string
   readonly indexingSettingsFingerprint?: string
   readonly sourceSignature?: string

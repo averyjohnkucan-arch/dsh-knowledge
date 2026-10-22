@@ -1,6 +1,9 @@
+import type { ImportStageProgress, PipelineDeviceState } from './import-stages.js'
 /** Administrative progress and bounded failure summaries; never retain document content. */
 export interface ProcessingFailure { documentId?: string; title: string; code?: string; message: string }
 export interface ProcessingSnapshot {
+  pipeline?: ImportStageProgress & { resourcePolicy?: string; devices?: PipelineDeviceState[] }
+
   waitingReason?: string
   failures?: ProcessingFailure[]
   id: string

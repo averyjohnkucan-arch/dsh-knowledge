@@ -1853,9 +1853,12 @@ it.each([{ large: false, peak: 9 }, { large: true, peak: 4 }])('bounds lightweig
   Object.assign(privateService, {processingConcurrency:4})
   const extract = privateService.extractDocumentText.bind(service)
   let active = 0, peak = 0
+  let release!: () => void
+  const admitted = new Promise<void>(resolve => { release = resolve })
   const parser = vi.spyOn(privateService, 'extractDocumentText').mockImplementation(async (...args) => {
     active++; peak = Math.max(peak, active)
-    try { await new Promise(resolve => setTimeout(resolve, 10)); return await extract(...(fixture.large ? [{ ...(args[0] as object), bytes: Buffer.from('Small parser fixture for ' + String((args[0] as {fileName?:string}).fileName)) }] : args)) }
+    if (active >= fixture.peak) release()
+    try { await admitted; return await extract(...args) }
     finally { active-- }
   })
   try {
@@ -1869,8 +1872,8 @@ it.each([{ large: false, peak: 9 }, { large: true, peak: 4 }])('bounds lightweig
     expect(active).toBe(0)
     expect(writes.mock.calls.length).toBeLessThanOrEqual(3)
     expect(service.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(9)
-  } finally { parser.mockRestore(); await rm(root, { recursive: true, force: true }) }
-})
+  } finally { release(); parser.mockRestore(); await rm(root, { recursive: true, force: true }) }
+}, 15000)
 
 
 it('rebuilds an incomplete internal file even when live and stored bytes match', async () => {
@@ -1939,7 +1942,10 @@ it('reconciles indexing settings from saved parsing evidence without rerunning O
     expect(service.getDocument(doc.id).processing?.revision).toBe(revision)
     await service.renameBase(base.id,{config:{embeddingProvider:'openai',embeddingModel:'new-vector-model',embeddingBaseUrl:'http://127.0.0.1:1'}})
     const vectorChange=await service.importDirectoryTree(base.id,root)
-    expect(vectorChange.sync?.failed).toBe(0)
+    // A staged import now waits for vectors; this deliberately mocked-out
+    // backfill leaves them missing and must not report end-to-end success.
+    expect(vectorChange.sync?.failed).toBe(1)
+    expect(vectorChange.errors[0].error).toContain('missing embeddings')
     expect(parser).not.toHaveBeenCalled()
     expect(service.getDocument(doc.id).processing?.revision).toBe(revision)
     await writeFile(join(root,'source.txt'),'Changed source text about new findings. '.repeat(80))
@@ -2140,4 +2146,62 @@ it('releases the recovery stage barrier after a parser failure',async()=>{
   expect(service.indexingStatus().find(row=>row.docId===doc.id)).toBeUndefined()
   expect(internal.store.getDocument(doc.id).errorCode).toBe('parse_failed')
  }finally{parse.mockRestore()}
+})
+
+it('enforces whole-folder extraction, parsing, chunking and vector barriers',async()=>{
+  const service=await mountService(),internal=service as any
+  const root=await mkdtemp(join(tmpdir(),'knowledge-stage-barriers-'))
+  const processing=await import('../src/knowledge/document-processing.js')
+  const embedding=await import('../src/knowledge/embed.js')
+  const extractOriginal=processing.extractDocumentContent,enrichOriginal=processing.enrichDocumentContent
+  const ingestOriginal=internal.ingestDocument.bind(service)
+  let extracted=0,parsed=0,published=0,vectorCalls=0
+  const extract=vi.spyOn(processing,'extractDocumentContent').mockImplementation(async input=>{
+    expect(parsed).toBe(0);expect(published).toBe(0);expect(vectorCalls).toBe(0)
+    const output=await extractOriginal(input);extracted++;return output
+  })
+  const enrich=vi.spyOn(processing,'enrichDocumentContent').mockImplementation(async(...args)=>{
+    expect(extracted).toBe(3);expect(published).toBe(0);expect(vectorCalls).toBe(0)
+    const output=await enrichOriginal(...args);parsed++;return output
+  })
+  const ingest=vi.spyOn(internal,'ingestDocument').mockImplementation(async(...args:any[])=>{
+    expect(parsed).toBe(3);expect(vectorCalls).toBe(0)
+    const result=await ingestOriginal(...args);published++;return result
+  })
+  const embed=vi.spyOn(embedding,'embedTexts').mockImplementation(async(_provider,_url,_model,_key,texts)=>{
+    expect(published).toBe(3);vectorCalls++
+    return texts.map(()=>[1,0,0])
+  })
+  try {
+    for(let i=0;i<3;i++)await writeFile(join(root,`source-${i}.pdf`),makeTestPdf(`Distinct source ${i} orbital navigation.`))
+    const base=await service.createBase({name:'Stage barrier fixture',config:{embeddingProvider:'openai',embeddingModel:'staged-test-model',embeddingBaseUrl:'http://unused.invalid',semanticChunk:false}})
+    const result=await service.importDirectoryTree(base.id,root)
+    expect(result.errors).toEqual([]);expect(result.imported).toBe(3)
+    expect(extracted).toBe(3);expect(parsed).toBe(3);expect(published).toBe(3);expect(vectorCalls).toBeGreaterThan(0)
+    const chunks=internal.store.listChunks(base.id)
+    expect(chunks.length).toBeGreaterThan(0);expect(chunks.every((chunk:any)=>chunk.embedding?.length===3)).toBe(true)
+  }finally{extract.mockRestore();enrich.mockRestore();ingest.mockRestore();embed.mockRestore();await rm(root,{recursive:true,force:true})}
+})
+
+it('registers staged folder recovery before asynchronous work and bounds restart attempts',async()=>{
+ const service=await mountService(),internal=service as any
+ const base=await service.createBase({name:'Staged recovery'})
+ const first=await service.createDirectory(base.id,'first'),second=await service.createDirectory(base.id,'second')
+ await internal.store.putDocument({...first,sourcePath:'/fixture/first',stagedImport:{startupAttempts:1}})
+ await internal.store.putDocument({...second,sourcePath:'/fixture/second',stagedImport:{startupAttempts:3}})
+ let release!:()=>void
+ const held=new Promise<void>(resolve=>{release=resolve})
+ const sync=vi.spyOn(internal,'syncDirectorySource').mockImplementation(async(root:any)=>{
+  expect(root.stagedImport.startupAttempts).toBe(2)
+  await held
+ })
+ try{
+  const pending=internal.resumeStagedDirectoryImports()
+  expect(internal.hasOcrWork()).toBe(true)
+  await vi.waitFor(()=>expect(sync).toHaveBeenCalledOnce())
+  release();await pending
+  expect(internal.recoveryParsing.size).toBe(0)
+  expect(internal.store.getDocument(second.id)).toMatchObject({errorCode:'interrupted'})
+  expect(internal.store.getDocument(second.id).stagedImport).toBeUndefined()
+ }finally{release();sync.mockRestore()}
 })

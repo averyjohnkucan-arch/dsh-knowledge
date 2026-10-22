@@ -1,3 +1,4 @@
+import type { PipelineDeviceState } from './import-stages.js'
 import { embeddingCpuLaneLimit } from './structure-cpu-budget.js'
 import { knowledgeGpuAdmission } from './background-gpu.js'
 import { registerBackgroundDevices, IntelEmbeddingAvailability, nvidiaEmbeddingAvailability } from './embedding-device-availability.js'
@@ -79,6 +80,14 @@ export class EmbeddingAcceleration {
       return {vectors,elapsedMs:Math.max(...results.map(result=>typeof result.elapsedMs==='number'?result.elapsedMs:100))}
     }, this.fp16 && main ? 16*workers.length : 1)
     return lane
+  }
+  runtimeDevices(): PipelineDeviceState[] {
+    return ['CPU','NPU','GPU:intel','GPU:main'].map(device=>{
+      const lanes=this.lanes.filter(lane=>lane.device===device),record=this.ready?.devices.find(row=>row.device===device)
+      const activeTasks=lanes.reduce((sum,lane)=>sum+lane.pending,0),enabled=lanes.some(lane=>lane.enabled&&lane.qualified!==false)
+      const state:PipelineDeviceState['state']=activeTasks>0?'running':enabled?'ready':record?.qualified===false?'unavailable':'waiting'
+      return {device,activeTasks,state,reason:activeTasks>0?'Processing queued embedding inputs':this.foreground && device!=='CPU'?'Reserved for foreground inference':record?.error??record?.blockedReason??(enabled?`Waiting for compatible embedding inputs${record?.maxTokens?` (up to ${record.maxTokens} tokens)`:''}`:'Waiting for model qualification or device admission')}
+    })
   }
   async status(): Promise<EmbeddingAccelerationStatus> {
     if(this.needsReload&&!this.lanes.some(l=>l.pending)){this.release();this.ready=undefined;this.needsReload=false}

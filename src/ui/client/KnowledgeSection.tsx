@@ -1552,6 +1552,18 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
 
               {embeddingMigrationActive && <p style={{ fontSize: 12, color: C.muted }} role="status">Vectorization runs after queued parsing/OCR across all knowledge bases. Deferred semantic merging uses saved text without repeating OCR; lexical retrieval remains available.</p>}
               {processingSummary.filter(row => row.baseId === selectedBase.id).map(row => <div key={row.id} style={{ fontSize: 12, color: C.muted, margin: '8px 0 12px' }} role="status">
+                {row.pipeline && <div style={{ marginBottom: 6 }}>
+                  <strong>{({ocr:'1/4 · OCR and source extraction',parsing:'2/4 · Parsing tables and charts',chunking:'3/4 · Chunking',vectorization:'4/4 · Vectorization'} as const)[row.pipeline.stage]}</strong>
+                  {' · '}{row.pipeline.completed.toLocaleString()} / {row.pipeline.total.toLocaleString()} stage documents · {row.pipeline.running} running
+                  {row.pipeline.failed > 0 && ` · ${row.pipeline.failed} failed`}
+                  {row.pipeline.resourcePolicy && <div style={{marginTop:4}}>{row.pipeline.resourcePolicy}</div>}
+                  {!!row.pipeline.devices?.length && <details><summary>Device scheduling</summary><ul>
+                    {row.pipeline.devices.map((device,index)=><li key={`${device.device}-${index}`}>
+                      <strong>{({'GPU':'iGPU','GPU:intel':'iGPU','GPU:main':'NVIDIA GPU','CUDA':'NVIDIA GPU','CUDA:1':'NVIDIA GPU worker 2'} as Record<string,string>)[device.device]??device.device}</strong>: {device.activeTasks>0?`${device.activeTasks} active tasks` : device.state} — {device.reason}
+                    </li>)}
+                  </ul></details>}
+                  <progress aria-label="Current pipeline stage progress" max={Math.max(1,row.pipeline.total)} value={row.pipeline.completed+row.pipeline.failed} style={{width:'100%',height:5,accentColor:C.accent}} />
+                </div>}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                   {row.id.startsWith('embedding:') && <strong>Vectorization</strong>}
                   {row.id.startsWith('rechunk:') && <strong>Re-chunking saved text</strong>}

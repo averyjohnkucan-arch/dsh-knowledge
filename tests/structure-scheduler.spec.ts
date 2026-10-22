@@ -312,7 +312,7 @@ it.each([[1],[-1],[0,0],[0.5]])('rejects malformed or out-of-range deferred page
  finally{manager.dispose()}
 })
 
-it('keeps rich work queued when concurrent probes consume the final CUDA lanes',async()=>{
+it('uses spare CPU capacity when concurrent probes consume the final CUDA lanes',async()=>{
  const {mkdtemp,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path')
  const availability=await import('../src/knowledge/embedding-device-availability.js')
  const releases:Array<(value:any)=>void>=[]
@@ -325,7 +325,7 @@ it('keeps rich work queued when concurrent probes consume the final CUDA lanes',
   const choices=Promise.all([internal.layoutDevice(true,true),internal.layoutDevice(true,true),internal.layoutDevice(true,true)])
   await vi.waitFor(()=>expect(releases).toHaveLength(3))
   releases.forEach(resolve=>resolve({available:true,freeMiB:25000,reason:'available'}))
-  expect((await choices).sort()).toEqual(['CUDA','CUDA:1','WAIT'])
+  expect((await choices).sort()).toEqual(['CPU','CUDA','CUDA:1'])
  }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
 })
 
@@ -347,6 +347,8 @@ it.each([false,true])('reclaims an idle secondary CUDA cache under memory pressu
     expect(secondary.process.stopAndWait).toHaveBeenCalledOnce()
     expect(primary.process.stopAndWait).not.toHaveBeenCalled()
     expect(internal.cudaMemoryReduced).toBe(true)
+    expect(await internal.layoutDevice(true,true)).toBe('CPU')
+    internal.cpuRequests=internal.concurrency
     expect(await internal.layoutDevice(true,true)).toBe('WAIT')
     expect(secondary.process.stopAndWait).toHaveBeenCalledOnce()
   }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
