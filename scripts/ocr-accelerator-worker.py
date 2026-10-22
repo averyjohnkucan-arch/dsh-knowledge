@@ -89,6 +89,8 @@ def calibrate(args):
  reports=[]
  for device in probe():
   if not device['allowed']:continue
+  if device['device'].startswith('NPU'):
+   reports.append({**device,'qualified':False,'error':'Full-page NPU OCR failed scanned-page fidelity checks; layout and embeddings are qualified separately.'});continue
   try:
    pipeline=create_pipeline(args.models,device['device'],args.cache);times=[]
    for index in range(4):

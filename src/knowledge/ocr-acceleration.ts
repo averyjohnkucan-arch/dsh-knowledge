@@ -32,6 +32,7 @@ export function acceleratorEnvironment(root: string): NodeJS.ProcessEnv {
 /** Measured shortest-work queue across explicit devices; a failed device falls back to the existing CPU engine. */
 export class OcrAcceleration {
   private lanes: Lane[] = []
+  private excludedDevices: Device[] = []
   private loadedRoot?: string
   private modelHash?: string
   private cudaQualifiedHash?: string
@@ -130,7 +131,7 @@ export class OcrAcceleration {
   get concurrency(): number { return Math.max(1, this.lanes.filter(lane => !lane.failed && lane.enabled).length) }
   async status(): Promise<OcrAccelerationStatus> {
     if (this.state) return this.state
-    if (this.loadedRoot === this.root()) return { status: 'ready', message: 'Calibrated local OCR devices', devices: this.lanes.map(lane => ({ ...lane.device, qualified: lane.device.qualified && !lane.failed, enabled: lane.enabled && !lane.failed, pending: lane.pending, completed: lane.completed ?? 0 })) }
+    if (this.loadedRoot === this.root()) return { status: 'ready', message: 'Calibrated local OCR devices', devices: [...this.lanes.map(lane => ({ ...lane.device, qualified: lane.device.qualified && !lane.failed, enabled: lane.enabled && !lane.failed, pending: lane.pending, completed: lane.completed ?? 0 })), ...this.excludedDevices] }
     this.releaseWorkers()
     try {
       const receipt = JSON.parse(await readFile(join(this.root(), 'ready.json'), 'utf8'))
@@ -140,6 +141,10 @@ export class OcrAcceleration {
       if (digest.digest('hex') !== receipt.modelHash) throw new Error('OCR weights changed; recalibration required')
       this.modelHash = receipt.modelHash
       for (const device of receipt.devices as Device[]) {
+        if (/^NPU(?:\.\d+)?$/.test(device.device)) {
+          this.excludedDevices.push({ ...device, qualified: false, enabled: false, error: 'Full-page NPU OCR failed scanned-page fidelity checks. NPU layout and embeddings use separate qualification.' })
+          continue
+        }
         if (!device.qualified || !Number.isFinite(device.medianMs) || device.medianMs! <= 0) continue
         if (!(device.device === 'CPU' || /^NPU(?:\.\d+)?$/.test(device.device) || /^GPU(?:\.\d+)?$/.test(device.device) && /intel/i.test(device.name))) continue
         const copies = device.device === 'CPU' ? Math.max(1, Math.min(4, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (1024 ** 3)))) : 1
@@ -147,7 +152,7 @@ export class OcrAcceleration {
       }
       if (!this.lanes.some(lane => lane.device.device === 'CPU')) throw new Error('No qualified CPU fallback')
       this.loadedRoot = this.root()
-      return { status: 'ready', message: 'OCR first; CPU/NPU plus available Intel/NVIDIA GPUs. Foreground inference reserves GPUs and limits OCR to eight CPU threads.', devices: this.lanes.map(lane => lane.device) }
+      return { status: 'ready', message: 'OCR first; CPU plus available Intel/NVIDIA GPUs. Foreground inference reserves GPUs and limits OCR to eight CPU threads.', devices: [...this.lanes.map(lane => lane.device), ...this.excludedDevices] }
     } catch { this.releaseWorkers(); return { status: 'not_installed', message: 'Using the standard CPU OCR engine. Download and calibrate optional acceleration to use Intel devices.', devices: [] } }
   }
   async recognize(png: Buffer): Promise<string | undefined> {
@@ -269,6 +274,6 @@ export class OcrAcceleration {
       .finally(() => { this.preparation = undefined })
     return this.state
   }
-  releaseWorkers(): void { for (const lane of this.lanes) lane.process.dispose(); this.lanes = []; this.loadedRoot = undefined; this.modelHash = undefined; this.cudaQualifiedHash = undefined; this.cudaQualification = undefined }
+  releaseWorkers(): void { for (const lane of this.lanes) lane.process.dispose(); this.lanes = []; this.excludedDevices = []; this.loadedRoot = undefined; this.modelHash = undefined; this.cudaQualifiedHash = undefined; this.cudaQualification = undefined }
   dispose(): void { knowledgeGpuAdmission.request(this,false); this.stopped = true; if (this.timer) clearInterval(this.timer); this.unregisterDevices(); this.setupChild && stopOwnedProcess(this.setupChild); this.releaseWorkers() }
 }

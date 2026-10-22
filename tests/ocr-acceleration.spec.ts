@@ -92,7 +92,7 @@ it('reroutes queued GPU pages through the bounded CPU/NPU lanes during foregroun
  expect(cuda.process.request).toHaveBeenCalledTimes(1);release()
 })
 
-it('feeds all four device types while bounding CPU OCR to one session', async () => {
+it('feeds admitted device lanes while bounding CPU OCR to one session', async () => {
   const {manager,cpu,npu,igpu,cuda}=fixture()
   let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve})
   for (const lane of [cpu,cuda,npu,igpu]) lane.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:1}})
@@ -173,4 +173,31 @@ it('releases idle CUDA model copies for another stage but preserves short render
     await update();expect(cuda.process.stopAndWait).toHaveBeenCalledOnce()
     expect(cuda.enabled).toBe(false)
   } finally {knowledgeGpuAdmission.request(owner,false);probe.mockRestore()}
+})
+
+it.each(['NPU','NPU.0'])('reports unqualified full-page %s OCR without admitting it from an old receipt', async device => {
+ const {mkdtemp,mkdir,writeFile,rm}=await import('node:fs/promises')
+ const {tmpdir}=await import('node:os'),{join}=await import('node:path'),{createHash}=await import('node:crypto')
+ const embed=await import('../src/knowledge/embed.js')
+ const root=await mkdtemp(join(tmpdir(),'ocr-fidelity-policy-'))
+ const cache=vi.spyOn(embed,'localModelCacheDir').mockReturnValue(root)
+ const manager=new OcrAcceleration();managers.push(manager)
+ try {
+  await mkdir(join(root,'ocr'),{recursive:true});await mkdir(join(root,'ocr-accelerators'),{recursive:true})
+  const hash=createHash('sha256')
+  for(const name of ['ppocrv5_det.onnx','ppocrv5_rec.onnx','ppocrv5_dict.txt']){const bytes=Buffer.from(name);hash.update(bytes);await writeFile(join(root,'ocr',name),bytes)}
+  await writeFile(join(root,'ocr-accelerators','ready.json'),JSON.stringify({schema:1,modelHash:hash.digest('hex'),devices:[
+   {device:'CPU',name:'CPU',qualified:true,medianMs:100},
+   {device,name:'Intel NPU',qualified:true,medianMs:1},
+   {device:'GPU',name:'Intel GPU',qualified:true,medianMs:20},
+  ]}))
+  for(let i=0;i<2;i++){
+   const status=await manager.status()
+   expect(status.status).toBe('ready')
+   expect(status.devices.find(row=>row.device===device)).toMatchObject({qualified:false,enabled:false,error:expect.stringContaining('fidelity')})
+   expect(status.devices.find(row=>row.device==='CPU')?.qualified).toBe(true)
+   expect(status.devices.find(row=>row.device==='GPU')?.qualified).toBe(true)
+   expect((manager as any).lanes.some((lane:any)=>lane.device.device===device)).toBe(false)
+  }
+ }finally{manager.dispose();cache.mockRestore();await rm(root,{recursive:true,force:true})}
 })
