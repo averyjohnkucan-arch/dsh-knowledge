@@ -59,7 +59,7 @@ def layout_pipeline():
             cpu_threads=int(os.environ.get('DSH_STRUCTURE_CPU_THREADS', '8')))
     return _layout
 
-def structure_inputs(source, charts, tables_only):
+def structure_inputs(source, charts, tables_only, confirm_layout=True):
     """Detect each page once using the full pipeline's exact layout settings."""
     if not tables_only:
         yield None, source, True, None
@@ -71,7 +71,7 @@ def structure_inputs(source, charts, tables_only):
     for page, result in enumerate(detector(input=source, **screening)):
         selected = any(box.get('label') in labels for box in result['boxes'])
         reference = getattr(detector, '_dsh_reference_runner', None)
-        if selected and reference is not None:
+        if selected and reference is not None and confirm_layout:
             # Small accelerator coordinate differences can change crop pixels,
             # which can substantially change table structure or generated values.
             # Accelerate page screening; retain reference boxes for rich content.
@@ -117,7 +117,10 @@ def extract(source, charts, tables_only=False, screen_only=False):
     output = []
     deferred = []
     page_count = 0
-    pages = structure_inputs(source, charts, tables_only)
+    # Preliminary screening only chooses page IDs. Reference boxes are computed
+    # in the later rich pass; computing them here repeats CPU inference and
+    # the boxes are discarded. Conservative extra selections remain safe.
+    pages = structure_inputs(source, charts, tables_only, confirm_layout=not screen_only)
     cached_charts = {}
     if not screen_only and charts and tables_only and isinstance(source, list) and len(source) > 1 and os.environ.get('DSH_STRUCTURE_CHART_BATCH') == '2':
         from structure_chart_batch import batch_chart_results
