@@ -2148,14 +2148,16 @@ it('releases the recovery stage barrier after a parser failure',async()=>{
  }finally{parse.mockRestore()}
 })
 
-it('enforces whole-folder extraction, parsing, chunking and vector barriers',async()=>{
+it('overlaps committed-document embeddings with unfinished chunking after extraction and parsing',async()=>{
   const service=await mountService(),internal=service as any
   const root=await mkdtemp(join(tmpdir(),'knowledge-stage-barriers-'))
   const processing=await import('../src/knowledge/document-processing.js')
   const embedding=await import('../src/knowledge/embed.js')
   const extractOriginal=processing.extractDocumentContent,enrichOriginal=processing.enrichDocumentContent
   const ingestOriginal=internal.ingestDocument.bind(service)
-  let extracted=0,parsed=0,published=0,vectorCalls=0
+  let extracted=0,parsed=0,published=0,vectorCalls=0,ingesting=0
+  let releaseChunk!:()=>void
+  const firstVector=new Promise<void>(resolve=>{releaseChunk=resolve})
   const extract=vi.spyOn(processing,'extractDocumentContent').mockImplementation(async input=>{
     expect(parsed).toBe(0);expect(published).toBe(0);expect(vectorCalls).toBe(0)
     const output=await extractOriginal(input);extracted++;return output
@@ -2165,11 +2167,14 @@ it('enforces whole-folder extraction, parsing, chunking and vector barriers',asy
     const output=await enrichOriginal(...args);parsed++;return output
   })
   const ingest=vi.spyOn(internal,'ingestDocument').mockImplementation(async(...args:any[])=>{
-    expect(parsed).toBe(3);expect(vectorCalls).toBe(0)
+    expect(parsed).toBe(3)
+    if(++ingesting===3)await firstVector
     const result=await ingestOriginal(...args);published++;return result
   })
   const embed=vi.spyOn(embedding,'embedTexts').mockImplementation(async(_provider,_url,_model,_key,texts)=>{
-    expect(published).toBe(3);vectorCalls++
+    expect(extracted).toBe(3);expect(parsed).toBe(3)
+    if(vectorCalls===0)expect(published).toBeLessThan(3)
+    vectorCalls++;releaseChunk()
     return texts.map(()=>[1,0,0])
   })
   try {
@@ -2180,7 +2185,7 @@ it('enforces whole-folder extraction, parsing, chunking and vector barriers',asy
     expect(extracted).toBe(3);expect(parsed).toBe(3);expect(published).toBe(3);expect(vectorCalls).toBeGreaterThan(0)
     const chunks=internal.store.listChunks(base.id)
     expect(chunks.length).toBeGreaterThan(0);expect(chunks.every((chunk:any)=>chunk.embedding?.length===3)).toBe(true)
-  }finally{extract.mockRestore();enrich.mockRestore();ingest.mockRestore();embed.mockRestore();await rm(root,{recursive:true,force:true})}
+  }finally{releaseChunk();extract.mockRestore();enrich.mockRestore();ingest.mockRestore();embed.mockRestore();await rm(root,{recursive:true,force:true})}
 })
 
 it('registers staged folder recovery before asynchronous work and bounds restart attempts',async()=>{

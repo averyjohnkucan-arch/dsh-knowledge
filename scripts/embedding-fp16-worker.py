@@ -29,9 +29,9 @@ def intel_engine(device,bucket):
    live=[i.get_source_output() for i in node.inputs() if not (i.get_partial_shape().is_static and 0 in list(i.get_shape()))]
    if len(live)==1:node.output(0).replace(live[0])
  m.validate_nodes_and_infer_types();pm.run_passes(m)
- config={'CACHE_DIR':str(root/'compiled-v3-f32'/ov.__version__/device)}
+ config={'CACHE_DIR':str(root/'compiled-v4-f32-sdpa-disabled'/ov.__version__/device)}
  if device=='CPU':config.update(INFERENCE_NUM_THREADS=max(1,min(32,args.threads)),INFERENCE_PRECISION_HINT='f32')
- if device.startswith('GPU'):config.update(INFERENCE_PRECISION_HINT='f32')
+ if device.startswith('GPU'):config.update(INFERENCE_PRECISION_HINT='f32',GPU_ENABLE_SDPA_OPTIMIZATION=False)
  sessions[key]=core.compile_model(m,device,config)
  # Bound resident compiled shapes; disk blobs remain reusable after eviction.
  shape_keys=[k for k in sessions if isinstance(k,tuple) and k[0]==device]

@@ -323,12 +323,12 @@ export class KnowledgeService extends Service {
       const pipeline=this.importStageProgress.get(run.id)
       if(!pipeline)return run
       const resourcePolicy=this.foregroundReservations ? 'Foreground inference reserves accelerators; background work uses CPU.'
-        : pipeline.stage==='chunking' ? 'Chunking uses CPU text processing; GPU, iGPU and NPU have no compatible chunking kernel.'
+        : pipeline.stage==='chunking' ? 'CPU publishes chunks while qualified GPU, iGPU and NPU lanes embed completed documents concurrently.'
         : pipeline.stage==='ocr' ? 'CPU, NVIDIA GPU and iGPU run OCR when available. Full-page NPU OCR is excluded by the current model checks; NPU layout runs in parsing.'
         : pipeline.stage==='parsing' ? ((this.getConfigFor(run.baseId).deferredChartEnrichment || this.getConfigFor(run.baseId).deferredPhotoCaptions) ? 'Photo captions and chart parsing are deferred until imports and vectorization finish and DSH is idle.' : this.getConfigFor(run.baseId).imageCaptionProvider === 'paddle' ? 'CPU and NVIDIA GPU interpret tables/charts; NPU and iGPU screen page layouts.' : 'Optional brief image descriptions use the selected vision provider; source text is already extracted.')
         : !embeddingKey(this.getConfigFor(run.baseId)) ? 'No embedding model is selected; documents retain text and lexical chunks without vectors.'
         : 'Embedding devices depend on the selected model. The accelerated FP16 model supports CPU, NVIDIA GPU, iGPU and NPU; Intel input-length limits and other model reservations still apply.'
-      const devices=pipeline.stage==='ocr'?this.ocrAcceleration.runtimeDevices():pipeline.stage==='parsing' && this.getConfigFor(run.baseId).imageCaptionProvider==='paddle' && !this.getConfigFor(run.baseId).deferredChartEnrichment?this.structureV3.runtimeDevices():pipeline.stage==='vectorization' && this.getConfigFor(run.baseId).embeddingProvider==='local'?(this.getConfigFor(run.baseId).embeddingModel===FP16_EMBEDDING_MODEL?embeddingFp16Acceleration:embeddingAcceleration).runtimeDevices():undefined
+      const devices=pipeline.stage==='ocr'?this.ocrAcceleration.runtimeDevices():pipeline.stage==='parsing' && this.getConfigFor(run.baseId).imageCaptionProvider==='paddle' && !this.getConfigFor(run.baseId).deferredChartEnrichment?this.structureV3.runtimeDevices():(pipeline.stage==='vectorization'||pipeline.stage==='chunking') && this.getConfigFor(run.baseId).embeddingProvider==='local'?(this.getConfigFor(run.baseId).embeddingModel===FP16_EMBEDDING_MODEL?embeddingFp16Acceleration:embeddingAcceleration).runtimeDevices():undefined
       return {...run,pipeline:{...pipeline,resourcePolicy,devices}}
     })
   }
@@ -1095,7 +1095,7 @@ export class KnowledgeService extends Service {
   private hasOcrWork(): boolean {
     // Unexamined source jobs may still need OCR. Completed extraction can
     // overlap CPU normalization/chunking with accelerator embedding.
-    return [...this.importStageProgress.values()].some(run => run.stage !== 'vectorization') || this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+    return [...this.importStageProgress.values()].some(run => run.stage === 'ocr' || run.stage === 'parsing') || this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
       || [...this.folderOcrSources.values()].some(paths => paths === null || paths.size > 0)
       || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id)
         && !this.folderOcrSources.has(id)
@@ -2743,9 +2743,17 @@ export class KnowledgeService extends Service {
         progress:progress=>{this.importStageProgress.set(root.id,{...progress,baseId:root.baseId})},
         enterStage:async stage=>{
           check()
+          if(stage==='chunking') {
+            // Extraction is complete. Let the bounded background vector lanes
+            // consume committed documents while CPU workers publish more chunks.
+            this.importStageProgress.set(root.id,{stage,total:jobs.length,completed:0,running:0,failed:0,baseId:root.baseId})
+            this.recoveryParsing.delete(root.id)
+            this.folderOcrSources.set(root.id,new Set())
+            return
+          }
           if(stage!=='vectorization')return
-          // All chunk publications are complete. Only now release the barrier
-          // used by both automatic and manually requested embedding backfills.
+          // Drain the overlapping pass and catch publications made after its
+          // inventory before allowing optional idle enrichment to start.
           this.importStageProgress.set(root.id,{stage,total:jobs.length,completed:0,running:0,failed:0,baseId:root.baseId})
           this.recoveryParsing.delete(root.id)
           this.folderOcrSources.set(root.id,new Set())
