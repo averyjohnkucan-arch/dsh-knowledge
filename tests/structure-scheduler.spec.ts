@@ -264,9 +264,9 @@ it.each([['CUDA',false],['CPU',false],['CUDA',true]] as const)('screens Intel pa
  vi.spyOn(internal,'layoutDevice').mockImplementation(async(_tables:any,rich:any)=>rich?richDevice:'NPU')
  vi.spyOn(internal,'worker').mockImplementation((device:any)=>({device,busy:false,process:{
   async request(payload:any){
-   calls.push({device,start:payload.startPage,screen:!!payload.screenOnly})
-   const start=payload.startPage,end=Math.min(3,start+payload.pageLimit)
-   await writeFile(payload.output,JSON.stringify({pageCount:3,pageStart:start,pageEnd:end,
+   const start=payload.pageIndices?.[0] ?? payload.startPage,end=payload.pageIndices ? payload.pageIndices.at(-1)+1 : Math.min(3,start+payload.pageLimit)
+   calls.push({device,start,screen:!!payload.screenOnly})
+   await writeFile(payload.output,JSON.stringify({pageCount:3,pageStart:start,pageEnd:end,...(payload.pageIndices?{selectedPages:payload.pageIndices}:{}),
     blocks:payload.screenOnly || (omitCuda && device==='CUDA')?[]:[{page:start+1,type:'table',text:'A | 42'}],
     ...(payload.screenOnly?{deferredPages:start===1?[1]:[]}:{}),
    }))
@@ -367,4 +367,29 @@ it.each(['busy','reserved','foreign'])('does not reclaim a secondary CUDA worker
     expect(secondary.process.stopAndWait).not.toHaveBeenCalled()
     expect(internal.cudaMemoryReduced).toBe(false)
   }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
+})
+
+it('batches separated deferred pages and restores document reading order', async () => {
+ const manager=new StructureV3Manager(),internal=manager as any
+ vi.spyOn(manager,'status').mockResolvedValue({status:'ready',progress:100,message:'',device:'cpu'})
+ internal.deferRichToCuda=true
+ vi.spyOn(internal,'layoutDevice').mockImplementation(async(_tables:any,rich:any)=>rich?'CUDA':'NPU')
+ const batches:number[][]=[]
+ vi.spyOn(internal,'worker').mockImplementation((device:any)=>({device,busy:false,process:{
+  async request(p:any){
+   if(p.pageIndices){
+    batches.push(p.pageIndices)
+    await writeFile(p.output,JSON.stringify({pageCount:5,pageStart:0,pageEnd:5,selectedPages:p.pageIndices,blocks:[...p.pageIndices].reverse().map(page=>({page:page+1,type:'table',text:'Value '+page}))}))
+   }else{
+    await writeFile(p.output,JSON.stringify({pageCount:5,pageStart:p.startPage,pageEnd:p.startPage+1,blocks:[],deferredPages:p.startPage%2===0?[p.startPage]:[]}))
+   }
+  },dispose(){},async stopAndWait(){}
+ }}))
+ try{
+  const result=await manager.extract(new TextEncoder().encode('%PDF-test'),'selected',true,1000,undefined,true)
+  expect(batches).toEqual([[0,2,4]])
+  expect(result.document.blocks.map(block=>block.pageIndex)).toEqual([0,2,4])
+  expect(result.document.blocks.map(block=>block.text)).toEqual(['Value 0','Value 2','Value 4'])
+  expect(result.document.processedPages).toEqual([0,1,2,3,4])
+ }finally{manager.dispose()}
 })

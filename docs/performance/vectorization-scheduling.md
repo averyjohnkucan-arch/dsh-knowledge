@@ -16,3 +16,7 @@ Startup raw-source recovery now registers its complete parsing backlog before as
 CUDA OCR recognition batches now group crops by their batch-one padded width, preserving preprocessing and output order. CUDA explicitly disables TF32 after fixed-page comparisons showed text drift; FP32 width-preserving batches matched the CPU single-line reference on three repeated sample pages. These samples are consistency checks, not full-corpus ground truth.
 
 Intel CPU/iGPU OCR explicitly requests FP32. On three fixed page rasters repeated twice, default iGPU precision changed the faint scan substantially; explicit FP32 matched the CPU reference in all six outputs. NPU uses a separate static-shape path and requires separate validation. Numeric qualification tolerates spacing before percent signs while preserving the sign itself.
+
+Deferred rich pages may be submitted as up to eight sorted unique page indices, including gaps. Only selected pages are rendered. Returned coverage and block page identities are validated, and blocks are restored to document order. This enables the existing qualified chart crop batching across nonadjacent pages without extracting or rewriting intermediate PDFs.
+
+On a seven-page fixture with four chart pages separated by blank pages, two warm selected-page runs took 4.71–4.83 seconds versus 5.98–6.01 seconds for individual requests, preserving all checked text, numbers, relationships and page identities. These small diagnostic runs overlapped the active import; they support this batching path, not a whole-corpus speedup claim.

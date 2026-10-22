@@ -245,3 +245,42 @@ print('ok')
 `],{encoding:'utf8'})
  expect(output.trim()).toBe('ok')
 })
+
+it('batches separated PDF pages without rendering gaps or changing page identity', () => {
+  const output=execFileSync('python3',['-c',String.raw`
+import runpy,sys,types,threading
+m=runpy.run_path('scripts/structure-v3.py');g=m['extract_range'].__globals__
+lock=threading.Lock()
+sys.modules['paddlex.inference.utils.io.readers']=types.SimpleNamespace(pdfium_lock=lock)
+rendered=[];closed=[]
+class Page:
+ def __init__(self,index):self.index=index
+ def close(self):closed.append(self.index)
+class Doc:
+ def __len__(self):return 8
+ def __getitem__(self,index):return Page(index)
+ def close(self):closed.append('doc')
+class Reader:
+ def __init__(self):self._backend=self
+ def load(self,source):
+  with lock:return Doc()
+ def _render_page(self,page,*,page_index):
+  assert page_index==page.index+1
+  rendered.append(page.index);return page.index
+reader=Reader()
+g['pipeline']=lambda charts:types.SimpleNamespace(paddlex_pipeline=types.SimpleNamespace(layout_det_model=types.SimpleNamespace(batch_sampler=types.SimpleNamespace(pdf_reader=reader))))
+def extract(images,charts,tables,screen_only=False):
+ assert images==[1,4,7] and tables and not screen_only
+ return {'pageCount':3,'blocks':[{'page':3,'type':'table','text':'original 123.45'}]}
+g['extract']=extract
+r=m['extract_range']('source.pdf',True,0,1,False,[1,4,7])
+assert r=={'pageCount':8,'pageStart':1,'pageEnd':8,'selectedPages':[1,4,7],'blocks':[{'page':8,'type':'table','text':'original 123.45'}]}
+assert rendered==[1,4,7] and closed==[1,4,7,'doc']
+for pages in [[],[8],[-1],[True],[1,1],[4,1],list(range(9))]:
+ try:m['extract_range']('source.pdf',True,0,1,False,pages)
+ except ValueError:pass
+ else:raise AssertionError('Invalid range accepted')
+print('ok')
+`],{cwd:process.cwd(),encoding:'utf8',timeout:5000})
+  expect(output.trim()).toBe('ok')
+})

@@ -244,7 +244,7 @@ export class StructureV3Manager {
   async extract(bytes: Uint8Array, fingerprint: string, charts: boolean, timeout: number, signal?: AbortSignal, tablesOnly = false): Promise<ProcessingOutput> {
     const failed = new AbortController()
     const combined = AbortSignal.any([...(signal ? [signal] : []), this.stop.signal, failed.signal])
-    type Result = { pageCount: number; pageStart?: number; pageEnd?: number; deferredPages?: number[]; blocks: { page: number; type: string; text: string }[] }
+    type Result = { pageCount: number; pageStart?: number; pageEnd?: number; selectedPages?: number[]; deferredPages?: number[]; blocks: { page: number; type: string; text: string }[] }
     const ranged = tablesOnly && Buffer.from(bytes.subarray(0, 5)).toString() === '%PDF-'
     const devices = new Set<string>()
     let dir: string | undefined
@@ -264,9 +264,9 @@ export class StructureV3Manager {
         this.cpuRequests++
         return this.cpuQueue.run(task,combined).finally(() => {this.cpuRequests--;this.notifyCapacity()})
       }
-      const run = async (device: string, start?: number, limit?: number, screenOnly = false, expectedRich = false): Promise<Result> => {
+      const run = async (device: string, start?: number, limit?: number, screenOnly = false, expectedRich = false, selectedPages?: number[]): Promise<Result> => {
         combined.throwIfAborted()
-        if (this.foreground && isCuda(device)) return onCpu(() => run('CPU', start, limit, screenOnly, expectedRich))
+        if (this.foreground && isCuda(device)) return onCpu(() => run('CPU', start, limit, screenOnly, expectedRich, selectedPages))
         if (this.foreground) device = 'CPU'
         const output = join(dir!, `result-${serial++}.json`)
         const releaseCpu = isCuda(device) ? undefined : enterStructureCpuWork()
@@ -276,22 +276,23 @@ export class StructureV3Manager {
           try {
             const started = performance.now()
             lane.current = lane.process.request({input, output, charts, tablesOnly, ...(screenOnly ? {screenOnly:true} : {}),
-              ...(start === undefined ? {} : {startPage:start,pageLimit:limit})}, timeout, combined)
+              ...(selectedPages ? {pageIndices:selectedPages} : start === undefined ? {} : {startPage:start,pageLimit:limit})}, timeout, combined)
             await lane.current
             const result = JSON.parse(await readFile(output, 'utf8')) as Result
             if (!Number.isInteger(result.pageCount) || result.pageCount < 1 || result.pageCount > 10000 || !Array.isArray(result.blocks)) throw new Error('Invalid PP-StructureV3 page count')
             if (start !== undefined && (result.pageStart !== start || result.pageEnd !== Math.min(result.pageCount, start + limit!))) throw new Error('Incomplete PP-StructureV3 page range')
+            if (selectedPages && (JSON.stringify(result.selectedPages) !== JSON.stringify(selectedPages) || selectedPages.some(page => page >= result.pageCount))) throw new Error('Incomplete selected PP-StructureV3 pages')
             if (screenOnly) {
               if (!Array.isArray(result.deferredPages) || result.blocks.length || new Set(result.deferredPages).size !== result.deferredPages.length || result.deferredPages.some(page => !Number.isInteger(page) || page < start! || page >= result.pageEnd!)) throw new Error('Invalid deferred structure pages')
             } else if (result.deferredPages?.length) throw new Error('Rich structure inference returned deferred work')
             for (const block of result.blocks) {
-              if (!Number.isInteger(block.page) || block.page < (start ?? 0) + 1 || block.page > (result.pageEnd ?? result.pageCount) || typeof block.text !== 'string' || typeof block.type !== 'string') throw new Error('Invalid PP-StructureV3 result')
+              if (!Number.isInteger(block.page) || block.page < (start ?? 0) + 1 || block.page > (result.pageEnd ?? result.pageCount) || selectedPages !== undefined && !selectedPages.includes(block.page - 1) || typeof block.text !== 'string' || typeof block.type !== 'string') throw new Error('Invalid PP-StructureV3 result')
             }
-            if (expectedRich && isCuda(device) && Array.from({length:result.pageEnd! - start!},(_,index) => start! + index + 1).some(page => !result.blocks.some(block => block.page === page))) throw Object.assign(new Error('CUDA omitted a page selected by reference screening'), {code:'structure_rich_omission'})
+            if (expectedRich && isCuda(device) && (selectedPages?.map(page => page + 1) ?? Array.from({length:result.pageEnd! - start!},(_,index) => start! + index + 1)).some(page => !result.blocks.some(block => block.page === page))) throw Object.assign(new Error('CUDA omitted a page selected by reference screening'), {code:'structure_rich_omission'})
             lane.initialized = true
             devices.add(device)
             const measured = this.measurements.get(device) ?? {pages:0,requests:0,seconds:0}
-            measured.pages += start === undefined ? result.pageCount : result.pageEnd! - start
+            measured.pages += selectedPages?.length ?? (start === undefined ? result.pageCount : result.pageEnd! - start)
             measured.requests++; measured.seconds += (performance.now() - started) / 1000
             this.measurements.set(device, measured)
             return result
@@ -299,15 +300,15 @@ export class StructureV3Manager {
             if (device === 'CPU' || combined.aborted || this.stopped) throw error
             // A layout disagreement needs reference recovery, not permanent
             // eviction of an otherwise healthy CUDA worker.
-            if ((error as {code?:string}).code === 'structure_rich_omission') return await onCpu(() => run('CPU', start, limit, false, true))
+            if ((error as {code?:string}).code === 'structure_rich_omission') return await onCpu(() => run('CPU', start, limit, false, true, selectedPages))
             // Retry only this uncommitted range. Earlier ranges remain intact.
             if (!lane.disabled) this.layoutFailed.add(device)
             lane.disabled = true; await lane.process.stopAndWait()
-            return await (isCuda(device) ? onCpu(() => run('CPU', start, limit, screenOnly, expectedRich)) : run('CPU', start, limit, screenOnly, expectedRich))
+            return await (isCuda(device) ? onCpu(() => run('CPU', start, limit, screenOnly, expectedRich, selectedPages)) : run('CPU', start, limit, screenOnly, expectedRich, selectedPages))
           } finally { lane.busy = false; lane.current = undefined }
         } finally { releaseCpu?.(); await rm(output, {force:true}) }
       }
-      const schedule = async (claim: (device: string) => {start?:number;limit?:number} | undefined, richOnly = false): Promise<Result | undefined> => {
+      const schedule = async (claim: (device: string) => {start?:number;limit?:number;pages?:number[]} | undefined, richOnly = false): Promise<Result | undefined> => {
         for (;;) {
           const outcome = await this.queue.run(async (): Promise<{retry:true}|{result:Result|undefined}> => {
             const device = await this.layoutDevice(tablesOnly, richOnly)
@@ -322,7 +323,7 @@ export class StructureV3Manager {
               if (!range) return {result:undefined}
               dispatched = true
               const screenOnly = !richOnly && ranged && !cuda && !this.foreground && this.deferRichToCuda
-              return {result:await (cuda ? run(device,range.start,range.limit,screenOnly,richOnly) : onCpu(() => run(this.foreground ? 'CPU' : device,range.start,range.limit,screenOnly,richOnly)))}
+              return {result:await (cuda ? run(device,range.start,range.limit,screenOnly,richOnly,range.pages) : onCpu(() => run(this.foreground ? 'CPU' : device,range.start,range.limit,screenOnly,richOnly,range.pages)))}
             } finally {
               this.reservedDevices.delete(device)
               if(dispatched)this.notifyCapacity()
@@ -375,9 +376,12 @@ export class StructureV3Manager {
         while (deferredNext < deferred.length) {
           const result = await schedule(device => {
             if (deferredNext >= deferred.length) return undefined
-            const start = deferred[deferredNext++]; let limit = 1
-            while (isCuda(device) && limit < 8 && deferred[deferredNext] === start + limit) { deferredNext++; limit++ }
-            return {start,limit}
+            if (isCuda(device)) {
+              const pages = deferred.slice(deferredNext, deferredNext + 8)
+              deferredNext += pages.length
+              return {pages}
+            }
+            return {start:deferred[deferredNext++],limit:1}
           }, true)
           if (result) {
             if (result.pageCount !== first.pageCount) throw new Error('Deferred PDF changed during processing')
@@ -394,7 +398,7 @@ export class StructureV3Manager {
       results.push(...richResults)
       results.sort((a,b) => (a.pageStart ?? 0) - (b.pageStart ?? 0))
       const blocks: ParsedBlock[] = []; let text = ''
-      for (const result of results) for (const block of result.blocks) {
+      for (const block of results.flatMap(result => result.blocks).sort((a,b) => a.page - b.page)) {
         const content = block.text.includes('<table') ? await extractHtmlToMarkdown(block.text) : block.text
         const start = text.length; text += content + '\n\n'
         const type = block.type.includes('title') ? 'heading' : block.type === 'table' || block.type === 'chart' ? 'table' : 'text'

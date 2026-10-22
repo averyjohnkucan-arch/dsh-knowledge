@@ -168,13 +168,17 @@ def extract(source, charts, tables_only=False, screen_only=False):
                     output.append({'page': page_number, 'type': label, 'text': text})
     return {'blocks': output, 'pageCount': page_count, **({'deferredPages': deferred} if screen_only else {})}
 
-def extract_range(source, charts, start_page, page_limit, screen_only=False):
+def extract_range(source, charts, start_page, page_limit, screen_only=False, page_indices=None):
     """Process a bounded PDF range with the reference renderer and page numbering.
 
     The scheduler can move the next range to a different device. Only these
     pages are rendered; the source stays shared and no intermediate PDFs exist.
     """
-    if type(start_page) is not int or type(page_limit) is not int or start_page < 0 or not 1 <= page_limit <= 8:
+    if page_indices is not None:
+        if not isinstance(page_indices, list) or not 1 <= len(page_indices) <= 8 or any(type(index) is not int or index < 0 for index in page_indices) or sorted(set(page_indices)) != page_indices:
+            raise ValueError('Invalid selected structure pages')
+        start_page, page_limit = page_indices[0], len(page_indices)
+    elif type(start_page) is not int or type(page_limit) is not int or start_page < 0 or not 1 <= page_limit <= 8:
         raise ValueError('Invalid structure page range')
     detector = pipeline(charts).paddlex_pipeline.layout_det_model
     reader = detector.batch_sampler.pdf_reader
@@ -186,8 +190,11 @@ def extract_range(source, charts, start_page, page_limit, screen_only=False):
             count = len(doc)
             if not 1 <= count <= 10000 or start_page >= count:
                 raise ValueError('Structure page range is outside the PDF')
-            end_page = min(count, start_page + page_limit)
-            for index in range(start_page, end_page):
+            indices = page_indices if page_indices is not None else list(range(start_page, min(count, start_page + page_limit)))
+            if indices[-1] >= count:
+                raise ValueError('Selected structure page is outside the PDF')
+            end_page = indices[-1] + 1
+            for index in indices:
                 page = doc[index]
                 try:
                     images.append(reader._backend._render_page(page, page_index=index + 1))
@@ -199,10 +206,12 @@ def extract_range(source, charts, start_page, page_limit, screen_only=False):
     if result['pageCount'] != len(images):
         raise RuntimeError('Structure range did not process every page')
     for block in result['blocks']:
-        block['page'] += start_page
+        if type(block['page']) is not int or not 1 <= block['page'] <= len(indices):
+            raise RuntimeError('Structure returned an invalid local page')
+        block['page'] = indices[block['page'] - 1] + 1
     if screen_only:
-        result['deferredPages'] = [page + start_page for page in result['deferredPages']]
-    return {**result, 'pageCount': count, 'pageStart': start_page, 'pageEnd': end_page}
+        result['deferredPages'] = [indices[page] for page in result['deferredPages']]
+    return {**result, 'pageCount': count, 'pageStart': start_page, 'pageEnd': end_page, **({'selectedPages': indices} if page_indices is not None else {})}
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -219,7 +228,11 @@ if __name__ == '__main__':
                 request = json.loads(line)
                 started = time.perf_counter()
                 with contextlib.redirect_stdout(sys.stderr):
-                    if 'startPage' in request:
+                    if 'pageIndices' in request:
+                        if not request.get('tablesOnly', False):
+                            raise ValueError('Selected pages require structure enrichment mode')
+                        result = extract_range(request['input'], request.get('charts', True), 0, 1, False, request['pageIndices'])
+                    elif 'startPage' in request:
                         if not request.get('tablesOnly', False):
                             raise ValueError('Page ranges require structure enrichment mode')
                         result = extract_range(request['input'], request.get('charts', True), request['startPage'], request.get('pageLimit', 1), request.get('screenOnly', False))
