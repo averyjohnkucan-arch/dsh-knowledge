@@ -27,7 +27,7 @@ export class StructureV3Manager {
   private children = new Set<ChildProcess>()
   private setup?: Promise<void>
   private readonly concurrency = Math.max(1, Math.min(2, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (4 * 1024 ** 3))))
-  private readonly queue = new ProcessingQueue(this.concurrency + 2)
+  private readonly queue = new ProcessingQueue(this.concurrency + 4)
   private readonly cpuQueue = new ProcessingQueue(this.concurrency)
   private cudaMemoryReduced = false
   private cudaReclaim?: Promise<void>
@@ -276,7 +276,7 @@ export class StructureV3Manager {
       }
       const run = async (device: string, start?: number, limit?: number, screenOnly = false, expectedRich = false, selectedPages?: number[]): Promise<Result> => {
         combined.throwIfAborted()
-        if (this.foreground && isCuda(device)) return onCpu(() => run('CPU', start, limit, screenOnly, expectedRich, selectedPages))
+        if (this.foreground && device !== 'CPU') return onCpu(() => run('CPU', start, limit, screenOnly, expectedRich, selectedPages))
         if (this.foreground) device = 'CPU'
         const output = join(dir!, `result-${serial++}.json`)
         const releaseCpu = isCuda(device) ? undefined : enterStructureCpuWork()
@@ -314,7 +314,7 @@ export class StructureV3Manager {
             // Retry only this uncommitted range. Earlier ranges remain intact.
             if (!lane.disabled) this.layoutFailed.add(device)
             lane.disabled = true; await lane.process.stopAndWait()
-            return await (isCuda(device) ? onCpu(() => run('CPU', start, limit, screenOnly, expectedRich, selectedPages)) : run('CPU', start, limit, screenOnly, expectedRich, selectedPages))
+            return await (device !== 'CPU' ? onCpu(() => run('CPU', start, limit, screenOnly, expectedRich, selectedPages)) : run('CPU', start, limit, screenOnly, expectedRich, selectedPages))
           } finally { lane.busy = false; lane.current = undefined }
         } finally { releaseCpu?.(); await rm(output, {force:true}) }
       }
@@ -328,12 +328,13 @@ export class StructureV3Manager {
               const cuda = isCuda(device) && !this.foreground
               // Do not hold the outer queue while waiting for a CPU slot. That
               // would strand newly available CUDA behind long CPU chart jobs.
-              if (!cuda && this.cpuRequests >= this.concurrency) return {retry:true}
+              const cpu = device === 'CPU' || this.foreground > 0
+              if (cpu && this.cpuRequests >= this.concurrency) return {retry:true}
               const range = claim(device)
               if (!range) return {result:undefined}
               dispatched = true
               const screenOnly = !richOnly && ranged && !cuda && !this.foreground && this.deferRichToCuda
-              return {result:await (cuda ? run(device,range.start,range.limit,screenOnly,richOnly,range.pages) : onCpu(() => run(this.foreground ? 'CPU' : device,range.start,range.limit,screenOnly,richOnly,range.pages)))}
+              return {result:await (cpu ? onCpu(() => run('CPU',range.start,range.limit,screenOnly,richOnly,range.pages)) : run(device,range.start,range.limit,screenOnly,richOnly,range.pages))}
             } finally {
               this.reservedDevices.delete(device)
               if(dispatched)this.notifyCapacity()

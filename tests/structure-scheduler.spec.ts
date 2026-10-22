@@ -225,21 +225,21 @@ it.each([[25000,['CUDA','CUDA:1']],[12000,['CUDA','CPU']],[4000,['CPU','CPU']]] 
   }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
 })
 
-it('admits newly available CUDA without waiting for long CPU jobs to finish', async () => {
+it.each(['CUDA','NPU','GPU'])('admits newly available %s without waiting for long CPU jobs to finish', async accelerator => {
  const manager=new StructureV3Manager()
  vi.spyOn(manager,'status').mockResolvedValue({status:'ready',progress:100,message:'',device:'cpu'})
  const internal=manager as unknown as {layoutDevice():Promise<string>;worker(device:string):any;reservedDevices:Set<string>}
  let allowCuda=false,cpuStarted=0,gpuCompleted=0
  const releaseCpu:Array<()=>void>=[]
  vi.spyOn(internal,'layoutDevice').mockImplementation(async()=>{
-  if(allowCuda&&!internal.reservedDevices.has('CUDA')){internal.reservedDevices.add('CUDA');return 'CUDA'}
+  if(allowCuda&&!internal.reservedDevices.has(accelerator)){internal.reservedDevices.add(accelerator);return accelerator}
   return 'CPU'
  })
  vi.spyOn(internal,'worker').mockImplementation(device=>({device,busy:false,process:{
   request:async(payload:{output:string})=>{
    if(device==='CPU'){cpuStarted++;await new Promise<void>(resolve=>releaseCpu.push(resolve))}
    await writeFile(payload.output,JSON.stringify({pageCount:1,blocks:[{page:1,type:'table',text:device}]}))
-   if(device==='CUDA')gpuCompleted++
+   if(device===accelerator)gpuCompleted++
   },dispose(){},stopAndWait:async()=>{},
  }}))
  const jobs=[manager.extract(new Uint8Array([1]),'cpu1',true,1000),manager.extract(new Uint8Array([2]),'cpu2',true,1000)]
