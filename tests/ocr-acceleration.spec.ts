@@ -95,14 +95,15 @@ it('reroutes queued GPU pages through the bounded CPU/NPU lanes during foregroun
 it('feeds all idle accelerators before queueing more CUDA work while reserving CPU', async () => {
   const {manager,cpu,npu,igpu,cuda}=fixture()
   let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve})
-  cuda.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:1}})
+  for (const lane of [cuda,npu,igpu]) lane.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:1}})
   const jobs=Array.from({length:12},()=>manager.recognize(Buffer.from('page')))
   await new Promise<void>(resolve=>setImmediate(resolve))
   expect(cuda.process.request).toHaveBeenCalledTimes(1)
   expect(cpu.process.request).not.toHaveBeenCalled();expect(npu.process.request).toHaveBeenCalledOnce();expect(igpu.process.request).toHaveBeenCalledOnce()
   finish();expect(await Promise.all(jobs)).toEqual(Array(12).fill('OCR evidence'))
   const status=await manager.status(),device=status.devices.find(device=>device.device==='CUDA:0')
-  expect(device).toMatchObject({enabled:true,pending:0,completed:10})
+  expect(device).toMatchObject({enabled:true,pending:0})
+  expect([cuda,npu,igpu].reduce((sum,lane)=>sum+lane.process.request.mock.calls.length,0)).toBe(12)
 })
 
 it('shares CUDA backend qualification only for matching provider and source model identity', async () => {

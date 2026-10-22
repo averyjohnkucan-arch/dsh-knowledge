@@ -157,7 +157,7 @@ export class OcrAcceleration {
       if(!healthy.length)return undefined
       const accelerators=healthy.filter(lane=>lane.device.device!=='CPU')
       const pool=accelerators.length?accelerators:healthy
-      const choices=pool.filter(lane=>lane.pending < (lane.device.device.startsWith('CUDA') ? 16 : 1)).sort((a,b)=>{
+      const choices=pool.filter(lane=>lane.pending < 1).sort((a,b)=>{
         // Keep each idle accelerator fed. Timing-only ranking can starve an
         // NPU forever when CUDA workers repeatedly become available first.
         if ((a.pending===0)!==(b.pending===0)) return a.pending===0?-1:1
