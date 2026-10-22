@@ -113,12 +113,13 @@ def predict_page(image, charts, layout=None, chart_results=None):
         if chart_results is not None:
             internal.chart_recognition_model = original_chart
 
-def extract(source, charts, tables_only=False):
+def extract(source, charts, tables_only=False, screen_only=False):
     output = []
+    deferred = []
     page_count = 0
     pages = structure_inputs(source, charts, tables_only)
     cached_charts = {}
-    if charts and tables_only and isinstance(source, list) and len(source) > 1 and os.environ.get('DSH_STRUCTURE_CHART_BATCH') == '2':
+    if not screen_only and charts and tables_only and isinstance(source, list) and len(source) > 1 and os.environ.get('DSH_STRUCTURE_CHART_BATCH') == '2':
         from structure_chart_batch import batch_chart_results
         pages = list(pages)
         cached_charts = batch_chart_results(pages, pipeline(charts).paddlex_pipeline._pipeline.chart_recognition_model)
@@ -126,6 +127,11 @@ def extract(source, charts, tables_only=False):
         if source_page is not None:
             page_count = source_page + 1
         if not selected:
+            continue
+        if screen_only:
+            if source_page is None:
+                raise ValueError('Screening requires explicit page inputs')
+            deferred.append(source_page)
             continue
         # Enrichment discards ordinary OCR text. With one chart and no tables,
         # only the chart decoder contributes retained content; there is no
@@ -160,9 +166,9 @@ def extract(source, charts, tables_only=False):
                 text = str(block.get('block_content') or '').strip()
                 if text:
                     output.append({'page': page_number, 'type': label, 'text': text})
-    return {'blocks': output, 'pageCount': page_count}
+    return {'blocks': output, 'pageCount': page_count, **({'deferredPages': deferred} if screen_only else {})}
 
-def extract_range(source, charts, start_page, page_limit):
+def extract_range(source, charts, start_page, page_limit, screen_only=False):
     """Process a bounded PDF range with the reference renderer and page numbering.
 
     The scheduler can move the next range to a different device. Only these
@@ -189,11 +195,13 @@ def extract_range(source, charts, start_page, page_limit):
                     page.close()
         finally:
             doc.close()
-    result = extract(images, charts, True)
+    result = extract(images, charts, True, screen_only)
     if result['pageCount'] != len(images):
         raise RuntimeError('Structure range did not process every page')
     for block in result['blocks']:
         block['page'] += start_page
+    if screen_only:
+        result['deferredPages'] = [page + start_page for page in result['deferredPages']]
     return {**result, 'pageCount': count, 'pageStart': start_page, 'pageEnd': end_page}
 
 if __name__ == '__main__':
@@ -214,7 +222,7 @@ if __name__ == '__main__':
                     if 'startPage' in request:
                         if not request.get('tablesOnly', False):
                             raise ValueError('Page ranges require structure enrichment mode')
-                        result = extract_range(request['input'], request.get('charts', True), request['startPage'], request.get('pageLimit', 1))
+                        result = extract_range(request['input'], request.get('charts', True), request['startPage'], request.get('pageLimit', 1), request.get('screenOnly', False))
                     else:
                         result = extract(request['input'], request.get('charts', True), request.get('tablesOnly', False))
                     pathlib.Path(request['output']).write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')

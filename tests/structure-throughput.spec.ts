@@ -135,8 +135,8 @@ class Reader:
   rendered.append(page.index);return page.index
 reader=Reader()
 g['pipeline']=lambda charts:types.SimpleNamespace(paddlex_pipeline=types.SimpleNamespace(layout_det_model=types.SimpleNamespace(batch_sampler=types.SimpleNamespace(pdf_reader=reader))))
-def extract(images,charts,tables):
- assert images==[2,3] and tables
+def extract(images,charts,tables,screen_only=False):
+ assert images==[2,3] and tables and not screen_only
  return {'pageCount':2,'blocks':[{'page':2,'type':'table','text':'original 123.45'}]}
 g['extract']=extract
 r=m['extract_range']('source.pdf',True,2,2)
@@ -229,5 +229,19 @@ m['extract']('source.pdf',True,False)
 assert direct==[] and full==[1,2,3]
 print('ok')
 `],{cwd:process.cwd(),encoding:'utf8',timeout:5000})
+ expect(output.trim()).toBe('ok')
+})
+
+it('screens rich pages without invoking the decoder or claiming extracted content',()=>{
+ const output=execFileSync('python3',['-c',String.raw`
+import runpy
+m=runpy.run_path('scripts/structure-v3.py')
+f=m['extract'];g=f.__globals__
+g['structure_inputs']=lambda *args:iter([(0,None,False,{}),(1,None,True,{}),(2,None,False,{})])
+def forbidden(*args,**kwargs):raise AssertionError('screening invoked decoder')
+g['pipeline']=forbidden;g['predict_page']=forbidden
+assert f(['page']*3,True,True,True)=={'blocks':[],'pageCount':3,'deferredPages':[1]}
+print('ok')
+`],{encoding:'utf8'})
  expect(output.trim()).toBe('ok')
 })

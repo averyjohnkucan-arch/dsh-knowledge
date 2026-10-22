@@ -254,3 +254,77 @@ it('admits newly available CUDA without waiting for long CPU jobs to finish', as
   await Promise.all(jobs)
  }finally{releaseCpu.splice(0).forEach(release=>release());manager.dispose()}
 })
+
+it.each([['CUDA',false],['CPU',false],['CUDA',true]] as const)('screens Intel pages then completes deferred rich pages on %s (empty CUDA: %s)', async (richDevice,omitCuda) => {
+ const manager=new StructureV3Manager()
+ vi.spyOn(manager,'status').mockResolvedValue({status:'ready',progress:100,message:'',device:'cpu'})
+ Object.assign(manager,{deferRichToCuda:true})
+ const internal=manager as any
+ const calls:Array<{device:string;start:number;screen:boolean}>=[]
+ vi.spyOn(internal,'layoutDevice').mockImplementation(async(_tables:any,rich:any)=>rich?richDevice:'NPU')
+ vi.spyOn(internal,'worker').mockImplementation((device:any)=>({device,busy:false,process:{
+  async request(payload:any){
+   calls.push({device,start:payload.startPage,screen:!!payload.screenOnly})
+   const start=payload.startPage,end=Math.min(3,start+payload.pageLimit)
+   await writeFile(payload.output,JSON.stringify({pageCount:3,pageStart:start,pageEnd:end,
+    blocks:payload.screenOnly || (omitCuda && device==='CUDA')?[]:[{page:start+1,type:'table',text:'A | 42'}],
+    ...(payload.screenOnly?{deferredPages:start===1?[1]:[]}:{}),
+   }))
+  },dispose(){},async stopAndWait(){}
+ }}))
+ try {
+  const result=await manager.extract(new TextEncoder().encode('%PDF-test'),'deferred',true,1000,undefined,true)
+  expect(calls.filter(call=>call.screen).map(call=>call.start).sort()).toEqual([0,1,2])
+  expect(calls.filter(call=>!call.screen)).toEqual([{device:richDevice,start:1,screen:false},...(omitCuda?[{device:'CPU',start:1,screen:false}]:[])])
+  expect(result.document.blocks).toHaveLength(1)
+  expect(result.document.blocks[0]).toMatchObject({pageIndex:1,text:'A | 42'})
+  expect(result.document.processedPages).toEqual([0,1,2])
+ } finally {manager.dispose()}
+})
+
+it('cancels deferred rich work while all CUDA lanes are busy without publishing', async () => {
+ const manager=new StructureV3Manager()
+ vi.spyOn(manager,'status').mockResolvedValue({status:'ready',progress:100,message:'',device:'cpu'})
+ Object.assign(manager,{deferRichToCuda:true})
+ const internal=manager as any
+ let waiting=false
+ vi.spyOn(internal,'layoutDevice').mockImplementation(async(_tables:any,rich:any)=>{if(rich){waiting=true;return 'WAIT'}return 'NPU'})
+ vi.spyOn(internal,'worker').mockReturnValue({device:'NPU',busy:false,process:{
+  async request(payload:any){await writeFile(payload.output,JSON.stringify({pageCount:1,pageStart:0,pageEnd:1,blocks:[],deferredPages:[0]}))},dispose(){},async stopAndWait(){}
+ }})
+ const abort=new AbortController()
+ const task=manager.extract(new TextEncoder().encode('%PDF-test'),'cancel-deferred',true,1000,abort.signal,true)
+ const rejection=expect(task).rejects.toMatchObject({name:'AbortError'})
+ try{await vi.waitFor(()=>expect(waiting).toBe(true));abort.abort();await rejection}
+ finally{abort.abort();manager.dispose()}
+})
+
+it.each([[1],[-1],[0,0],[0.5]])('rejects malformed or out-of-range deferred page lists: %j',async(...pages)=>{
+ const manager=new StructureV3Manager()
+ vi.spyOn(manager,'status').mockResolvedValue({status:'ready',progress:100,message:'',device:'cpu'})
+ Object.assign(manager,{deferRichToCuda:true})
+ const internal=manager as any
+ vi.spyOn(internal,'layoutDevice').mockResolvedValue('CPU')
+ vi.spyOn(internal,'worker').mockReturnValue({device:'CPU',busy:false,process:{
+  async request(payload:any){await writeFile(payload.output,JSON.stringify({pageCount:1,pageStart:0,pageEnd:1,blocks:[],deferredPages:pages}))},dispose(){}
+ }})
+ try{await expect(manager.extract(new TextEncoder().encode('%PDF-test'),'invalid-deferred',true,1000,undefined,true)).rejects.toThrow('Invalid deferred structure pages')}
+ finally{manager.dispose()}
+})
+
+it('keeps rich work queued when concurrent probes consume the final CUDA lanes',async()=>{
+ const {mkdtemp,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path')
+ const availability=await import('../src/knowledge/embedding-device-availability.js')
+ const releases:Array<(value:any)=>void>=[]
+ const probe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockImplementation(()=>new Promise(resolve=>releases.push(resolve)))
+ const root=await mkdtemp(join(tmpdir(),'structure-rich-race-'));const manager=new StructureV3Manager()
+ vi.spyOn(manager,'root').mockReturnValue(root)
+ await writeFile(join(root,'gpu-ready.json'),JSON.stringify({schema:1,paddleocr:'3.7.0',precision:'float32',tf32:false,deferRichToCuda:true}))
+ const internal=manager as any
+ try{
+  const choices=Promise.all([internal.layoutDevice(true,true),internal.layoutDevice(true,true),internal.layoutDevice(true,true)])
+  await vi.waitFor(()=>expect(releases).toHaveLength(3))
+  releases.forEach(resolve=>resolve({available:true,freeMiB:25000,reason:'available'}))
+  expect((await choices).sort()).toEqual(['CUDA','CUDA:1','WAIT'])
+ }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
+})

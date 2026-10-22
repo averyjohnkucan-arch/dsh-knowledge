@@ -57,3 +57,12 @@ On the tested Core Ultra 9 285HX, the same two-chart sample took 110.31/109.86 s
 ### Admission polling overhead
 
 Structure queue waiters skip NVIDIA subprocess probes when both CUDA lanes are already busy or reserved. Concurrent Intel availability requests with identical device ownership share one in-flight scan; subsequent requests still obtain a fresh sample, and changed ownership is evaluated separately. Foreground admission and external-compute checks remain in place. Before deployment, a five-second live sample of the Node host averaged 137.92% CPU (91.22% system time) with zero physical disk reads/writes during that sample. This establishes overhead to investigate, not a measured speedup or proof that all host CPU time is polling.
+
+
+### Deferred rich-content dispatch
+
+A qualified GPU receipt can opt into `deferRichToCuda: true`. Idle non-CUDA ranges screen pages and return selected page indices, allowing Intel layout engines to keep screening while rich table/chart work queues for CUDA. Foreground or unavailable CUDA uses CPU. Coverage, selected indices and all rich results are checked before document publication. CUDA omissions retry the reference CPU path without permanently disabling an otherwise healthy GPU worker. Cancellation also covers queued rich work. Page counters measure processing visits, including separate screening and rich visits; use completed documents for end-to-end throughput.
+
+A four-document mixed integration sample matched reference content in 27.57 seconds. An all-chart integration sample exposed a reservation race: a waiter whose asynchronous probe lost the last CUDA lane fell back unnecessarily to CPU. Rechecking after the probe reduced that identical four-document sample from 78.53 to 26.65 seconds, preserving all checked text, numeric values, chart relationships and page coverage. The corrected run used NPU and iGPU screening plus both CUDA workers, with no CPU-rich fallback. These include model startup and are sample timings, not full-corpus claims.
+
+Real NPU screening matched selected pages in two sample PDFs; a mixed eight-page NPU-to-CPU fallback also preserved the saved table/chart reference. TypeScript, build and 41 focused tests pass, including malformed deferred pages, cancellation and the concurrent-probe race. The local runtime is qualified and enabled; other installations leave the optional receipt field absent until validated.
