@@ -28,6 +28,7 @@ export class StructureV3Manager {
   private readonly concurrency = Math.max(1, Math.min(2, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (4 * 1024 ** 3))))
   private readonly queue = new ProcessingQueue(this.concurrency + 2)
   private readonly cpuQueue = new ProcessingQueue(this.concurrency)
+  private cpuChartThreads = 0
   private chartBatchSize = 1
   private directCharts = false
   private cpuRequests = 0
@@ -51,6 +52,7 @@ export class StructureV3Manager {
     try {
       const receipt = JSON.parse(await readFile(join(this.root(), 'ready.json'), 'utf8'))
       if (receipt.schema !== 1 || receipt.device !== 'cpu' || receipt.paddleocr !== '3.7.0') throw new Error('Unverified installation')
+      this.cpuChartThreads = [2,4].includes(receipt.chartThreads) ? receipt.chartThreads : 0
       await access(this.python())
       let layout = ''
       try {
@@ -189,6 +191,7 @@ export class StructureV3Manager {
       DSH_STRUCTURE_LAYOUT_DEVICE: device,
     })
     else { delete env.DSH_STRUCTURE_LAYOUT_MODEL; delete env.DSH_STRUCTURE_LAYOUT_DEVICE }
+    env.DSH_STRUCTURE_CHART_THREADS = isCuda(device) ? '0' : String(this.cpuChartThreads)
     env.DSH_STRUCTURE_CHART_DIRECT = this.directCharts ? '1' : '0'
     delete env.DSH_STRUCTURE_CHART_BATCH
     env.DSH_STRUCTURE_DEVICE = isCuda(device) ? 'gpu:0' : 'cpu'

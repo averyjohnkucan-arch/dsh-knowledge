@@ -38,6 +38,10 @@ def pipeline(charts=True):
             use_textline_orientation=False, use_formula_recognition=False,
             use_seal_recognition=False, use_table_recognition=True,
             use_chart_recognition=charts)
+    if device == 'cpu' and charts:
+        from structure_cpu_threads import install_chart_threads
+        install_chart_threads(_engine.paddlex_pipeline._pipeline.chart_recognition_model, device,
+            int(os.environ.get('DSH_STRUCTURE_CHART_THREADS', '0')))
     layout_model = os.environ.get('DSH_STRUCTURE_LAYOUT_MODEL')
     if layout_model:
         from structure_openvino import install_layout_runner

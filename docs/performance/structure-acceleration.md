@@ -45,3 +45,10 @@ Qualified chart batching groups at most two original crops within a bounded page
 CPU-capacity waits no longer occupy outer scheduler slots. A regression holds both CPU workers and verifies newly available CUDA completes other queued work before either CPU worker is released. Startup embedding readiness queries no longer qualify indexing GPU workers; idle embedding workers yield to other Knowledge stages after a short grace period.
 
 The combined isolated candidate passes TypeScript, production build and 57 focused tests. Sample quality is not whole-corpus ground truth; final sustained throughput remains under measurement.
+
+
+### Qualified CPU chart threading
+
+The private CPU `ready.json` receipt may opt into `chartThreads: 2` or `4`. This scopes OpenMP limits to the dynamic chart decoder, restoring prior limits on return or error. It does not enable oneDNN or alter CUDA precision. The optional `threadpoolctl` package must be installed; without it the original decoder remains in use. Leave this setting absent on unqualified machines.
+
+On the tested Core Ultra 9 285HX, the same two-chart sample took 110.31/109.86 seconds without the scoped override, 96.65 seconds at four threads, and 93.35 seconds at two threads under live load. All checked text, numeric values and cell relationships matched. A mixed eight-page test with the production static-thread setting also matched the saved table/chart reference. These small samples are not a full-corpus speedup guarantee. CPU batching was slower (129.37 seconds at two threads and 146.57 at four); it remains disabled. Enabling oneDNN failed on an unsupported Paddle PIR attribute and also remains disabled.
