@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { foreignNvidiaGraphics, intelActivityAvailable, parseIntelActivity, nvidiaMemorySufficient } from '../src/knowledge/embedding-device-availability.js'
+import { describe, expect, it, vi } from 'vitest'
+import { IntelEmbeddingAvailability, foreignNvidiaGraphics, intelActivityAvailable, parseIntelActivity, nvidiaMemorySufficient } from '../src/knowledge/embedding-device-availability.js'
 describe('embedding GPU availability', () => {
   it('requires launch headroom without evicting its own already resident workers', () => {
     expect(nvidiaMemorySufficient(3000,false)).toBe(false)
@@ -36,3 +36,26 @@ it('allows known desktop rendering but still yields to compute activity and unkn
  expect(parseIntelActivity(separate,'python')).toEqual({client:'7',nanoseconds:190000000})
  expect(parseIntelActivity(separate.replace('drm-engine-compute: 60000000 ns\n',''),'Xwayland')).toEqual({client:'7',nanoseconds:130000000})
 })
+
+ it('coalesces concurrent Intel scans for the same ownership and retries after a failed scan', async () => {
+  const monitor = new IntelEmbeddingAvailability()
+  let finish!: (value: {available:boolean;reason:string}) => void
+  const probe = vi.spyOn(monitor as any, 'sampleNow').mockImplementation(() => new Promise(resolve => {finish=resolve}))
+  const first=monitor.sample(new Set([1,2]))
+  const second=monitor.sample(new Set([2,1]))
+  expect(first).toBe(second)
+  expect(probe).toHaveBeenCalledOnce()
+  finish({available:true,reason:'measured'});await first
+  probe.mockRejectedValueOnce(new Error('scan failed'))
+  await expect(monitor.sample(new Set([1,2]))).rejects.toThrow('scan failed')
+  probe.mockResolvedValueOnce({available:false,reason:'foreign compute'})
+  expect(await monitor.sample(new Set([1,2]))).toMatchObject({available:false})
+  expect(probe).toHaveBeenCalledTimes(3)
+ })
+ it('does not reuse a permission decision for different device ownership', async () => {
+  const monitor=new IntelEmbeddingAvailability()
+  const probe=vi.spyOn(monitor as any,'sampleNow').mockImplementation(async (owned:any)=>({available:owned.has(7),reason:'sample'}))
+  const results=await Promise.all([monitor.sample(new Set([7])),monitor.sample(new Set())])
+  expect(results.map(value=>value.available)).toEqual([true,false])
+  expect(probe).toHaveBeenCalledTimes(2)
+ })

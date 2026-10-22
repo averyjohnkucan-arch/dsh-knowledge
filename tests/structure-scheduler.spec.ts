@@ -219,7 +219,9 @@ it.each([[25000,['CUDA','CUDA:1']],[12000,['CUDA','CPU']],[4000,['CPU','CPU']]] 
   const internal=manager as unknown as {layoutDevice():Promise<string>}
   try {
     expect((await Promise.all([internal.layoutDevice(),internal.layoutDevice()])).sort()).toEqual([...expected].sort())
+    const probesBeforeFullCheck=probe.mock.calls.length
     expect(await internal.layoutDevice()).toBe('CPU')
+    if(expected[1]==='CUDA:1')expect(probe).toHaveBeenCalledTimes(probesBeforeFullCheck)
   }finally{manager.dispose();probe.mockRestore();await rm(root,{recursive:true,force:true})}
 })
 

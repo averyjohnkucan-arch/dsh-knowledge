@@ -52,3 +52,8 @@ The combined isolated candidate passes TypeScript, production build and 57 focus
 The private CPU `ready.json` receipt may opt into `chartThreads: 2` or `4`. This scopes OpenMP limits to the dynamic chart decoder, restoring prior limits on return or error. It does not enable oneDNN or alter CUDA precision. The optional `threadpoolctl` package must be installed; without it the original decoder remains in use. Leave this setting absent on unqualified machines.
 
 On the tested Core Ultra 9 285HX, the same two-chart sample took 110.31/109.86 seconds without the scoped override, 96.65 seconds at four threads, and 93.35 seconds at two threads under live load. All checked text, numeric values and cell relationships matched. A mixed eight-page test with the production static-thread setting also matched the saved table/chart reference. These small samples are not a full-corpus speedup guarantee. CPU batching was slower (129.37 seconds at two threads and 146.57 at four); it remains disabled. Enabling oneDNN failed on an unsupported Paddle PIR attribute and also remains disabled.
+
+
+### Admission polling overhead
+
+Structure queue waiters skip NVIDIA subprocess probes when both CUDA lanes are already busy or reserved. Concurrent Intel availability requests with identical device ownership share one in-flight scan; subsequent requests still obtain a fresh sample, and changed ownership is evaluated separately. Foreground admission and external-compute checks remain in place. Before deployment, a five-second live sample of the Node host averaged 137.92% CPU (91.22% system time) with zero physical disk reads/writes during that sample. This establishes overhead to investigate, not a measured speedup or proof that all host CPU time is polling.

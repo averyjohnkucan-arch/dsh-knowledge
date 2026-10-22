@@ -31,7 +31,17 @@ export function intelActivityAvailable(previous: number, current: number, elapse
 export class IntelEmbeddingAvailability {
   private files: Array<{ pid: number; path: string; name: string }> = []; private scanned = 0
   private previous = new Map<string, { ns: number; at: number }>()
-  async sample(owned: ReadonlySet<number>): Promise<DeviceAvailability> {
+  private pending = new Map<string, Promise<DeviceAvailability>>()
+  sample(owned: ReadonlySet<number>): Promise<DeviceAvailability> {
+    const owners = backgroundDevicePids(owned)
+    const key = [...owners].sort((a,b) => a-b).join(',')
+    const pending = this.pending.get(key)
+    if (pending) return pending
+    const sample = this.sampleNow(owners).finally(() => { this.pending.delete(key) })
+    this.pending.set(key, sample)
+    return sample
+  }
+  private async sampleNow(owned: ReadonlySet<number>): Promise<DeviceAvailability> {
     if (process.platform !== 'linux') return { available: false, reason: 'Device activity monitoring is unavailable; desktop idle is required' }
     owned = backgroundDevicePids(owned)
     const now = Date.now()

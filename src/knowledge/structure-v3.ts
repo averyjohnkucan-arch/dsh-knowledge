@@ -124,7 +124,10 @@ export class StructureV3Manager {
       if (cuda.schema === 1 && cuda.paddleocr === '3.7.0' && cuda.precision === 'float32' && cuda.tf32 === false) {
         this.chartBatchSize = cuda.chartBatchSize === 2 ? 2 : 1
         this.directCharts = cuda.singleChartDirect === true
-        const decision = knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(() => backgroundDevicePids()) : {available:false,freeMiB:0}
+        // Queue waiters cannot use a busy/reserved lane. Avoid launching three
+        // nvidia-smi subprocesses for each waiter while CUDA is already full.
+        const hasFreeLane = ['CUDA','CUDA:1'].some(device => !this.layoutFailed.has(device) && !this.reservedDevices.has(device) && !this.workers.some(lane => lane.device === device && lane.busy))
+        const decision = hasFreeLane && knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(() => backgroundDevicePids()) : {available:false,freeMiB:0}
         if (decision.available && !this.foreground && !this.stopped) {
           for (const device of ['CUDA','CUDA:1']) {
             if (this.layoutFailed.has(device) || this.reservedDevices.has(device) || this.workers.some(lane => lane.device === device && lane.busy)) continue
