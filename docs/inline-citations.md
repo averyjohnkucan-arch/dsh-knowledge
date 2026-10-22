@@ -1,0 +1,11 @@
+# Inline knowledge citations
+
+The Knowledge fork now repeats the same citation instructions alongside automatic retrieval, explicit search, chunk/context reads, structured-evidence reads, and text/regex reads. The policy requires claim-adjacent descriptive links, the original-file link beside them, inspected supporting evidence, and no invented URLs or locators. It does not fabricate citations or guarantee that every model follows instructions.
+
+Search results provide ready-to-copy inline Markdown. Production web URLs are absolute because DSH 0.2 treats root-relative Markdown destinations as local file references. The browser plugin handles same-origin Knowledge citation links through DSH's right-sidebar extension points, without modifying the host renderer. It opens source text with line numbers, scrolls to the cited range, and pulses yellow for 1.8 seconds on each navigation. Reduced-motion preferences disable the animation. Modified clicks keep normal browser behavior; original-file links open separately.
+
+Retained Markdown uses its immutable saved revision. For documents indexed without Markdown retention, the fallback checks the original chunk ID and SHA-256 against the current index, maps only verified text, and rejects missing/changed passages. It does not enable retention or reindex documents. When transformed content cannot be mapped exactly, the viewer clearly labels and displays the indexed excerpt without inventing a highlight. This fallback cannot recover a deleted older revision; retention is needed for that.
+
+Implementation reference: the user's archived Local AI version 2 `modules/knowledge/evidence-links.mjs` and `modules/old-tools/document-rag/client/source-panel.tsx`. A saved special-relativity conversation confirmed claim-adjacent links to supporting lines. The new implementation preserves that interaction using the fork's current source storage and plugin APIs.
+
+Verification: typecheck, build, and 92 focused tests (citation URLs, tool contracts, automatic retrieval, Markdown revisions, and HTTP passage integrity). Browser verification used an isolated DSH 0.2.1-rc.2 profile and a seeded answer fixture, testing a real rendered citation, source-panel navigation, verified lines, and repeat-click animation. This tests UI and data plumbing, not live model adherence.

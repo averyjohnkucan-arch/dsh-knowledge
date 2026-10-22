@@ -1,3 +1,4 @@
+import { isKnowledgeCitationPath } from '../../shared/citations.js'
 import React from 'react'
 import { DisclosureRow, IconBrowseOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 
@@ -39,7 +40,7 @@ export function parseRetrievalPassages(text: string) {
     const title = value('title') || 'Retrieved passage'
     const heading = value('heading')
     const saved=value('indexedMarkdown')
-    const indexedMarkdownUrl=/^\/knowledge\/documents\/[A-Za-z0-9_-]+\/markdown\/[A-Za-z0-9_-]+\?chunk=[A-Za-z0-9_-]+&view=1#citation$/.test(saved)?saved:undefined
+    const indexedMarkdownUrl=isKnowledgeCitationPath(saved)?saved:undefined
     let excerpt = text.slice(frame.index! + frame[0].length, frames[index + 1]?.index ?? text.length).trim()
     for (const label of new Set([title, heading].filter(Boolean))) excerpt = excerpt.split(`[${label}] `).join('')
     return { title, heading, indexedMarkdownUrl, base: fields[0].startsWith('baseId=') ? 'Knowledge base' : fields[0], documentId: value('docId'), chunkId: value('chunkId'), excerpt }

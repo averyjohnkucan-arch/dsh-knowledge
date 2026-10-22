@@ -1,6 +1,7 @@
 import { disposePdfParsers } from './parse.js'
 import { availableParallelism, freemem } from 'node:os'
-import { MarkdownSnapshots } from './markdown-snapshots.js'
+import { passageHash, passageUrl } from './citation-source.js'
+import { MarkdownSnapshots, mapMarkdownPassages } from './markdown-snapshots.js'
 import { indexingSettingsFingerprint } from './indexing-settings.js'
 import { canMigrateQwenVectors } from './qwen-embedding-variants.js'
 import { orderedEmbeddingLanes } from './embedding-tuning.js'
@@ -4124,7 +4125,7 @@ export class KnowledgeService extends Service {
     throwIfAborted(signal)
     const ranked = initial
     const candidates = ranked
-      .map(hit => searchHitOf(store, byId.get(hit.id), hit))
+      .map(hit => searchHitOf(store, byId.get(hit.id), hit, this.citationOrigin()))
       .filter((hit): hit is SearchHit => hit !== undefined)
     const applied = await this.applyRerank(store, config, query, candidates, topK, allowRerank, signal)
 
@@ -4522,6 +4523,30 @@ export class KnowledgeService extends Service {
       throw error
     }
   }
+  citationOrigin(): string | undefined {
+    return this.ctx.webServer.getOrigin?.()
+  }
+
+  citationUrl(documentId: string, chunk: KnowledgeChunk): string {
+    const document = this.requireStore().getDocument(documentId)
+    if (!document || chunk.docId !== documentId) throw new NotFoundError('document not found')
+    const path = passageUrl(documentId, chunk, document.markdownRevision), origin = this.citationOrigin()
+    return origin ? new URL(path, origin).href : path
+  }
+
+  /** Retention-off fallback: verify the cited chunk still exists and is unchanged. */
+  getCitationPassage(documentId: string, chunkId: string, hash: string) {
+    const store = this.requireStore(), document = store.getDocument(documentId)
+    const chunk = store.getChunk(chunkId)
+    if (!document || !store.getBase(document.baseId) || !chunk || chunk.docId !== documentId)
+      throw new NotFoundError('Cited passage is no longer available')
+    if (passageHash(chunk.text) !== hash) throw new ConflictError('Cited passage has changed; search again for current evidence')
+    const text = document.rawText ?? ''
+    return { schema: 1 as const, baseId: document.baseId, documentId, revision: 'current-index',
+      title: document.title, sha256: passageHash(text), createdAt: document.updatedAt ?? document.createdAt,
+      text, passages: mapMarkdownPassages(text, store.listChunksByDoc(documentId)).filter(row => row.chunkId === chunkId) }
+  }
+
   async getMarkdownSnapshot(documentId:string,revision:string){
     const store=this.requireStore(),document=store.getDocument(documentId)
     if(!document||!store.getBase(document.baseId))throw new NotFoundError('document not found')
@@ -5047,11 +5072,11 @@ function rerankEvidenceText(hit: SearchHit): string {
   return combined
 }
 
-function searchHitOf(store: Store, chunk: KnowledgeChunk | undefined, hit: RankedHit): SearchHit | undefined {
+function searchHitOf(store: Store, chunk: KnowledgeChunk | undefined, hit: RankedHit, origin?: string): SearchHit | undefined {
   if (chunk === undefined) return undefined
   const document=store.getDocument(chunk.docId)
   return {
-    ...(document?.markdownRevision?{indexedMarkdownUrl:`/knowledge/documents/${encodeURIComponent(chunk.docId)}/markdown/${encodeURIComponent(document.markdownRevision)}?chunk=${encodeURIComponent(chunk.id)}&view=1#citation`}:{}),
+    indexedMarkdownUrl: origin ? new URL(passageUrl(chunk.docId, chunk, document?.markdownRevision), origin).href : passageUrl(chunk.docId, chunk, document?.markdownRevision),
     chunkId: chunk.id,
     docId: chunk.docId,
     baseId: chunk.baseId,

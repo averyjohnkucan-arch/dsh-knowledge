@@ -68,6 +68,25 @@ async function sync(service:KnowledgeService,id:string){
  throw Error('Sync did not finish')
 }
 describe('future-only Markdown and settings-aware folder sync',()=>{
+ it('opens existing retention-off sources and rejects changed, foreign, or deleted passages',async()=>{
+  const {service,base,handler}=await mount(false)
+  const doc=await service.addTextDocument({baseId:base.id,title:'Existing source',content:'first line\nexact supporting passage'})
+  const other=await service.addTextDocument({baseId:base.id,title:'Other',content:'unrelated source'})
+  const hit=(await service.search({baseId:base.id,query:'supporting',mode:'lexical'})).hits[0]
+  expect(hit.indexedMarkdownUrl).toContain('/passage/')
+  expect(service.getDocument(doc.id).markdownRevision).toBeUndefined()
+  const server=createServer(handler as Parameters<typeof createServer>[0])
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));cleanup.push(()=>new Promise<void>(resolve=>server.close(()=>resolve())))
+  const url=new URL(hit.indexedMarkdownUrl!,`http://127.0.0.1:${(server.address() as {port:number}).port}`)
+  const response=await fetch(url);expect(response.status).toBe(200)
+  expect(await response.text()).toContain('<mark id="citation">')
+  const wrong=new URL(url);wrong.searchParams.set('hash','0'.repeat(64))
+  expect((await fetch(wrong)).status).toBe(409)
+  const foreign=new URL(url);foreign.pathname=foreign.pathname.replace(doc.id,other.id)
+  expect((await fetch(foreign)).status).toBe(404)
+  await service.deleteDocument(doc.id)
+  expect((await fetch(url)).status).toBe(404)
+ })
  it('saves only future generations and keeps old citations across later reindexing',async()=>{
   const {service,base}=await mount()
   const doc=await service.addTextDocument({baseId:base.id,title:'Document',content:'original indexed passage'})

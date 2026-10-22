@@ -1,3 +1,4 @@
+import { KNOWLEDGE_CITATION_INSTRUCTIONS } from '../src/shared/citations.js'
 import { beforeAll, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -140,6 +141,24 @@ describe('model-facing knowledge tool contracts', () => {
     await harness.knowledge.setEnabled(true)
     await harness.knowledge.setEnabledBaseIds([])
     await harness.knowledge.setConfig({ injectUsagePrompt: true })
+  })
+
+  it('repeats inline citation guidance with every evidence tool, including reads, grep, and empty search', async () => {
+    const {ctx, primaryDoc, grepDoc} = harness
+    for (const [name, args] of [
+      ['knowledge_search', {query:'invoice'}],
+      ['knowledge_search', {query:'absent-xyz-no-match'}],
+      ['knowledge_get_document', {documentId:primaryDoc.id}],
+      ['knowledge_get_document', {documentId:primaryDoc.id, anchorIndex:1}],
+      ['knowledge_read_document', {documentId:grepDoc.id}],
+      ['knowledge_read_document', {documentId:grepDoc.id, pattern:'CODE-42'}],
+      ['knowledge_read_evidence', {documentId:primaryDoc.id}],
+    ] as const) {
+      const result = await execute(ctx, name, args)
+      valueOf(result)
+      expect(resultText(result), name).toContain(KNOWLEDGE_CITATION_INSTRUCTIONS)
+      if (name === 'knowledge_get_document') expect(resultText(result)).toContain('/passage/')
+    }
   })
 
   it('lists base names once and leaves behavioral guidance in the search tool (#36)', async () => {

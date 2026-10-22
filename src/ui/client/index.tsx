@@ -1,3 +1,4 @@
+import { installKnowledgeSource } from './KnowledgeSource.js'
 /**
  * Browser half of the knowledge base: a Cherry Studio-style sidebar entry at
  * the sidebar foot (beside Settings) plus a frame-wide floating panel. The
@@ -34,6 +35,7 @@ export const inject = ['slots', 'locale', 'uiConversation']
 
 /** Register the knowledge sidebar action and its overlay panel. */
 export function apply(ctx: Context): void {
+  installKnowledgeSource(ctx)
   const slots = ctx.get('slots') as SlotsService | undefined
   const locale = ctx.get('locale') as LocaleService | undefined
   if (slots === undefined || locale === undefined) return

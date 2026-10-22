@@ -58,6 +58,16 @@ async function handleRequest(service: KnowledgeService, req: IncomingMessage, re
 
     if (segments[0] === 'storage-writes' || segments[0] === 'embedding-acceleration' || segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
 
+    if (method === 'GET' && segments[0] === 'documents' && segments[2] === 'passage' && segments.length === 4) {
+      const hash = url.searchParams.get('hash') ?? ''
+      if (!/^[a-f0-9]{64}$/.test(hash)) throw new InvalidRequestError('Invalid citation hash')
+      const snapshot = service.getCitationPassage(segments[1], segments[3], hash)
+      if (url.searchParams.get('format') === 'json') { writeJson(res, 200, { ok: true, value: snapshot }); return }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'" })
+      res.end(renderMarkdownSnapshot(snapshot, segments[3])); return
+    }
+
     if(method==='GET'&&segments[0]==='documents'&&segments[2]==='markdown'&&segments.length===4){
       const revision=segments[3],chunk=queryChunk(url.searchParams)
       if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(revision))throw new InvalidRequestError('Invalid Markdown revision')
