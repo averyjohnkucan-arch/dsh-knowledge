@@ -547,12 +547,22 @@ export class KnowledgeService extends Service {
    */
   private async resumeInterruptedDocuments(ids: readonly string[]): Promise<void> {
     const store = this.requireStore()
+    // Register the whole raw-source recovery backlog before any asynchronous
+    // reads. Otherwise vector backfill can take the GPU between resumed files.
+    const parsing = ids.filter(id => {
+      const doc = store.getDocument(id)
+      return doc !== undefined && store.getBase(doc.baseId) !== undefined && doc.sourceType !== 'directory'
+        && doc.rawFilePath !== undefined && doc.rawText === undefined
+    })
+    parsing.forEach(id => this.recoveryParsing.add(id))
+    try {
     for (const id of ids) {
       if (this.shuttingDown) return
       const doc = store.getDocument(id)
       if (doc === undefined || !store.getBase(doc.baseId) || doc.sourceType === 'directory') continue
       try {
         if (doc.rawFilePath !== undefined && doc.rawText === undefined) {
+          this.indexing.set(id, { baseId: doc.baseId, title: doc.title, phase: 'parsing', total: 0, progress: 0 })
           // Crash before the text was persisted: rebuild from the raw copy.
           const bytes = await store.raw?.read(doc.rawFilePath)
           if (bytes === null || bytes === undefined || bytes.byteLength === 0) {
@@ -604,8 +614,13 @@ export class KnowledgeService extends Service {
           await store.putDocument({ ...current, incomplete: false, embeddingError: processorErrorMessage(error),
             errorCode: current.rawText === undefined ? 'parse_failed' : 'embedding_provider', updatedAt: Date.now() })
         }
+      } finally {
+        if (parsing.includes(id)) {
+          this.recoveryParsing.delete(id); this.indexing.delete(id); this.processingProgress.delete(id)
+        }
       }
     }
+    } finally { parsing.forEach(id => this.recoveryParsing.delete(id)) }
   }
 
   /** Resume the persisted candidate without paying for a second parse. */
@@ -932,19 +947,20 @@ export class KnowledgeService extends Service {
     return next
   }
 
+  private readonly recoveryParsing = new Set<string>()
   private readonly syncClaims = new Set<string>()
   private readonly vectorPhaseDocuments = new Set<string>()
   private readonly parseEpochs = new Map<string, number>()
   private readonly deferredVectorDocuments = new Map<string, boolean>()
   private hasParsingWork(): boolean {
-    return [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+    return this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
       || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id) && !this.folderOcrSources.has(id))
   }
   private readonly folderOcrSources = new Map<string, Set<string> | null>()
   private hasOcrWork(): boolean {
     // Unexamined source jobs may still need OCR. Completed extraction can
     // overlap CPU normalization/chunking with accelerator embedding.
-    return [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+    return this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
       || [...this.folderOcrSources.values()].some(paths => paths === null || paths.size > 0)
       || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id)
         && !this.folderOcrSources.has(id)

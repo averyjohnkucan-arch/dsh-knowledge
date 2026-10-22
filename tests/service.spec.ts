@@ -2099,3 +2099,45 @@ it('does not resume source processing after its base is deleted', async () => {
   expect(rebuild).not.toHaveBeenCalled()
   rebuild.mockRestore()
 })
+
+it('keeps embedding behind all raw-source recovery work and exposes parsing progress', async()=>{
+ const service=await mountService(),internal=service as any
+ const base=await service.createBase({name:'Recovery stage barrier'})
+ const docs=await Promise.all(['one','two'].map(title=>service.addTextDocument({baseId:base.id,title,content:'Original source '+title})))
+ for(const doc of docs) await internal.store.putDocument({...internal.store.getDocument(doc.id),sourceType:'file',rawFilePath:doc.title+'.pdf',rawText:undefined,incomplete:true})
+ Object.defineProperty(internal.store,'raw',{configurable:true,value:{read:async()=>new Uint8Array([1])}})
+ const releases:Array<()=>void>=[]
+ const parse=vi.spyOn(internal,'extractDocumentText').mockImplementation(async()=>{
+   expect(internal.hasOcrWork()).toBe(true);expect(internal.hasParsingWork()).toBe(true)
+   await new Promise<void>(resolve=>releases.push(resolve));return {text:'Recovered evidence'}
+ })
+ const ingest=vi.spyOn(internal,'ingestDocument').mockResolvedValue(docs[0])
+ const recovery=internal.resumeInterruptedDocuments(docs.map(doc=>doc.id))
+ let embeddingReleased=false
+ const waiting=internal.yieldEmbeddingWork().then(()=>{embeddingReleased=true})
+ try{
+  await vi.waitFor(()=>expect(releases.length).toBe(1))
+  expect(service.indexingStatus().find(row=>row.docId===docs[0].id)?.phase).toBe('parsing')
+  expect(embeddingReleased).toBe(false)
+  releases[0]();await vi.waitFor(()=>expect(releases.length).toBe(2))
+  expect(embeddingReleased).toBe(false)
+  expect(service.indexingStatus().find(row=>row.docId===docs[1].id)?.phase).toBe('parsing')
+  releases[1]();await recovery;await waiting
+  expect(embeddingReleased).toBe(true);expect(internal.hasOcrWork()).toBe(false)
+  expect(service.indexingStatus().filter(row=>docs.some(doc=>doc.id===row.docId))).toEqual([])
+ }finally{releases.forEach(release=>release());parse.mockRestore();ingest.mockRestore()}
+})
+
+it('releases the recovery stage barrier after a parser failure',async()=>{
+ const service=await mountService(),internal=service as any,base=await service.createBase({name:'Recovery failure barrier'})
+ const doc=await service.addTextDocument({baseId:base.id,title:'failure',content:'Original'})
+ await internal.store.putDocument({...internal.store.getDocument(doc.id),sourceType:'file',rawFilePath:'source.pdf',rawText:undefined,incomplete:true})
+ Object.defineProperty(internal.store,'raw',{configurable:true,value:{read:async()=>new Uint8Array([1])}})
+ const parse=vi.spyOn(internal,'extractDocumentText').mockRejectedValue(new Error('fixture parse failure'))
+ try{
+  await internal.resumeInterruptedDocuments([doc.id])
+  expect(internal.hasOcrWork()).toBe(false);expect(internal.hasParsingWork()).toBe(false)
+  expect(service.indexingStatus().find(row=>row.docId===doc.id)).toBeUndefined()
+  expect(internal.store.getDocument(doc.id).errorCode).toBe('parse_failed')
+ }finally{parse.mockRestore()}
+})

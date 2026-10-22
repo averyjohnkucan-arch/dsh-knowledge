@@ -8,3 +8,6 @@ A live 111.51-second pre-deployment sample completed 2,699 additional vectors (2
 
 
 Semantic chunking progress now reports the paragraph-embedding pass as embedding, clearing stale parsing/normalizing status and advancing after each completed batch. This is an observability correction, not a measured inference speedup. Large documents can require thousands of segment embeddings before a final chunk generation is published.
+
+
+Startup raw-source recovery now registers its complete parsing backlog before asynchronous reads and exposes the active file as parsing. Both OCR and parsing admission barriers include that backlog, preventing vector backfill from occupying accelerators between resumed files. Every success, failure and shutdown path releases the markers; failed imports retain their normal error state.
