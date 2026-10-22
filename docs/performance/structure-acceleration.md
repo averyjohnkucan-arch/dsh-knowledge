@@ -37,3 +37,11 @@ Sustained full-corpus throughput and the embedding stage still require verificat
 A controlled sample with the same four eight-page requests completed in 19.35 s and 15.32 s with one warm CUDA worker, versus 12.67 s and 11.97 s with two. All checked content matched. The earlier single-worker round still showed warmup/live-load effects; comparison against the warmer 15.32 s round suggests approximately 17–22% lower elapsed time for this sample, not a whole-corpus guarantee.
 
 The scheduler now admits at most two CUDA workers, requiring 8 GiB of free VRAM for a new worker and reserving that budget for other workers still loading. Warm workers require 2 GiB headroom. Two CPU-backed structure lanes remain bounded separately. Foreground handoff releases both CUDA workers. No decoding precision or token limit changed.
+
+## Chart and admission refinements
+
+Qualified chart batching groups at most two original crops within a bounded page range and restores page/result associations. Four-chart sample decoding improved from 6.25–6.58 s to 4.93–5.49 s, with unchanged checked content; integrated timings are workload-dependent. Single-chart/no-table enrichment can bypass general OCR whose text would be discarded, using the same crop and decoder. Warm sample improvements were approximately 12% for two chart pages and 4% for the mixed eight-page sample. Both paths together matched saved full-pipeline outputs. These paths require the local GPU qualification receipt to specify `chartBatchSize: 2` and/or `singleChartDirect: true`; ordinary full extraction, multi-chart ordering and tables retain the reference path as applicable.
+
+CPU-capacity waits no longer occupy outer scheduler slots. A regression holds both CPU workers and verifies newly available CUDA completes other queued work before either CPU worker is released. Startup embedding readiness queries no longer qualify indexing GPU workers; idle embedding workers yield to other Knowledge stages after a short grace period.
+
+The combined isolated candidate passes TypeScript, production build and 57 focused tests. Sample quality is not whole-corpus ground truth; final sustained throughput remains under measurement.

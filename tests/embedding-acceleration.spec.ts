@@ -166,3 +166,26 @@ it('routes NPU long inputs to CUDA while CPU is reserved for parsing',async()=>{
   expect(cpu.worker.request).not.toHaveBeenCalled()
  } finally {manager.dispose()}
 })
+
+it('does not qualify indexing GPUs for readiness queries and yields idle GPU memory to enrichment',async()=>{
+ const {manager,cpu}=fixture()
+ const internal=manager as unknown as {updateGpus():Promise<void>}
+ vi.mocked(internal.updateGpus).mockRestore()
+ const availability=await import('../src/knowledge/embedding-device-availability.js')
+ const policy=await import('../src/knowledge/resource-policy.js')
+ const {knowledgeGpuAdmission}=await import('../src/knowledge/background-gpu.js')
+ const gpuProbe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:true,freeMiB:16000,reason:'available'})
+ const desktop=vi.spyOn(policy,'desktopIdle').mockResolvedValue({idleSeconds:600} as never)
+ Object.assign(manager,{used:true,fp16:true,intelAvailability:{sample:async()=>({available:true,reason:'available'})},lanes:[cpu]})
+ const owner={}
+ try {
+  await internal.updateGpus()
+  expect(cpu.worker.request).not.toHaveBeenCalled()
+  expect(manager.snapshot.devices.filter(device=>device.device.startsWith('GPU')).every(device=>device.blockedReason==='Waiting for embedding work')).toBe(true)
+  const gpu={...cpu,device:'GPU:main',worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})}}
+  Object.assign(manager,{lanes:[cpu,gpu],lastIndexUse:Date.now()-20000})
+  knowledgeGpuAdmission.request(owner,true)
+  await internal.updateGpus()
+  expect(gpu.worker.stopAndWait).toHaveBeenCalledOnce();expect(gpu.enabled).toBe(false)
+ }finally{knowledgeGpuAdmission.request(owner,false);gpuProbe.mockRestore();desktop.mockRestore()}
+})

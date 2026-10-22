@@ -30,6 +30,7 @@ export class EmbeddingAcceleration {
   setIndexCpuAvailability(available: () => boolean): void { this.indexCpuAvailable = available }
   private cache = ''; private lanes: Lane[] = []; private ready?: EmbeddingAccelerationStatus; private setup?: Promise<void>; private setupChild?: ChildProcess
   private readonly intelAvailability = new IntelEmbeddingAvailability()
+  private lastIndexUse = 0
   private used = false; private foreground = 0; private igpuReservations = 0; private timer?: ReturnType<typeof setInterval>; private checking = false; private polling = false; private stopped = false
   private npuRevalidation?: Promise<void>; private npuRecoveryLane?: Lane
   private warming?: Promise<void>; private warmed = false; private reference?:Promise<number[][]>; private gpuRetryAt=new Map<string,number>()
@@ -154,7 +155,7 @@ export class EmbeddingAcceleration {
     if((await this.status()).status!=='ready')throw Error('OpenVINO embedding model is not installed and validated')
     this.used = true
     if(!this.timer){this.timer=setInterval(()=>{void this.updateGpus()},1000);this.timer.unref?.()}
-    if(purpose==='index')this.activeIndexBatches++
+    if(purpose==='index'){this.activeIndexBatches++;this.lastIndexUse=Date.now()}
     try {
       // Publish demand before warming so CUDA admission/qualification can
       // overlap CPU/NPU initialization instead of waiting behind it.
@@ -200,7 +201,7 @@ export class EmbeddingAcceleration {
         }
         throw Error('Embedding worker stopped')
       }
-    })) } finally { if(purpose==='index')this.activeIndexBatches-- }
+    })) } finally { if(purpose==='index'){this.activeIndexBatches--;this.lastIndexUse=Date.now()} }
   }
   private async revalidateNpu():Promise<void>{
     if(this.npuRevalidation||this.stopped||this.foreground)return
@@ -251,7 +252,7 @@ export class EmbeddingAcceleration {
   }
   private async updateGpus():Promise<void>{
     if(this.stopped||!this.used||this.ready?.status!=='ready')return
-    void this.revalidateNpu()
+    if(this.activeIndexBatches>0)void this.revalidateNpu()
     knowledgeGpuAdmission.request(this, this.mainGpuAllowed && !this.foreground && (this.activeIndexBatches>0 || this.lanes.some(lane=>lane.pending>0)))
     if(this.polling)return
     this.polling=true
@@ -270,6 +271,7 @@ export class EmbeddingAcceleration {
         }
         if(main?!this.mainGpuAllowed:!this.igpuAllowed)decision={available:false,reason:'Disabled in embedding settings'}
         if(this.stopped||(this.foreground||!main&&this.igpuReservations))decision.available=false
+        if(!this.activeIndexBatches&&!this.lanes.some(l=>l.device.startsWith('GPU')&&l.pending>0)&&Date.now()-this.lastIndexUse>=10_000&&knowledgeGpuAdmission.hasOtherDemand(this))decision={available:false,reason:'Yielding idle embedding memory to another Knowledge stage'}
         decisions.set(main,decision)
         const current=this.lanes.find(l=>l.device===`GPU:${main?'main':'intel'}`)
         if(!decision.available&&current?.enabled)await this.stopGpu(current)
@@ -292,6 +294,8 @@ export class EmbeddingAcceleration {
         if(!available){if(existing?.enabled)await this.stopGpu(existing);continue}
         if(main&&!this.fp16){try{const {stdout}=await exec('nvidia-smi',['--query-compute-apps=pid','--format=csv,noheader,nounits'],{timeout:2000});if(stdout.split(/\s+/).filter(Boolean).some(pid=>Number(pid)!==existing?.worker.pid)){if(existing?.enabled)await this.stopGpu(existing);continue}}catch{continue}}
         if(existing){existing.enabled=true;existing.batcher?.resume();continue}
+        // A startup readiness query must not compile/load indexing GPU models.
+        if(!this.activeIndexBatches){state.blockedReason='Waiting for embedding work';continue}
         if(this.gpuTried.has(key)||(this.gpuRetryAt.get(key)??0)>Date.now())continue
         this.gpuTried.add(key)
         if(main&&this.fp16)this.mainGpuCopies=(decision.freeMiB??0)>=8192?2:1

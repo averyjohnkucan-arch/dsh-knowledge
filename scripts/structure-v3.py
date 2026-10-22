@@ -81,7 +81,7 @@ def structure_inputs(source, charts, tables_only):
         yield page, result['input_img'] if selected else None, selected, result
 
 
-def predict_page(image, charts, layout=None):
+def predict_page(image, charts, layout=None, chart_results=None):
     engine = pipeline(charts)
     if layout is None:
         yield from engine.predict(input=image, use_chart_recognition=charts)
@@ -94,21 +94,55 @@ def predict_page(image, charts, layout=None):
         if len(images) != 1:
             raise RuntimeError('Expected one page for cached structure layout')
         yield layout
+    original_chart = getattr(internal, 'chart_recognition_model', None)
+    def cached_charts(input, **kwargs):
+        if len(input) != len(chart_results):
+            raise RuntimeError('Cached chart count does not match original page crops')
+        yield from chart_results
     internal.layout_det_model = cached
+    if chart_results is not None:
+        internal.chart_recognition_model = cached_charts
     try:
         yield from engine.predict(input=image, use_chart_recognition=charts)
     finally:
         internal.layout_det_model = detector
+        if chart_results is not None:
+            internal.chart_recognition_model = original_chart
 
 def extract(source, charts, tables_only=False):
     output = []
     page_count = 0
-    for source_page, image, selected, layout in structure_inputs(source, charts, tables_only):
+    pages = structure_inputs(source, charts, tables_only)
+    cached_charts = {}
+    if charts and tables_only and isinstance(source, list) and len(source) > 1 and os.environ.get('DSH_STRUCTURE_CHART_BATCH') == '2':
+        from structure_chart_batch import batch_chart_results
+        pages = list(pages)
+        cached_charts = batch_chart_results(pages, pipeline(charts).paddlex_pipeline._pipeline.chart_recognition_model)
+    for source_page, image, selected, layout in pages:
         if source_page is not None:
             page_count = source_page + 1
         if not selected:
             continue
-        for page, result in enumerate(predict_page(image, charts, layout)):
+        # Enrichment discards ordinary OCR text. With one chart and no tables,
+        # only the chart decoder contributes retained content; there is no
+        # relative chart ordering to reconstruct through the full parser.
+        if charts and tables_only and source_page is not None and os.environ.get('DSH_STRUCTURE_CHART_DIRECT') == '1':
+            chart_boxes = [box for box in layout['boxes'] if box['label'] == 'chart']
+            if len(chart_boxes) == 1 and not any(box['label'] == 'table' for box in layout['boxes']):
+                results = cached_charts.get(source_page)
+                if results is None:
+                    x0, y0, x1, y1 = chart_boxes[0]['coordinate']
+                    crop = image[int(y0):int(y1), int(x0):int(x1), :]
+                    model = pipeline(charts).paddlex_pipeline._pipeline.chart_recognition_model
+                    results = list(model(input=[{'image': crop}]))
+                if len(results) != 1:
+                    raise RuntimeError('Single-chart decoder returned incomplete results')
+                text = str(results[0]['result'] or '').strip()
+                if text:
+                    output.append({'page': source_page + 1, 'type': 'chart', 'text': text})
+                continue
+        predictions = predict_page(image, charts, layout, cached_charts[source_page]) if source_page in cached_charts else predict_page(image, charts, layout)
+        for page, result in enumerate(predictions):
             page_number = source_page + 1 if source_page is not None else page + 1
             page_count = max(page_count, page_number)
             # Use the official in-memory exporter; no per-page JSON write/read.

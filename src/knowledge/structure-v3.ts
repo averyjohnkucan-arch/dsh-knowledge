@@ -28,6 +28,10 @@ export class StructureV3Manager {
   private readonly concurrency = Math.max(1, Math.min(2, Math.floor(availableParallelism() / 8), Math.floor(freemem() / (4 * 1024 ** 3))))
   private readonly queue = new ProcessingQueue(this.concurrency + 2)
   private readonly cpuQueue = new ProcessingQueue(this.concurrency)
+  private chartBatchSize = 1
+  private directCharts = false
+  private cpuRequests = 0
+  private readonly capacityWaiters = new Set<() => void>()
   private active = 0
   private readonly measurements = new Map<string, {pages:number;requests:number;seconds:number}>()
   private readonly stop = new AbortController()
@@ -99,11 +103,25 @@ export class StructureV3Manager {
     }).finally(() => { this.setup = undefined })
     return { ...this.state }
   }
+  private notifyCapacity(): void { for (const wake of [...this.capacityWaiters]) wake() }
+  private waitCapacity(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve,reject) => {
+      const finish = (error?: unknown) => {clearTimeout(timer);this.capacityWaiters.delete(wake);signal.removeEventListener('abort',abort);error ? reject(error) : resolve()}
+      const wake = () => finish()
+      const abort = () => finish(signal.reason ?? new Error('Structure work canceled'))
+      // External device availability has no local completion event.
+      const timer = setTimeout(wake,1000)
+      this.capacityWaiters.add(wake);signal.addEventListener('abort',abort,{once:true})
+      if(signal.aborted)abort()
+    })
+  }
   private async layoutDevice(tablesOnly = true): Promise<string> {
     if (this.foreground) return 'CPU'
     try {
       const cuda = JSON.parse(await readFile(join(this.root(), 'gpu-ready.json'), 'utf8'))
       if (cuda.schema === 1 && cuda.paddleocr === '3.7.0' && cuda.precision === 'float32' && cuda.tf32 === false) {
+        this.chartBatchSize = cuda.chartBatchSize === 2 ? 2 : 1
+        this.directCharts = cuda.singleChartDirect === true
         const decision = knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(() => backgroundDevicePids()) : {available:false,freeMiB:0}
         if (decision.available && !this.foreground && !this.stopped) {
           for (const device of ['CUDA','CUDA:1']) {
@@ -151,7 +169,7 @@ export class StructureV3Manager {
       await Promise.all(this.workers.filter(lane => lane.device !== 'CPU').map(lane => this.stopLane(lane)))
     } catch (error) { this.foreground--; throw error }
     let released = false
-    return () => { if (!released) { released = true; this.foreground-- } }
+    return () => { if (!released) { released = true; this.foreground--; this.notifyCapacity() } }
   }
   private worker(device: string): StructureLane {
     for (let i = this.workers.length - 1; i >= 0; i--) {
@@ -171,6 +189,8 @@ export class StructureV3Manager {
       DSH_STRUCTURE_LAYOUT_DEVICE: device,
     })
     else { delete env.DSH_STRUCTURE_LAYOUT_MODEL; delete env.DSH_STRUCTURE_LAYOUT_DEVICE }
+    env.DSH_STRUCTURE_CHART_DIRECT = this.directCharts ? '1' : '0'
+    delete env.DSH_STRUCTURE_CHART_BATCH
     env.DSH_STRUCTURE_DEVICE = isCuda(device) ? 'gpu:0' : 'cpu'
     if (isCuda(device)) {
       delete env.CUDA_VISIBLE_DEVICES
@@ -178,6 +198,7 @@ export class StructureV3Manager {
       env.LD_LIBRARY_PATH = [...libraries.map(name => join(this.root(), 'cuda-overlay/nvidia', name, 'lib')), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':')
       env.PYTHONPATH = [join(this.root(), 'gpu-overlay'),join(this.root(), 'cuda-overlay'),process.env.PYTHONPATH].filter(Boolean).join(process.platform === 'win32' ? ';' : ':')
       env.NVIDIA_TF32_OVERRIDE = '0'
+      env.DSH_STRUCTURE_CHART_BATCH = String(this.chartBatchSize)
       env.FLAGS_allocator_strategy = 'auto_growth'
       env.FLAGS_fraction_of_gpu_memory_to_use = '0.7'
     }
@@ -204,9 +225,13 @@ export class StructureV3Manager {
         this.workers.length = 0; this.workerRoot = this.root()
       }
       let serial = 0
+      const onCpu = <T>(task: () => Promise<T>): Promise<T> => {
+        this.cpuRequests++
+        return this.cpuQueue.run(task,combined).finally(() => {this.cpuRequests--;this.notifyCapacity()})
+      }
       const run = async (device: string, start?: number, limit?: number): Promise<Result> => {
         combined.throwIfAborted()
-        if (this.foreground && isCuda(device)) return this.cpuQueue.run(() => run('CPU', start, limit), combined)
+        if (this.foreground && isCuda(device)) return onCpu(() => run('CPU', start, limit))
         if (this.foreground) device = 'CPU'
         const output = join(dir!, `result-${serial++}.json`)
         const releaseCpu = isCuda(device) ? undefined : enterStructureCpuWork()
@@ -236,18 +261,33 @@ export class StructureV3Manager {
             // Retry only this uncommitted range. Earlier ranges remain intact.
             if (!lane.disabled) this.layoutFailed.add(device)
             lane.disabled = true; await lane.process.stopAndWait()
-            return await (isCuda(device) ? this.cpuQueue.run(() => run('CPU', start, limit), combined) : run('CPU', start, limit))
+            return await (isCuda(device) ? onCpu(() => run('CPU', start, limit)) : run('CPU', start, limit))
           } finally { lane.busy = false; lane.current = undefined }
         } finally { releaseCpu?.(); await rm(output, {force:true}) }
       }
-      const schedule = (claim: (device: string) => {start?:number;limit?:number} | undefined): Promise<Result | undefined> => this.queue.run(async () => {
-        const device = await this.layoutDevice(tablesOnly)
-        try {
-          const range = claim(device)
-          if (!range) return undefined
-          return await (isCuda(device) && !this.foreground ? run(device, range.start, range.limit) : this.cpuQueue.run(() => run(this.foreground ? 'CPU' : device, range.start, range.limit), combined))
-        } finally { this.reservedDevices.delete(device) }
-      }, combined)
+      const schedule = async (claim: (device: string) => {start?:number;limit?:number} | undefined): Promise<Result | undefined> => {
+        for (;;) {
+          const outcome = await this.queue.run(async (): Promise<{retry:true}|{result:Result|undefined}> => {
+            const device = await this.layoutDevice(tablesOnly)
+            let dispatched = false
+            try {
+              const cuda = isCuda(device) && !this.foreground
+              // Do not hold the outer queue while waiting for a CPU slot. That
+              // would strand newly available CUDA behind long CPU chart jobs.
+              if (!cuda && this.cpuRequests >= this.concurrency) return {retry:true}
+              const range = claim(device)
+              if (!range) return {result:undefined}
+              dispatched = true
+              return {result:await (cuda ? run(device,range.start,range.limit) : onCpu(() => run(this.foreground ? 'CPU' : device,range.start,range.limit)))}
+            } finally {
+              this.reservedDevices.delete(device)
+              if(dispatched)this.notifyCapacity()
+            }
+          },combined)
+          if ('result' in outcome) return outcome.result
+          if(this.cpuRequests >= this.concurrency)await this.waitCapacity(combined)
+        }
+      }
       // Discover page count while completing the first page. Subsequent ranges
       // re-enter global admission, so fast devices can take work from long PDFs.
       const first = (await schedule(() => ranged ? {start:0,limit:1} : {}))!
@@ -298,6 +338,6 @@ export class StructureV3Manager {
       if (!this.active) await Promise.all(this.workers.filter(lane => lane.device !== 'CPU').map(lane => this.stopLane(lane)))
     }
   }
-  dispose(): void { knowledgeGpuAdmission.request(this, false); this.unregisterDevices(); this.stopped = true; this.stop.abort(); for (const lane of this.workers) lane.process.dispose(); for (const child of this.children) stopOwnedProcess(child, 'SIGTERM') }
+  dispose(): void { knowledgeGpuAdmission.request(this, false); this.unregisterDevices(); this.stopped = true; this.stop.abort(); this.notifyCapacity(); for (const lane of this.workers) lane.process.dispose(); for (const child of this.children) stopOwnedProcess(child, 'SIGTERM') }
 }
 export const structureV3 = new StructureV3Manager()

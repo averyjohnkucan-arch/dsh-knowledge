@@ -150,3 +150,84 @@ print('ok')
 `],{cwd:process.cwd(),encoding:'utf8',timeout:5000})
   expect(output.trim()).toBe('ok')
 })
+
+it('batches chart crops in page order and restores model state on failures', () => {
+ const output=execFileSync('python3',['-c',String.raw`
+import sys,types,runpy
+sys.path.insert(0,'scripts')
+from structure_chart_batch import batch_chart_results
+class Image:
+ def __getitem__(self,slices):return tuple((s.start,s.stop) for s in slices[:2])
+box={'label':'chart','coordinate':[1.9,2.1,8.9,9.8]}
+pages=[(2,Image(),True,{'boxes':[box]}),(3,None,False,{'boxes':[]}),(5,Image(),True,{'boxes':[box,box]})]
+class Model:
+ def __init__(self):self.batch_sampler=types.SimpleNamespace(batch_size=1);self.fail=False;self.short=False
+ def __call__(self,input):
+  assert self.batch_sampler.batch_size==2
+  assert all(item['image']==((2,9),(1,8)) for item in input)
+  if self.fail:raise RuntimeError('device failure')
+  return iter([{'result':str(i)} for i in range(len(input)-(1 if self.short else 0))])
+model=Model()
+assert batch_chart_results(pages,model)=={2:[{'result':'0'}],5:[{'result':'1'},{'result':'2'}]}
+assert model.batch_sampler.batch_size==1
+for mode in ['short','fail']:
+ setattr(model,mode,True)
+ try:batch_chart_results(pages,model)
+ except RuntimeError:pass
+ else:raise AssertionError('Invalid batch accepted')
+ assert model.batch_sampler.batch_size==1
+ setattr(model,mode,False)
+m=runpy.run_path('scripts/structure-v3.py');g=m['predict_page'].__globals__
+class Engine:
+ def __init__(self):self.paddlex_pipeline=self;self._pipeline=self;self.layout_det_model='original layout';self.chart_recognition_model='original chart';self.fail=False
+ def predict(self,input,**kwargs):
+  assert list(self.chart_recognition_model(input=[input]))==[{'result':'cached value'}]
+  if self.fail:raise RuntimeError('downstream failure')
+  yield 'success'
+engine=Engine();g['pipeline']=lambda charts:engine
+assert list(m['predict_page']('image',True,{'boxes':[]},[{'result':'cached value'}]))==['success']
+assert engine.layout_det_model=='original layout' and engine.chart_recognition_model=='original chart'
+engine.fail=True
+try:list(m['predict_page']('image',True,{'boxes':[]},[{'result':'cached value'}]))
+except RuntimeError:pass
+else:raise AssertionError('Expected failure')
+assert engine.layout_det_model=='original layout' and engine.chart_recognition_model=='original chart'
+print('ok')
+`],{cwd:process.cwd(),encoding:'utf8',timeout:5000})
+ expect(output.trim()).toBe('ok')
+})
+
+it('skips discarded OCR only for qualified single-chart enrichment pages', () => {
+ const output=execFileSync('python3',['-c',String.raw`
+import os,runpy,types
+m=runpy.run_path('scripts/structure-v3.py');g=m['extract'].__globals__
+os.environ['DSH_STRUCTURE_CHART_DIRECT']='1'
+class Image:
+ def __init__(self,page):self.page=page
+ def __getitem__(self,slices):
+  assert [(s.start,s.stop) for s in slices[:2]]==[(2,9),(1,8)]
+  return self.page
+chart={'label':'chart','coordinate':[1.5,2.5,8.5,9.5]}
+pages=[(0,Image(1),True,{'boxes':[chart]}),(1,Image(2),True,{'boxes':[chart,chart]}),(2,Image(3),True,{'boxes':[chart,{'label':'table'}]})]
+g['structure_inputs']=lambda *args:iter(pages)
+full=[];direct=[]
+class Model:
+ def __call__(self,input):
+  direct.extend(item['image'] for item in input)
+  return iter([{'result':'preserved chart 123.45'}])
+model=Model()
+g['pipeline']=lambda charts:types.SimpleNamespace(paddlex_pipeline=types.SimpleNamespace(_pipeline=types.SimpleNamespace(chart_recognition_model=model)))
+class Result:
+ json={'res':{'parsing_res_list':[{'block_label':'table','block_content':'full table content'}]}}
+def predict(image,charts,layout):full.append(image.page);yield Result()
+g['predict_page']=predict
+result=m['extract']('source.pdf',True,True)
+assert direct==[1] and full==[2,3]
+assert result['pageCount']==3 and result['blocks'][0]=={'page':1,'type':'chart','text':'preserved chart 123.45'}
+full.clear();direct.clear()
+m['extract']('source.pdf',True,False)
+assert direct==[] and full==[1,2,3]
+print('ok')
+`],{cwd:process.cwd(),encoding:'utf8',timeout:5000})
+ expect(output.trim()).toBe('ok')
+})
