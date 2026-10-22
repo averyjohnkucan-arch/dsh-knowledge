@@ -55,7 +55,7 @@ describe('CUDA OCR admission',()=>{
   expect(cuda.device.qualified).toBe(true);expect(cuda.failed).toBe(false)
  })
  it('uses CPU for a bad qualification page and retries the GPU on a later page',async()=>{
-  vi.useFakeTimers();const {manager,cpu,cuda}=fixture();cuda.device.qualified=false
+  vi.useFakeTimers();const {manager,cpu,cuda,npu,igpu}=fixture();cuda.device.qualified=false;npu.enabled=false;igpu.enabled=false
   cpu.process.request.mockResolvedValue({text:evidence,elapsedMs:100})
   cuda.process.request.mockResolvedValueOnce({text:'Unrelated output',elapsedMs:20,provider:'CUDAExecutionProvider'} as never)
   expect(await manager.recognize(Buffer.from('scan'))).toBe(evidence)
@@ -92,17 +92,17 @@ it('reroutes queued GPU pages through the bounded CPU/NPU lanes during foregroun
  expect(cuda.process.request).toHaveBeenCalledTimes(1);release()
 })
 
-it('queues on a faster CUDA lane instead of making a short document wait for slow CPU OCR', async () => {
+it('feeds all idle accelerators before queueing more CUDA work while reserving CPU', async () => {
   const {manager,cpu,npu,igpu,cuda}=fixture()
   let finish!:()=>void;const gate=new Promise<void>(resolve=>{finish=resolve})
   cuda.process.request.mockImplementation(async()=>{await gate;return{text:'OCR evidence',elapsedMs:1}})
   const jobs=Array.from({length:12},()=>manager.recognize(Buffer.from('page')))
   await new Promise<void>(resolve=>setImmediate(resolve))
   expect(cuda.process.request).toHaveBeenCalledTimes(1)
-  expect(cpu.process.request).not.toHaveBeenCalled();expect(npu.process.request).not.toHaveBeenCalled();expect(igpu.process.request).not.toHaveBeenCalled()
+  expect(cpu.process.request).not.toHaveBeenCalled();expect(npu.process.request).toHaveBeenCalledOnce();expect(igpu.process.request).toHaveBeenCalledOnce()
   finish();expect(await Promise.all(jobs)).toEqual(Array(12).fill('OCR evidence'))
   const status=await manager.status(),device=status.devices.find(device=>device.device==='CUDA:0')
-  expect(device).toMatchObject({enabled:true,pending:0,completed:12})
+  expect(device).toMatchObject({enabled:true,pending:0,completed:10})
 })
 
 it('shares CUDA backend qualification only for matching provider and source model identity', async () => {
@@ -133,4 +133,22 @@ it('yields Intel before granting an Intel model reservation',async()=>{
  expect(igpu.enabled).toBe(false);expect(igpu.process.stopAndWait).toHaveBeenCalledOnce()
  expect(npu.enabled).toBe(false)
  release();expect(npu.enabled).toBe(true)
+})
+
+it('feeds idle NPU even when a faster CUDA worker can take every serial arrival',async()=>{
+ const {manager,cpu,npu,igpu,cuda}=fixture()
+ igpu.enabled=false
+ npu.device.medianMs=1000;cuda.device.medianMs=1
+ for(let i=0;i<6;i++)await manager.recognize(Buffer.from('page'))
+ expect(npu.process.request).toHaveBeenCalled()
+ expect(cuda.process.request).toHaveBeenCalled()
+ expect(cpu.process.request).not.toHaveBeenCalled()
+})
+it('sends a page to idle NPU before queueing behind busy CUDA',async()=>{
+ const {manager,npu,igpu,cuda}=fixture()
+ igpu.enabled=false;cuda.pending=1;npu.device.medianMs=1000
+ expect(await manager.recognize(Buffer.from('page'))).toBe('OCR evidence')
+ expect(npu.process.request).toHaveBeenCalledOnce()
+ expect(cuda.process.request).not.toHaveBeenCalled()
+ cuda.pending=0
 })

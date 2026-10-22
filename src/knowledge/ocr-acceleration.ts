@@ -15,7 +15,7 @@ import { StructureProcess } from './structure-process.js'
 
 interface Device { device: string; name: string; qualified: boolean; medianMs?: number; error?: string; enabled?: boolean; pending?: number; completed?: number }
 export interface OcrAccelerationStatus { status: 'not_installed' | 'installing' | 'ready' | 'error'; message: string; devices: Device[] }
-interface Lane { device: Device; process: StructureProcess; pending: number; tail: Promise<unknown>; samples: number[]; runs: number; failed: boolean; enabled: boolean; current?: Promise<unknown>; retryAt?: number; completed?: number }
+interface Lane { device: Device; process: StructureProcess; pending: number; tail: Promise<unknown>; samples: number[]; runs: number; failed: boolean; enabled: boolean; current?: Promise<unknown>; retryAt?: number; completed?: number; lastAssigned?: number }
 const script = (name: string) => fileURLToPath(new URL(`../../scripts/${name}`, import.meta.url))
 export function ocrDeviceWorkActive(foreground: number, usedAt: number, pending: number, now = Date.now()): boolean {
   return foreground === 0 && (now - usedAt < 300_000 || pending > 0)
@@ -157,13 +157,20 @@ export class OcrAcceleration {
       if(!healthy.length)return undefined
       const accelerators=healthy.filter(lane=>lane.device.device!=='CPU')
       const pool=accelerators.length?accelerators:healthy
-      const choices=pool.filter(lane=>lane.pending < (lane.device.device.startsWith('CUDA') ? 16 : 1)).sort((a,b)=>(a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!)
+      const choices=pool.filter(lane=>lane.pending < (lane.device.device.startsWith('CUDA') ? 16 : 1)).sort((a,b)=>{
+        // Keep each idle accelerator fed. Timing-only ranking can starve an
+        // NPU forever when CUDA workers repeatedly become available first.
+        if ((a.pending===0)!==(b.pending===0)) return a.pending===0?-1:1
+        if (a.pending===0 && b.pending===0) return (a.lastAssigned??0)-(b.lastAssigned??0) || a.device.medianMs!-b.device.medianMs!
+        return (a.pending+1)*a.device.medianMs!-(b.pending+1)*b.device.medianMs!
+      })
       lane=choices[0]
       // Busy is not failure. Backpressure avoids spawning extra CPU fallback
       // workers alongside the foreground eight-thread CPU session.
       if(!lane)await new Promise(resolve=>setTimeout(resolve,5))
     }
     lane.pending++
+    lane.lastAssigned=Date.now()
     const task = async (): Promise<string | undefined> => {
       try {
         if (this.stopped) return undefined
