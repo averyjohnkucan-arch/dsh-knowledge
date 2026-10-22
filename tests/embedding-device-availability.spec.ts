@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { IntelEmbeddingAvailability, foreignNvidiaGraphics, intelActivityAvailable, parseIntelActivity, nvidiaMemorySufficient } from '../src/knowledge/embedding-device-availability.js'
+import { NvidiaActivityProbe, IntelEmbeddingAvailability, foreignNvidiaGraphics, intelActivityAvailable, parseIntelActivity, nvidiaMemorySufficient } from '../src/knowledge/embedding-device-availability.js'
 describe('embedding GPU availability', () => {
   it('requires launch headroom without evicting its own already resident workers', () => {
     expect(nvidiaMemorySufficient(3000,false)).toBe(false)
@@ -59,3 +59,26 @@ it('allows known desktop rendering but still yields to compute activity and unkn
   expect(results.map(value=>value.available)).toEqual([true,false])
   expect(probe).toHaveBeenCalledTimes(2)
  })
+
+it('shares concurrent NVIDIA reads without caching completed hardware samples',async()=>{
+ const finish:Array<(text:string)=>void>=[]
+ const query=vi.fn((_args:string[])=>new Promise<string>(resolve=>finish.push(resolve)))
+ const probe=new NvidiaActivityProbe(query)
+ const first=probe.sample(),second=probe.sample()
+ expect(first).toBe(second)
+ const count=process.platform==='linux'?3:2
+ expect(query).toHaveBeenCalledTimes(count)
+ finish.splice(0).forEach(resolve=>resolve('sample'))
+ expect(await first).toMatchObject({apps:'sample',memory:'sample'})
+ const next=probe.sample()
+ expect(next).not.toBe(first)
+ expect(query).toHaveBeenCalledTimes(count*2)
+ finish.splice(0).forEach(resolve=>resolve('fresh'))
+ expect(await next).toMatchObject({apps:'fresh',memory:'fresh'})
+})
+it('retries NVIDIA monitoring after a rejected hardware query',async()=>{
+ const query=vi.fn(async(_args:string[])=>'fresh').mockRejectedValueOnce(new Error('unavailable'))
+ const probe=new NvidiaActivityProbe(query)
+ await expect(probe.sample()).rejects.toThrow('unavailable')
+ expect(await probe.sample()).toMatchObject({apps:'fresh',memory:'fresh'})
+})

@@ -95,21 +95,32 @@ export function foreignNvidiaGraphics(text: string, owned: ReadonlySet<number>):
 export function nvidiaMemorySufficient(freeMiB: number, hasOwnedWorker: boolean): boolean {
   return Number.isFinite(freeMiB) && freeMiB >= (hasOwnedWorker ? 1024 : 4096)
 }
+/** Share in-flight hardware reads, but evaluate ownership separately for every caller.
+ * No completed sample is cached: model reservations and VRAM can change immediately. */
+export class NvidiaActivityProbe {
+  private pending?: Promise<{apps:string;memory:string;graphics:string}>
+  constructor(private readonly query = async (args: string[]) =>
+    (await exec('nvidia-smi',args,{timeout:2500,windowsHide:true})).stdout) {}
+  sample(): Promise<{apps:string;memory:string;graphics:string}> {
+    if (this.pending) return this.pending
+    this.pending = Promise.all([
+      this.query(['--query-compute-apps=pid','--format=csv,noheader,nounits']),
+      this.query(['--query-gpu=memory.free','--format=csv,noheader,nounits']),
+      process.platform === 'linux' ? this.query(['pmon','-s','u','-c','1']) : Promise.resolve(''),
+    ]).then(([apps,memory,graphics]) => ({apps,memory,graphics})).finally(() => { this.pending=undefined })
+    return this.pending
+  }
+}
+const nvidiaActivity = new NvidiaActivityProbe()
 export async function nvidiaEmbeddingAvailability(owned: ReadonlySet<number> | (()=>ReadonlySet<number>)): Promise<DeviceAvailability> {
   const currentOwned=()=>backgroundDevicePids(typeof owned==='function'?owned():owned)
   try {
-    const [{stdout:apps},{stdout:memory}]=await Promise.all([
-      exec('nvidia-smi',['--query-compute-apps=pid','--format=csv,noheader,nounits'],{timeout:2000,windowsHide:true}),
-      exec('nvidia-smi',['--query-gpu=memory.free','--format=csv,noheader,nounits'],{timeout:2000,windowsHide:true}),
-    ])
+    const {apps,memory,graphics}=await nvidiaActivity.sample()
     const owners=currentOwned()
     if (apps.split(/\s+/).filter(Boolean).some(pid=>!/^\d+$/.test(pid)||!owners.has(Number(pid)))) return {available:false,reason:'Another inference process reserves the main GPU'}
     const freeMiB=Number(memory.trim().split('\n')[0]),ownGpu=apps.split(/\s+/).some(pid=>owners.has(Number(pid)))
     if (!nvidiaMemorySufficient(freeMiB,ownGpu)) return {available:false,reason:'Not enough free VRAM for background embeddings'}
-    if (process.platform==='linux') {
-      const {stdout}=await exec('nvidia-smi',['pmon','-s','u','-c','1'],{timeout:2500})
-      if (foreignNvidiaGraphics(stdout,currentOwned())) return {available:false,reason:'Another graphics application is using the main GPU'}
-    }
+    if (process.platform==='linux' && foreignNvidiaGraphics(graphics,currentOwned())) return {available:false,reason:'Another graphics application is using the main GPU'}
     return {available:true,reason:'Main GPU is available for background embedding',freeMiB}
   } catch {return {available:false,reason:'Main GPU availability could not be verified'}}
 }
