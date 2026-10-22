@@ -377,8 +377,26 @@ export class ChunkDatabase implements RetrievalLane {
       END;`)
     this.migrateEmbeddingHashColumn()
     this.migrateFtsRowidColumn()
+    this.migrateFtsUpdateGuard()
     this.migrateEvidenceColumns()
     this.migrateFromBundleLayout()
+  }
+
+  /** Vector-only upserts name search_text even when its value is unchanged.
+   * Do not generate trigram deletes/inserts for those embedding checkpoints. */
+  private migrateFtsUpdateGuard(): void {
+    if (this.readMeta('fts_update_guard') === '1') return
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.exec(`DROP TRIGGER IF EXISTS chunk_au;
+        CREATE TRIGGER chunk_au AFTER UPDATE OF search_text ON chunk
+        WHEN OLD.search_text IS NOT NEW.search_text BEGIN
+          INSERT INTO chunk_fts(chunk_fts, rowid, search_text) VALUES ('delete', OLD.fts_rowid, OLD.search_text);
+          INSERT INTO chunk_fts(rowid, search_text) VALUES (NEW.fts_rowid, NEW.search_text);
+        END`)
+      this.writeMeta('fts_update_guard', '1')
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
 
   private migrateEvidenceColumns(): void {
@@ -806,34 +824,68 @@ export class ChunkDatabase implements RetrievalLane {
 
   /** Durable candidate batches remain invisible to both retrieval lanes. */
   stageDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[]): void {
-    validateDocumentGeneration(doc, chunks)
-    const revision = doc.processing?.revision ?? `legacy:${doc.updatedAt}`
+    const [error] = this.stageDocumentGenerations([{ doc, chunks }])
+    if (error) throw error
+  }
+
+  stageDocumentGenerations(entries: readonly { doc: KnowledgeDocument; chunks: KnowledgeChunk[] }[]): Array<Error | undefined> {
+    if (!entries.length) return []
+    const errors: Array<Error | undefined> = []
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      const previous = this.db.prepare('SELECT revision FROM document_generation_stage WHERE doc_id = ?').get(doc.id) as { revision: string } | undefined
-      if (previous !== undefined && previous.revision !== revision) {
-        this.db.prepare('DELETE FROM document_generation_chunk WHERE doc_id = ?').run(doc.id)
+      for (const { doc, chunks } of entries) {
+        this.db.exec('SAVEPOINT checkpoint_item')
+        try {
+          this.stageDocumentGenerationRows(doc, chunks)
+          this.db.exec('RELEASE checkpoint_item'); errors.push(undefined)
+        } catch (error) {
+          this.db.exec('ROLLBACK TO checkpoint_item'); this.db.exec('RELEASE checkpoint_item')
+          errors.push(error instanceof Error ? error : new Error(String(error)))
+        }
       }
-      this.db.prepare(`INSERT INTO document_generation_stage(doc_id, base_id, revision, next_document) VALUES (?, ?, ?, ?)
-        ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, revision = excluded.revision, next_document = excluded.next_document
-        WHERE base_id IS NOT excluded.base_id OR revision IS NOT excluded.revision OR next_document IS NOT excluded.next_document`)
-        .run(doc.id, doc.baseId, revision, JSON.stringify(doc))
-      const insert = this.db.prepare(`INSERT INTO document_generation_chunk(doc_id, chunk_id, chunk_json, embedding_text_hash, embedding_model, embedding)
-        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(doc_id, chunk_id) DO UPDATE SET chunk_json = excluded.chunk_json,
-        embedding_text_hash = excluded.embedding_text_hash, embedding_model = excluded.embedding_model, embedding = excluded.embedding`)
-      for (const chunk of chunks) insert.run(doc.id, chunk.id, JSON.stringify(chunk),
-        chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
-        chunk.embeddingModel ?? null, chunk.embedding !== undefined ? encodeEmbedding(chunk.embedding) : null)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return errors
+  }
+
+  private stageDocumentGenerationRows(doc: KnowledgeDocument, chunks: KnowledgeChunk[]): void {
+    validateDocumentGeneration(doc, chunks)
+    const revision = doc.processing?.revision ?? `legacy:${doc.updatedAt}`
+    const previous = this.db.prepare('SELECT revision FROM document_generation_stage WHERE doc_id = ?').get(doc.id) as { revision: string } | undefined
+    if (previous !== undefined && previous.revision !== revision) {
+      this.db.prepare('DELETE FROM document_generation_chunk WHERE doc_id = ?').run(doc.id)
+    }
+    this.db.prepare(`INSERT INTO document_generation_stage(doc_id, base_id, revision, next_document) VALUES (?, ?, ?, ?)
+      ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, revision = excluded.revision, next_document = excluded.next_document
+      WHERE base_id IS NOT excluded.base_id OR revision IS NOT excluded.revision OR next_document IS NOT excluded.next_document`)
+      .run(doc.id, doc.baseId, revision, JSON.stringify(doc))
+    const insert = this.db.prepare(`INSERT INTO document_generation_chunk(doc_id, chunk_id, chunk_json, embedding_text_hash, embedding_model, embedding)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(doc_id, chunk_id) DO UPDATE SET chunk_json = excluded.chunk_json,
+      embedding_text_hash = excluded.embedding_text_hash, embedding_model = excluded.embedding_model, embedding = excluded.embedding
+      WHERE chunk_json IS NOT excluded.chunk_json OR embedding_text_hash IS NOT excluded.embedding_text_hash
+        OR embedding_model IS NOT excluded.embedding_model OR embedding IS NOT excluded.embedding`)
+    for (const chunk of chunks) {
+      // The vector already has a compact binary column. Avoid serializing it
+      // a second time as ~20 KB of decimal JSON for every 1024-D checkpoint.
+      const { embedding, ...metadata } = chunk
+      insert.run(doc.id, chunk.id, JSON.stringify(metadata),
+      chunk.embedding !== undefined ? hashEmbeddingText(searchTextOf(chunk)) : null,
+      chunk.embeddingModel ?? null, embedding !== undefined ? encodeEmbedding(embedding) : null)
+    }
   }
 
   getStagedDocumentGeneration(docId: string): StagedDocumentGeneration | undefined {
     const row = this.db.prepare('SELECT next_document FROM document_generation_stage WHERE doc_id = ?').get(docId) as { next_document: string } | undefined
     if (row === undefined) return undefined
-    const rows = this.db.prepare('SELECT chunk_json FROM document_generation_chunk WHERE doc_id = ?').all(docId) as Array<{ chunk_json: string }>
+    const rows = this.db.prepare('SELECT chunk_json, embedding FROM document_generation_chunk WHERE doc_id = ?').all(docId) as Array<{ chunk_json: string; embedding: Buffer | null }>
     return { document: JSON.parse(row.next_document) as KnowledgeDocument,
-      chunks: rows.map(row => JSON.parse(row.chunk_json) as KnowledgeChunk).sort((a, b) => a.index - b.index) }
+      chunks: rows.map(row => {
+        const chunk = JSON.parse(row.chunk_json) as KnowledgeChunk
+        // Old checkpoints retain their original JSON vector; new ones use the
+        // same float32 representation as the published retrieval store.
+        const embedding = chunk.embedding ?? decodeEmbedding(row.embedding)
+        return embedding === undefined ? chunk : { ...chunk, embedding }
+      }).sort((a, b) => a.index - b.index) }
   }
 
   /** Publish a single generation through the same atomic RAM-batch path. */

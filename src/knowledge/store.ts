@@ -390,6 +390,7 @@ class DomainStore implements Store {
     return flush
   }
 
+  private stagingBatch?: { bytes: number; items: Array<{ doc: KnowledgeDocument; chunks: KnowledgeChunk[]; resolve(): void; reject(error: unknown): void }> }
   private documentWriteChain: Promise<void> = Promise.resolve()
   private metadataBatch?: Array<{ doc: KnowledgeDocument; resolve(): void; reject(error: unknown): void }>
   constructor(
@@ -503,6 +504,8 @@ class DomainStore implements Store {
   }
 
   private writeDocuments<T>(operation: () => Promise<T>): Promise<T> {
+    // A different mutation ends the coalescing window, preserving FIFO order.
+    this.stagingBatch = undefined
     // A different mutation is an ordering barrier for metadata coalescing.
     this.metadataBatch = undefined
     // A large import can keep resolving SQLite writes synchronously through
@@ -517,12 +520,28 @@ class DomainStore implements Store {
   }
 
   stageDocumentGeneration(doc: KnowledgeDocument, chunks: KnowledgeChunk[]): Promise<void> {
-    return this.writeDocuments(async () => {
-      const current = this.documents.get(doc.id)
-      if (current === undefined || current.baseId !== doc.baseId || current.createdAt !== doc.createdAt || this.getBase(doc.baseId) === undefined) {
-        throw new Error('document_generation_target_missing')
-      }
-      this.chunkDb.stageDocumentGeneration(doc, chunks)
+    if (this.closing) return Promise.reject(new Error('Knowledge store is closing'))
+    const bytes = (doc.rawText?.length ?? 0) * 2 + chunks.reduce((n, c) => n + c.text.length * 2 + (c.embedding?.length ?? 0) * 8 + 1024, 2048)
+    let batch = this.stagingBatch
+    if (!batch || batch.items.length >= 128 || batch.bytes + bytes > 16 * 1024 ** 2) {
+      batch = { bytes: 0, items: [] }
+      const currentBatch = batch
+      void this.writeDocuments(async () => {
+        if (this.stagingBatch === currentBatch) this.stagingBatch = undefined
+        const valid: typeof currentBatch.items = []
+        for (const item of currentBatch.items) {
+          const current = this.documents.get(item.doc.id)
+          if (!current || current.baseId !== item.doc.baseId || current.createdAt !== item.doc.createdAt || !this.getBase(item.doc.baseId)) {
+            item.reject(new Error('document_generation_target_missing'))
+          } else valid.push(item)
+        }
+        const errors = this.chunkDb.stageDocumentGenerations(valid)
+        valid.forEach((item, index) => errors[index] ? item.reject(errors[index]) : item.resolve())
+      }).catch(error => { for (const item of currentBatch.items) item.reject(error) })
+      this.stagingBatch = batch
+    }
+    return new Promise<void>((resolve, reject) => {
+      batch!.items.push({ doc, chunks, resolve, reject }); batch!.bytes += bytes
     })
   }
 

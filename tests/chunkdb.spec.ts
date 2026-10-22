@@ -483,3 +483,49 @@ it('inserts fresh passages in bounded SQL groups without losing text, IDs or rol
     raw.exec("INSERT INTO chunk_fts(chunk_fts,rank) VALUES('integrity-check',1)")
   } finally {prepare.mockRestore();db.close()}
 })
+
+it('does not rewrite trigram postings for vector-only checkpoints, but still indexes text edits', async () => {
+  const db = open(), raw = (db as unknown as {db: DatabaseSync}).db
+  try {
+    const chunk = {id:'io',docId:'io-doc',baseId:'io-base',index:0,text:'unchanged astronomy evidence',embedding:[1,0],embeddingModel:'m'}
+    db.putChunkBatch([chunk])
+    const before=raw.prepare('SELECT * FROM chunk_fts_data ORDER BY id').all()
+    db.putChunkBatch([{...chunk,embedding:[0,1]}])
+    expect(raw.prepare('SELECT * FROM chunk_fts_data ORDER BY id').all()).toEqual(before)
+    db.putChunkBatch([{...chunk,text:'replacement oceanography evidence'}])
+    expect((await db.lexical('oceanography',['io-base'],10)).hits).toHaveLength(1)
+    expect((await db.lexical('astronomy',['io-base'],10)).hits).toHaveLength(0)
+    raw.exec("INSERT INTO chunk_fts(chunk_fts,rank) VALUES('integrity-check',1)")
+  } finally {db.close()}
+})
+
+it('stores checkpoint vectors once, preserves legacy checkpoints, and skips unchanged checkpoint writes', () => {
+  const db=open(),raw=(db as unknown as {db:DatabaseSync}).db
+  try {
+    const doc={id:'compact',baseId:'b',title:'Compact',sourceType:'text' as const,charCount:5,chunkCount:1,createdAt:1,updatedAt:2}
+    const chunk={id:'c',docId:doc.id,baseId:'b',index:0,text:'hello',embedding:Array.from({length:1024},(_,i)=>Math.sin(i)),embeddingModel:'m'}
+    db.stageDocumentGeneration(doc,[chunk])
+    const row=raw.prepare('SELECT chunk_json, length(embedding) AS bytes FROM document_generation_chunk').get() as {chunk_json:string;bytes:number}
+    expect(JSON.parse(row.chunk_json).embedding).toBeUndefined();expect(row.bytes).toBe(4096)
+    expect(row.chunk_json.length).toBeLessThan(JSON.stringify(chunk).length/10)
+    expect(db.getStagedDocumentGeneration(doc.id)?.chunks[0].embedding).toEqual(Array.from(new Float32Array(chunk.embedding)))
+    const changes=raw.prepare('SELECT total_changes() AS n').get()
+    db.stageDocumentGeneration(doc,[chunk])
+    expect(raw.prepare('SELECT total_changes() AS n').get()).toEqual(changes)
+    raw.prepare('UPDATE document_generation_chunk SET chunk_json=?').run(JSON.stringify(chunk))
+    expect(db.getStagedDocumentGeneration(doc.id)?.chunks[0].embedding).toEqual(chunk.embedding)
+  } finally {db.close()}
+})
+
+it('groups durable checkpoints in one transaction with per-document rollback', () => {
+  const db=open(),raw=(db as unknown as {db:DatabaseSync}).db,exec=vi.spyOn(raw,'exec')
+  try {
+    const doc={id:'ok',baseId:'b',title:'Checkpoint',sourceType:'text' as const,charCount:5,chunkCount:1,createdAt:1,updatedAt:2}
+    const chunk={id:'c',docId:'ok',baseId:'b',index:0,text:'hello'}
+    const errors=db.stageDocumentGenerations([{doc,chunks:[chunk]},{doc:{...doc,id:'bad'},chunks:[chunk]}])
+    expect(errors[0]).toBeUndefined();expect(errors[1]).toBeInstanceOf(Error)
+    expect(exec.mock.calls.filter(([sql])=>sql==='BEGIN IMMEDIATE')).toHaveLength(1)
+    expect(db.getStagedDocumentGeneration('ok')?.chunks).toEqual([chunk])
+    expect(db.getStagedDocumentGeneration('bad')).toBeUndefined()
+  } finally {exec.mockRestore();db.close()}
+})
