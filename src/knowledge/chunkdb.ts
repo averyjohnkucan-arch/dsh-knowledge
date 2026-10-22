@@ -518,7 +518,7 @@ export class ChunkDatabase implements RetrievalLane {
         try {
           const pending = this.pendingDocumentGeneration(doc.id)
           if (pending !== undefined && doc.processing?.revision !== pending.document.processing?.revision) throw new Error('stale_document_generation')
-          this.putDocumentMetadata(doc)
+          this.putDocumentMetadataRows(doc)
           if (pending !== undefined) this.acknowledgeDocumentGeneration(doc.id)
           this.db.exec('RELEASE metadata_item')
           errors.push(undefined)
@@ -533,12 +533,21 @@ export class ChunkDatabase implements RetrievalLane {
   }
 
   putDocumentMetadata(document: KnowledgeDocument): void {
-    const valid = documentSchema.parse(document)
-    const { rawText, ...header } = valid
-    // Keep large source text on separate pages from frequently changed status
-    // headers. Legacy inline text is moved lazily and atomically on first write.
     this.db.exec('SAVEPOINT document_metadata_text')
     try {
+      this.putDocumentMetadataRows(document)
+      this.db.exec('RELEASE document_metadata_text')
+    } catch (error) {
+      this.db.exec('ROLLBACK TO document_metadata_text')
+      this.db.exec('RELEASE document_metadata_text')
+      throw error
+    }
+  }
+
+  /** Caller owns rollback. Nested savepoints flush pending FTS terms and defeat batching. */
+  private putDocumentMetadataRows(document: KnowledgeDocument): void {
+    const valid = documentSchema.parse(document)
+    const {rawText, ...header} = valid
       if (rawText !== undefined) this.db.prepare(`INSERT INTO knowledge_document_text(doc_id, raw_text) VALUES (?, ?)
         ON CONFLICT(doc_id) DO UPDATE SET raw_text=excluded.raw_text WHERE raw_text IS NOT excluded.raw_text`).run(valid.id, rawText)
       else this.db.prepare('DELETE FROM knowledge_document_text WHERE doc_id=?').run(valid.id)
@@ -546,12 +555,6 @@ export class ChunkDatabase implements RetrievalLane {
         ON CONFLICT(doc_id) DO UPDATE SET base_id=excluded.base_id, header=excluded.header, raw_text=NULL
         WHERE base_id IS NOT excluded.base_id OR header IS NOT excluded.header OR raw_text IS NOT NULL`)
         .run(valid.id, valid.baseId, JSON.stringify(header))
-      this.db.exec('RELEASE document_metadata_text')
-    } catch (error) {
-      this.db.exec('ROLLBACK TO document_metadata_text')
-      this.db.exec('RELEASE document_metadata_text')
-      throw error
-    }
   }
 
   getDocumentMetadata(id: string): KnowledgeDocument | undefined {
@@ -898,6 +901,26 @@ export class ChunkDatabase implements RetrievalLane {
    * Nothing is acknowledged or added to the vector cache before COMMIT. */
   publishDocumentGenerations(entries: readonly { doc: KnowledgeDocument; chunks: KnowledgeChunk[]; previousCreatedAt: number; atomicMetadata?: boolean }[]): Array<Error | undefined> {
     if (!entries.length) return []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const entry of entries) this.publishDocumentGenerationRows(entry.doc, entry.chunks, entry.previousCreatedAt, entry.atomicMetadata ?? false)
+    } catch {
+      // Retry exceptional batches with per-document isolation. The normal path
+      // needs only one FTS flush; failure still cannot poison healthy neighbours.
+      this.db.exec('ROLLBACK')
+      return this.publishDocumentGenerationsIsolated(entries)
+    }
+    try { this.db.exec('COMMIT') }
+    catch (error) { this.db.exec('ROLLBACK'); throw error }
+    for (const entry of entries) {
+      this.dropVectorCacheByDoc(entry.doc.id)
+      for (const chunk of entry.chunks) this.upsertVectorCache(chunk)
+    }
+    return entries.map(() => undefined)
+  }
+
+  private publishDocumentGenerationsIsolated(entries: readonly { doc: KnowledgeDocument; chunks: KnowledgeChunk[]; previousCreatedAt: number; atomicMetadata?: boolean }[]): Array<Error | undefined> {
+    if (!entries.length) return []
     const errors: Array<Error | undefined> = []
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -986,7 +1009,7 @@ export class ChunkDatabase implements RetrievalLane {
       }
     }
     if (atomicMetadata) {
-      this.putDocumentMetadata(doc)
+      this.putDocumentMetadataRows(doc)
       this.db.prepare('DELETE FROM document_generation_commit WHERE doc_id=?').run(doc.id)
     } else this.db.prepare(`INSERT INTO document_generation_commit(doc_id, base_id, previous_created_at, next_document) VALUES (?, ?, ?, ?)
       ON CONFLICT(doc_id) DO UPDATE SET base_id = excluded.base_id, previous_created_at = excluded.previous_created_at, next_document = excluded.next_document`)

@@ -380,7 +380,7 @@ it('file-backed vector search runs outside the event loop and preserves filters 
  }finally{db.close();await rm(dir,{recursive:true,force:true})}
 },15000)
 
-it('batches publications in one WAL transaction and isolates invalid documents with savepoints', async () => {
+it('rolls back a failed fast batch and isolates invalid documents without losing healthy neighbours', async () => {
   const db=open(),raw=(db as unknown as {db:DatabaseSync}).db
   const exec=vi.spyOn(raw,'exec')
   try {
@@ -392,7 +392,8 @@ it('batches publications in one WAL transaction and isolates invalid documents w
       {doc:doc('two'),chunks:chunks('two'),previousCreatedAt:1,atomicMetadata:true},
     ])
     expect(errors[0]).toBeUndefined();expect(errors[1]).toBeInstanceOf(Error);expect(errors[2]).toBeUndefined()
-    expect(exec.mock.calls.filter(([sql])=>sql==='BEGIN IMMEDIATE')).toHaveLength(1)
+    expect(exec.mock.calls.filter(([sql])=>sql==='BEGIN IMMEDIATE')).toHaveLength(2)
+    expect(exec.mock.calls.filter(([sql])=>sql==='ROLLBACK')).toHaveLength(1)
     expect(exec.mock.calls.filter(([sql])=>sql==='COMMIT')).toHaveLength(1)
     expect(db.getDocumentMetadata('bad')).toBeUndefined()
     expect((await db.lexical('source',['b'],10)).hits.map(hit=>hit.docId).sort()).toEqual(['one','two'])
@@ -528,4 +529,18 @@ it('groups durable checkpoints in one transaction with per-document rollback', (
     expect(db.getStagedDocumentGeneration('ok')?.chunks).toEqual([chunk])
     expect(db.getStagedDocumentGeneration('bad')).toBeUndefined()
   } finally {exec.mockRestore();db.close()}
+})
+
+it('publishes healthy batches without flushing FTS through nested savepoints', async () => {
+ const db=open(),raw=(db as unknown as {db:DatabaseSync}).db
+ const exec=vi.spyOn(raw,'exec')
+ try {
+  const entries=Array.from({length:32},(_,i)=>({doc:{id:`fast-${i}`,baseId:'b',title:'test',sourceType:'text' as const,charCount:12,chunkCount:1,createdAt:1,updatedAt:2},chunks:[{id:`fast-chunk-${i}`,docId:`fast-${i}`,baseId:'b',index:0,text:'Searchable evidence'}],previousCreatedAt:1,atomicMetadata:true}))
+  expect(db.publishDocumentGenerations(entries).every(error=>error===undefined)).toBe(true)
+  expect(exec.mock.calls.some(([sql])=>String(sql).startsWith('SAVEPOINT'))).toBe(false)
+  expect(exec.mock.calls.filter(([sql])=>sql==='COMMIT')).toHaveLength(1)
+  for(const entry of entries)expect(db.getDocumentMetadata(entry.doc.id)?.chunkCount).toBe(1)
+  expect((await db.lexical('Searchable',['b'],50)).hits).toHaveLength(32)
+  raw.exec("INSERT INTO chunk_fts(chunk_fts,rank) VALUES('integrity-check',1)")
+ }finally{exec.mockRestore();db.close()}
 })

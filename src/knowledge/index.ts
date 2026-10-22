@@ -2721,6 +2721,9 @@ export class KnowledgeService extends Service {
     this.processingControllers.set(root.id,controller)
     const config = this.getConfigFor(root.baseId)
     const skipped = new Set<string>()
+    const sourceSizes = new Map<string, number>()
+    const lightweightImport = jobs.every(job => /\.(?:md|markdown|mdx|txt|csv|json|html?|xml)$/i.test(job.fileName))
+    const largeTextChunks = new ProcessingQueue(this.processingConcurrency)
     let missingVectors: ReadonlySet<string> = new Set()
     const check = () => {
       controller.signal.throwIfAborted()
@@ -2736,7 +2739,7 @@ export class KnowledgeService extends Service {
     }
     try {
       await runImportStages({items:jobs,signal:controller.signal,
-        concurrency:stage=>stage==='ocr'?this.processingConcurrency:stage==='parsing'?Math.max(2,this.processingConcurrency):stage==='chunking'?this.processingConcurrency*4:8,
+        concurrency:stage=>stage==='ocr'?this.processingConcurrency:stage==='parsing'?Math.max(2,this.processingConcurrency):stage==='chunking'?(lightweightImport?128:this.processingConcurrency*4):8,
         progress:progress=>{this.importStageProgress.set(root.id,{...progress,baseId:root.baseId})},
         enterStage:async stage=>{
           check()
@@ -2759,6 +2762,7 @@ export class KnowledgeService extends Service {
           check()
           if(stage==='ocr') {
             const fileStat=await stat(job.id),old=job.existing
+            sourceSizes.set(job.id,fileStat.size)
             const signature=`${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
             if(old && !old.incomplete && !old.embeddingError && old.sourceSignature===signature && old.indexingSettingsFingerprint===indexingSettingsFingerprint(config)) {skipped.add(job.id);return}
             const source=await bytes(job)
@@ -2775,9 +2779,15 @@ export class KnowledgeService extends Service {
             await checkpoints.save(job.id,'parsing',enriched)
             await checkpoints.remove(job.id,'ocr')
           } else if(stage==='chunking') {
-            const output=skipped.has(job.id)?null:await checkpoints.load(job.id,'parsing')
-            await this.preparedImport.run(output,job.run)
-            if(output)await checkpoints.remove(job.id,'parsing')
+            const publish = async () => {
+              const output=skipped.has(job.id)?null:await checkpoints.load(job.id,'parsing')
+              await this.preparedImport.run(output,job.run)
+              if(output)await checkpoints.remove(job.id,'parsing')
+            }
+            // Fill the 128-document writer batch for small text files without
+            // allowing equally many large texts to retain chunks and artifacts.
+            if(lightweightImport && (sourceSizes.get(job.id) ?? Infinity)>256*1024) await largeTextChunks.run(publish,signal)
+            else await publish()
           } else {
             const documentId=job.documentId(),document=documentId?this.requireStore().getDocument(documentId):undefined
             if(!document || document.incomplete)throw new Error('Document did not complete publication')
