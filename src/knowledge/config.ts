@@ -13,6 +13,8 @@ import type { DocumentProcessor, MineruTier } from './processing-types.js'
 
 export interface Config {
   ocrEnabled?: boolean
+  deferredPhotoCaptions?: boolean
+  deferredPhotoCaptionModel?: string
   deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
   embeddingProvider: EmbeddingProvider
@@ -115,6 +117,8 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   ocrEnabled: Schema.boolean().default(true),
+  deferredPhotoCaptions: Schema.boolean().default(false),
+  deferredPhotoCaptionModel: Schema.string().default(''),
   deferredChartEnrichment: Schema.boolean().default(false),
   structureV3Charts: Schema.boolean().default(true),
   embeddingProvider: Schema.union(['openai', 'ollama', 'local', 'none']).default('none'),
@@ -224,6 +228,8 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     conflictStrategy: overrides.conflictStrategy ?? config.conflictStrategy,
     urlRefreshHours: clampInt(overrides.urlRefreshHours ?? config.urlRefreshHours, 0, 24 * 365, 0),
     ocrEnabled: overrides.ocrEnabled ?? config.ocrEnabled ?? true,
+    deferredPhotoCaptions: overrides.deferredPhotoCaptions ?? config.deferredPhotoCaptions ?? false,
+    deferredPhotoCaptionModel: overrides.deferredPhotoCaptionModel ?? config.deferredPhotoCaptionModel ?? '',
     deferredChartEnrichment: overrides.deferredChartEnrichment ?? config.deferredChartEnrichment ?? false,
     structureV3Charts: overrides.structureV3Charts ?? config.structureV3Charts ?? true,
     imageCaptionProvider: overrides.imageCaptionProvider ?? config.imageCaptionProvider,
@@ -293,6 +299,8 @@ export function resolveConfigFor(config: Config, overrides: ConfigOverrides, bas
     conflictStrategy: baseConfig.conflictStrategy ?? resolved.conflictStrategy,
     urlRefreshHours: clampInt(baseConfig.urlRefreshHours ?? resolved.urlRefreshHours, 0, 24 * 365, 0),
     ocrEnabled: baseConfig.ocrEnabled ?? resolved.ocrEnabled ?? true,
+    deferredPhotoCaptions: baseConfig.deferredPhotoCaptions ?? resolved.deferredPhotoCaptions ?? false,
+    deferredPhotoCaptionModel: baseConfig.deferredPhotoCaptionModel ?? resolved.deferredPhotoCaptionModel ?? '',
     deferredChartEnrichment: baseConfig.deferredChartEnrichment ?? resolved.deferredChartEnrichment ?? false,
     structureV3Charts: baseConfig.structureV3Charts ?? resolved.structureV3Charts ?? true,
     imageCaptionProvider: baseConfig.imageCaptionProvider ?? resolved.imageCaptionProvider,

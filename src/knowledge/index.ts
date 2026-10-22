@@ -1,5 +1,5 @@
 import { IdleEnrichment } from './idle-enrichment.js'
-import { createManagedCaption } from './managed-caption.js'
+import { createManagedCaption, isManagedCaptionCall } from './managed-caption.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { ImportCheckpoints } from './import-checkpoints.js'
 import { runImportStages, type ImportStageProgress } from './import-stages.js'
@@ -325,7 +325,7 @@ export class KnowledgeService extends Service {
       const resourcePolicy=this.foregroundReservations ? 'Foreground inference reserves accelerators; background work uses CPU.'
         : pipeline.stage==='chunking' ? 'Chunking uses CPU text processing; GPU, iGPU and NPU have no compatible chunking kernel.'
         : pipeline.stage==='ocr' ? 'CPU, NVIDIA GPU and iGPU run OCR when available. Full-page NPU OCR is excluded by the current model checks; NPU layout runs in parsing.'
-        : pipeline.stage==='parsing' ? (this.getConfigFor(run.baseId).deferredChartEnrichment ? 'Detailed chart parsing is deferred until imports and vectorization finish and DSH is idle.' : this.getConfigFor(run.baseId).imageCaptionProvider === 'paddle' ? 'CPU and NVIDIA GPU interpret tables/charts; NPU and iGPU screen page layouts.' : 'Optional brief image descriptions use the selected vision provider; source text is already extracted.')
+        : pipeline.stage==='parsing' ? ((this.getConfigFor(run.baseId).deferredChartEnrichment || this.getConfigFor(run.baseId).deferredPhotoCaptions) ? 'Photo captions and chart parsing are deferred until imports and vectorization finish and DSH is idle.' : this.getConfigFor(run.baseId).imageCaptionProvider === 'paddle' ? 'CPU and NVIDIA GPU interpret tables/charts; NPU and iGPU screen page layouts.' : 'Optional brief image descriptions use the selected vision provider; source text is already extracted.')
         : !embeddingKey(this.getConfigFor(run.baseId)) ? 'No embedding model is selected; documents retain text and lexical chunks without vectors.'
         : 'Embedding devices depend on the selected model. The accelerated FP16 model supports CPU, NVIDIA GPU, iGPU and NPU; Intel input-length limits and other model reservations still apply.'
       const devices=pipeline.stage==='ocr'?this.ocrAcceleration.runtimeDevices():pipeline.stage==='parsing' && this.getConfigFor(run.baseId).imageCaptionProvider==='paddle' && !this.getConfigFor(run.baseId).deferredChartEnrichment?this.structureV3.runtimeDevices():pipeline.stage==='vectorization' && this.getConfigFor(run.baseId).embeddingProvider==='local'?(this.getConfigFor(run.baseId).embeddingModel===FP16_EMBEDDING_MODEL?embeddingFp16Acceleration:embeddingAcceleration).runtimeDevices():undefined
@@ -546,12 +546,20 @@ export class KnowledgeService extends Service {
   private async enrichNextIdleChart(signal: AbortSignal): Promise<boolean> {
     const store = this.requireStore()
     let document: KnowledgeDocument | undefined
-    for (const base of store.listBases()) {
-      if (!this.getConfigFor(base.id).deferredChartEnrichment || base.embeddingBackfillPending) continue
-      document = store.listDocuments(base.id, {includeRawText: false}).find(doc =>
-        doc.sourceType === 'file' && /\.pdf$/i.test(doc.fileName ?? doc.title)
-        && doc.processing && !doc.incomplete && !doc.embeddingError
-        && doc.deferredChartEnrichment?.revision !== doc.processing.revision)
+    let kind: 'photo' | 'chart' = 'photo'
+    let marker: 'deferredPhotoCaptions' | 'deferredChartEnrichment' = 'deferredPhotoCaptions'
+    // Complete the brief photo pass across the library before expensive charts.
+    for (const phase of ['photo', 'chart'] as const) {
+      kind = phase
+      marker = phase === 'photo' ? 'deferredPhotoCaptions' : 'deferredChartEnrichment'
+      for (const base of store.listBases()) {
+        if (!this.getConfigFor(base.id)[marker] || base.embeddingBackfillPending) continue
+        document = store.listDocuments(base.id, {includeRawText: false}).find(doc =>
+          doc.sourceType === 'file' && /\.pdf$/i.test(doc.fileName ?? doc.title)
+          && doc.processing && !doc.incomplete && !doc.embeddingError
+          && doc[marker]?.revision !== doc.processing.revision)
+        if (document) break
+      }
       if (document) break
     }
     if (!document?.processing) return false
@@ -561,7 +569,7 @@ export class KnowledgeService extends Service {
     this.deferredChartDocumentId = document.id
     this.indexing.set(document.id, {baseId: document.baseId, title: document.title, phase: 'parsing', total: 0, progress: 0})
     this.processingProgress.set(document.id, {stage: 'enriching'})
-    this.ctx.logger.info(`knowledge: idle chart enrichment started for ${document.id}`)
+    this.ctx.logger.info(`knowledge: idle ${kind} enrichment started for ${document.id}`)
     this.vectorPhaseDocuments.add(document.id)
     try {
       signal.throwIfAborted()
@@ -570,11 +578,13 @@ export class KnowledgeService extends Service {
       if (!bytes || createHash('sha256').update(bytes).digest('hex') !== document.processing.sourceHash) throw new Error('Chart source is missing or changed; reimport the document')
       const parsed = await this.artifacts.load(document.baseId, document.id, document.processing)
       const {captionPdfImages} = await import('./caption.js')
-      const caption = await captionPdfImages(bytes, {provider: 'paddle', model: 'PP-Chart2Table', baseUrl: '', apiKey: '', embeddingBaseUrl: '', charts: true, structureV3: this.structureV3, signal})
+      const captionConfig = this.getConfigFor(document.baseId)
+      if (kind === 'photo' && !captionConfig.deferredPhotoCaptionModel?.trim()) throw new Error('Select a managed vision model for idle photo captions')
+      const caption = await captionPdfImages(bytes, {provider: kind === 'photo' ? 'dsh' : 'paddle', model: kind === 'photo' ? captionConfig.deferredPhotoCaptionModel! : 'PP-Chart2Table', baseUrl: '', apiKey: '', embeddingBaseUrl: '', charts: true, structureV3: this.structureV3, managedCaption: this.managedCaption, strict: true, signal})
       signal.throwIfAborted()
       if (!unchanged()) return true
       if (!caption.trim()) {
-        await store.putDocument({...store.getDocument(document.id)!, deferredChartEnrichment: {revision, status: 'completed'}, updatedAt: Date.now()})
+        await store.putDocument({...store.getDocument(document.id)!, [marker]: {revision, status: 'completed'}, updatedAt: Date.now()})
         return true
       }
       const assets = []
@@ -586,8 +596,8 @@ export class KnowledgeService extends Service {
       const textStart = parsed.text.length + 2
       const text = `${parsed.text}\n\n${caption}`
       const enriched: ParsedDocument = {...parsed, text,
-        blocks: [...parsed.blocks, {id: 'deferred-chart-caption', index: parsed.blocks.length, type: 'caption', text: caption, textStart, textEnd: text.length}],
-        warnings: [...parsed.warnings, {code: 'generated_chart', message: 'Chart/table data was added by idle enrichment; verify values against the original.'}],
+        blocks: [...parsed.blocks, {id: `deferred-${kind}-caption`, index: parsed.blocks.length, type: 'caption', text: caption, textStart, textEnd: text.length}],
+        warnings: [...parsed.warnings, {code: `generated_${kind}`, message: 'Model-generated image or chart information was added by idle enrichment; verify against the original.'}],
       }
       const processing = await this.artifacts.save(document.baseId, document.id, {document: enriched, assets})
       const config = this.getConfigFor(document.baseId)
@@ -595,16 +605,19 @@ export class KnowledgeService extends Service {
       const built = await this.buildChunks(document.baseId, document.id, document.title, text, config, this.processingChunks(processed, config), undefined, signal, processing.revision)
       if (built.embeddingError) throw new Error('Chart embedding failed; original searchable generation retained')
       signal.throwIfAborted()
-      if (!unchanged() || !this.getConfigFor(document.baseId).deferredChartEnrichment) return true
+      if (!unchanged() || !this.getConfigFor(document.baseId)[marker]) return true
       const next: KnowledgeDocument = {...store.getDocument(document.id)!, rawText: text, processing,
         contentHash: sha256(text), charCount: text.length, tokenCount: estimateTokens(text), chunkCount: built.chunks.length,
-        deferredChartEnrichment: {revision: processing.revision, status: 'completed'}, updatedAt: Date.now()}
+        // Carry the other pass marker forward: merging photos must not restart charts, or vice versa.
+        ...(original.deferredPhotoCaptions?.revision === revision ? {deferredPhotoCaptions: {...original.deferredPhotoCaptions, revision: processing.revision}} : {}),
+        ...(original.deferredChartEnrichment?.revision === revision ? {deferredChartEnrichment: {...original.deferredChartEnrichment, revision: processing.revision}} : {}),
+        [marker]: {revision: processing.revision, status: 'completed'}, updatedAt: Date.now()}
       await this.commitIndexedGeneration(next, built.chunks, text, config, signal)
       await this.touchBase(document.baseId)
     } catch (error) {
       if (!signal.aborted && unchanged()) {
-        await store.putDocument({...store.getDocument(document.id)!, deferredChartEnrichment: {revision, status: 'failed'}, updatedAt: Date.now()})
-        this.ctx.logger.warn(`knowledge: optional chart enrichment failed for ${document.id}; searchable text retained`)
+        await store.putDocument({...store.getDocument(document.id)!, [marker]: {revision, status: 'failed'}, updatedAt: Date.now()})
+        this.ctx.logger.warn(`knowledge: optional ${kind} enrichment failed for ${document.id}; searchable text retained`)
       }
     } finally {
       this.indexing.delete(document.id)
@@ -3656,6 +3669,7 @@ export class KnowledgeService extends Service {
   // ── local model manager (settings "本地模型") ──────────────────────────────
 
   async enterEmbeddingForeground(yieldIgpu = false) {
+    if (isManagedCaptionCall()) return () => {}
     this.idleEnrichment.interrupt()
     this.foregroundReservations++; this.applyEmbeddingCpuTuning(this.getConfig())
     const releases = await Promise.allSettled([embeddingAcceleration.enterForeground(yieldIgpu), embeddingFp16Acceleration.enterForeground(yieldIgpu), this.ocrAcceleration.enterForeground(yieldIgpu), this.structureV3.enterForeground(), enterOcrPoolForeground()])

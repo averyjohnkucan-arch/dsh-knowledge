@@ -36,6 +36,8 @@ export interface BaseConfig {
   embeddingBatchSize?: number
   siblingChunks?: number
   ocrEnabled?: boolean
+  deferredPhotoCaptions?: boolean
+  deferredPhotoCaptionModel?: string
   deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
   documentProcessorProvider?: 'builtin' | 'mineru' | 'mineru-local'
@@ -238,6 +240,8 @@ export interface KnowledgeConfig {
   hfEndpoint: string
   mineruPythonIndexUrl?: string
   ocrEnabled?: boolean
+  deferredPhotoCaptions?: boolean
+  deferredPhotoCaptionModel?: string
   deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
   documentProcessorProvider: 'builtin' | 'mineru' | 'mineru-local'

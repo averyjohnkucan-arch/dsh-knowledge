@@ -76,6 +76,8 @@ export interface BaseConfig {
   readonly conflictStrategy?: 'keep' | 'replace' | 'rename'
   readonly urlRefreshHours?: number
   readonly ocrEnabled?: boolean
+  readonly deferredPhotoCaptions?: boolean
+  readonly deferredPhotoCaptionModel?: string
   readonly deferredChartEnrichment?: boolean
   readonly structureV3Charts?: boolean
   readonly imageCaptionProvider?: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'
@@ -197,6 +199,7 @@ export interface DeleteImpact {
 
 /** One imported document inside a knowledge base. */
 export interface KnowledgeDocument {
+  readonly deferredPhotoCaptions?: {readonly revision: string; readonly status: 'completed' | 'failed'}
   readonly deferredChartEnrichment?: {readonly revision: string; readonly status: 'completed' | 'failed'}
   /** Restart marker for a folder whose staged import has not settled. */
   readonly stagedImport?: { readonly startupAttempts: number }
@@ -337,6 +340,8 @@ export interface KnowledgeConfig {
   readonly localModelCacheDir: string
   /** Image/table captioning: `off` / `openai` (vision chat API) / `ollama` (local VLM). */
   readonly ocrEnabled?: boolean
+  readonly deferredPhotoCaptions?: boolean
+  readonly deferredPhotoCaptionModel?: string
   readonly deferredChartEnrichment?: boolean
   readonly structureV3Charts?: boolean
   readonly imageCaptionProvider: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'

@@ -39,3 +39,17 @@ it('validates the managed model before saving an attachment',async()=>{
  await expect(caption(new Uint8Array(),'invalid','Describe')).rejects.toThrow('provider/model')
  expect(saveImage).not.toHaveBeenCalled()
 })
+
+it('identifies its own host inference without hiding concurrent foreground calls',async()=>{
+ const {isManagedCaptionCall}=await import('../src/knowledge/managed-caption.js')
+ let release!:()=>void;const waiting=new Promise<void>(r=>{release=r})
+ const {caption}=setup(async function*(){
+  expect(isManagedCaptionCall()).toBe(true)
+  await waiting
+  expect(isManagedCaptionCall()).toBe(true)
+  yield {type:'text-delta',text:'A photo.'};yield {type:'finish',reason:{kind:'stop'}}
+ })
+ const task=caption(new Uint8Array(),'p/m','Describe')
+ await Promise.resolve();expect(isManagedCaptionCall()).toBe(false)
+ release();await task;expect(isManagedCaptionCall()).toBe(false)
+})

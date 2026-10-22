@@ -24,6 +24,7 @@ import { httpFetch } from './net.js'
 import { extractPdfImages, rgbaToPng } from './ocr.js'
 
 export interface CaptionConfig {
+  strict?: boolean
   managedCaption?: ManagedCaption
   structureV3?: StructureV3Manager
   charts?: boolean
@@ -75,6 +76,7 @@ export async function captionPdfImages(bytes: Uint8Array, config: CaptionConfig)
       })
   } catch (error) {
     console.warn(`[dsh-knowledge] caption image extraction failed: ${error instanceof Error ? error.message : String(error)}`)
+    if (config.strict) throw error
     return ''
   }
   if (images.length === 0) return ''
@@ -97,6 +99,7 @@ export async function captionPdfImages(bytes: Uint8Array, config: CaptionConfig)
   }
   if (failures > 0) {
     console.warn(`[dsh-knowledge] captioning failed for ${failures}/${images.length} image(s): ${firstError}`)
+    if (config.strict) throw new Error('Photo captioning failed; enrichment remains incomplete')
   }
   if (descriptions.length === 0) return ''
   return `\n\n[Document image/chart descriptions]\n${descriptions.join('\n')}`

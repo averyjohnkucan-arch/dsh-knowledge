@@ -9,3 +9,9 @@ The worker verifies that source bytes still match the saved extraction, preserve
 `imageCaptionProvider: dsh` optionally uses the host LLM and attachment services. Its model identifier is `provider/model`; the selected vision model must support reasoning off. It uses host-managed startup and model leases, serializes image calls, limits output to 128 tokens, and caps each call at 120 seconds. It does not enable itself or choose a model automatically. OpenAI and Ollama captions use the same brief description prompt and output limit.
 
 Validation: idle admission and interruption tests; service tests for enrichment merge, cancellation, and model failure; source extraction tests ensuring deferred charts never run inline; embedding reuse regression tests; TypeScript and production builds. Hardware speed and end-to-end photo-caption output are not asserted by these unit tests.
+
+## Deferred photos
+
+`deferredPhotoCaptions: true` enables a separate idle photo pass. Set `deferredPhotoCaptionModel` to a managed vision `provider/model` identifier. This setting is independent of the inline caption provider, so enabling it does not change the source OCR fingerprint or reparse the library. All eligible photo jobs precede the detailed chart pass. Both passes retain separate completion records and carry those records across each other's saved revisions. Brief photo output is added to saved text and indexed using the same atomic generation merge.
+
+Managed caption inference is identified through an async call context so its own host model reservation does not cancel the optional job. Separate foreground chat calls still interrupt it. A failed image request is recorded as failed optional enrichment, rather than incorrectly marking an empty photo pass complete.

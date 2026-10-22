@@ -333,6 +333,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           </FieldRow>
           <button type="button" style={style.button} disabled={busy} onClick={() => {
             void api.setConfig({ documentProcessorProvider: values.documentProcessorProvider, ocrEnabled: values.ocrEnabled !== false,
+              deferredPhotoCaptions: values.deferredPhotoCaptions === true, deferredPhotoCaptionModel: values.deferredPhotoCaptionModel ?? '',
               deferredChartEnrichment: values.deferredChartEnrichment === true,
               structureV3Charts: values.structureV3Charts !== false, structuredChunking: values.structuredChunking,
               imageCaptionProvider: values.imageCaptionProvider, imageCaptionModel: values.imageCaptionModel,
@@ -342,8 +343,10 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           <p style={style.hint}>Defaults apply to bases without their own overrides. Save below to apply changes to this base. Existing documents are only changed by an explicit reprocess.</p>
           {/* Optional chart and image processing */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 16 }}>
+            <FieldRow label="Caption photos later, only when idle"><Switch checked={values.deferredPhotoCaptions === true} onChange={v => patch({deferredPhotoCaptions: v})} /></FieldRow>
+            {values.deferredPhotoCaptions && <input style={style.input} aria-label="Idle photo caption model" placeholder="provider/model (managed vision)" value={values.deferredPhotoCaptionModel ?? ''} onChange={e => patch({deferredPhotoCaptionModel: e.target.value})} />}
             <FieldRow label="Parse charts later, only when idle"><Switch checked={values.deferredChartEnrichment === true} onChange={v => patch({deferredChartEnrichment: v})} /></FieldRow>
-            <p style={style.hint}>Text and embeddings finish first. After 30 seconds without foreground inference or indexing work, optional chart/table data is merged into saved documents. Chat activity pauses this pass; existing search results remain available.</p>
+            <p style={style.hint}>Text and embeddings finish first. After 30 seconds without foreground inference or indexing work, photo descriptions run first, then chart/table data. Each pass merges separately into saved documents. Chat activity pauses this pass; existing search results remain available.</p>
             <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>{t('imageCaptionHint')}</div>
             <select
               style={style.input}

@@ -1,3 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+const captionContext = new AsyncLocalStorage<boolean>()
+/** Distinguish our own managed inference from a foreground chat reservation. */
+export const isManagedCaptionCall = (): boolean => captionContext.getStore() === true
+
 import { ProcessingQueue } from './processing-queue.js'
 
 export type ManagedCaption = (png: Uint8Array, model: string, prompt: string, signal?: AbortSignal) => Promise<string>
@@ -21,7 +26,7 @@ export function createManagedCaption(host: CaptionHost): ManagedCaption {
     const separator = modelId.indexOf('/')
     if (separator < 1 || separator === modelId.length - 1) throw new Error('Managed caption model must be provider/model')
     const signal = parentSignal ?? new AbortController().signal
-    return queue.run(async () => {
+    return queue.run(() => captionContext.run(true, async () => {
       const llm = host.get('llm') as LlmHost | undefined
       const attachments = host.get('attachments') as AttachmentHost | undefined
       if (!llm || !attachments) throw new Error('Managed captioning needs the DSH LLM and attachment services')
@@ -47,6 +52,6 @@ export function createManagedCaption(host: CaptionHost): ManagedCaption {
       requestSignal.throwIfAborted()
       if (!finished || !text.trim()) throw new Error('Managed caption response was incomplete or empty')
       return text.trim()
-    }, signal)
+    }), signal)
   }
 }

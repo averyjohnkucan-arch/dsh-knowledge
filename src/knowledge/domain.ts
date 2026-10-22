@@ -40,6 +40,8 @@ export const baseConfigSchema = z.object({
   // Mirrors BaseConfig: every base-settable field must survive the durable
   // boundary — a missing key here makes zod strip the override on save.
   ocrEnabled: z.boolean().optional(),
+  deferredPhotoCaptions: z.boolean().optional(),
+  deferredPhotoCaptionModel: z.string().optional(),
   deferredChartEnrichment: z.boolean().optional(),
   structureV3Charts: z.boolean().optional(),
   documentProcessorProvider: z.enum(['builtin', 'mineru', 'mineru-local']).optional(),
@@ -101,6 +103,7 @@ export const documentProcessingInfoSchema = z.object({
 })
 
 export const documentSchema = z.object({
+  deferredPhotoCaptions: z.object({revision: z.string(), status: z.enum(['completed', 'failed'])}).optional(),
   deferredChartEnrichment: z.object({revision: z.string(), status: z.enum(['completed', 'failed'])}).optional(),
   markdownRevision: z.string().optional(),
   indexingSettingsFingerprint: z.string().optional(),
@@ -158,6 +161,8 @@ export const configOverridesSchema = z.object({
   hfEndpoint: z.string().optional(),
   mineruPythonIndexUrl: z.string().optional(),
   ocrEnabled: z.boolean().optional(),
+  deferredPhotoCaptions: z.boolean().optional(),
+  deferredPhotoCaptionModel: z.string().optional(),
   deferredChartEnrichment: z.boolean().optional(),
   structureV3Charts: z.boolean().optional(),
   documentProcessorProvider: z.enum(['builtin', 'mineru', 'mineru-local']).optional(),
@@ -231,6 +236,8 @@ export interface ConfigOverrides {
   conflictStrategy?: 'keep' | 'replace' | 'rename'
   urlRefreshHours?: number
   ocrEnabled?: boolean
+  deferredPhotoCaptions?: boolean
+  deferredPhotoCaptionModel?: string
   deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
   imageCaptionProvider?: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'

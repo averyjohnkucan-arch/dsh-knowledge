@@ -238,7 +238,7 @@ export async function enrichDocumentContent(input: Pick<ProcessFileInput,
   input.signal?.throwIfAborted()
   if (!output.document.text.trim()) throw Object.assign(new Error('parsed document is empty'), { code: 'empty_result' })
     // Captioning remains opt-in, but now runs identically on import and reparse.
-    if (pdf && config.imageCaptionProvider !== 'off' && !(config.deferredChartEnrichment && config.imageCaptionProvider === 'paddle')) {
+    if (pdf && config.imageCaptionProvider !== 'off' && !(config.deferredPhotoCaptions && config.imageCaptionProvider !== 'paddle') && !(config.deferredChartEnrichment && config.imageCaptionProvider === 'paddle')) {
       progress({ stage: 'enriching' })
       try {
         const { captionPdfImages } = await loadCaptionModule()

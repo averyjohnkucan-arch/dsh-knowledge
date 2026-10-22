@@ -6,7 +6,7 @@ const disposals:Array<()=>Promise<void>>=[]
 afterEach(async()=>{for(const dispose of disposals.splice(0))await dispose()})
 async function fixture(){
  const ctx=new Context();ctx.provide('webServer',{register:()=>()=>{}})
- const fiber=ctx.plugin(KnowledgeService,{embeddingProvider:'none',imageCaptionProvider:'off',chunkStorePath:'',deferredChartEnrichment:true})
+ const fiber=ctx.plugin(KnowledgeService,{embeddingProvider:'none',imageCaptionProvider:'off',chunkStorePath:'',deferredChartEnrichment:true} as import('../src/knowledge/config.js').Config)
  await fiber;disposals.push(async()=>{await fiber.dispose()})
  const service=ctx.get('knowledge') as KnowledgeService;const internal=service as any
  const base=await service.createBase({name:'idle charts'})
@@ -59,4 +59,32 @@ it('a foreground interruption during embedding does not mark the model as failed
  expect(internal.store.getDocument(doc.id).processing.revision).toBe(processing.revision)
  expect(internal.store.getDocument(doc.id).deferredChartEnrichment).toBeUndefined()
  expect(internal.indexingFailures.has(doc.id)).toBe(false)
+})
+
+it('runs photos and charts as separate passes and carries completion markers across merges',async()=>{
+ const captions=await import('../src/knowledge/caption.js')
+ const original=captions.captionPdfImages
+ const calls:string[]=[]
+ const caption=vi.spyOn(captions,'captionPdfImages').mockImplementation(async(bytes,config)=>{
+  calls.push(config.provider)
+  return config.provider==='dsh'?'A photograph of a mountain.':original(bytes,config)
+ })
+ try{
+  const {service,internal,doc}=await fixture()
+  const config={...service.getConfigFor(doc.baseId),deferredPhotoCaptions:true,deferredPhotoCaptionModel:'ninfer/vision'}
+  vi.spyOn(service,'getConfigFor').mockReturnValue(config)
+  await internal.enrichNextIdleChart(new AbortController().signal)
+  let stored=internal.store.getDocument(doc.id)
+  expect(calls).toEqual(['dsh'])
+  expect(stored.rawText).toContain('photograph of a mountain')
+  expect(stored.rawText).not.toContain('Measured chart value')
+  await internal.enrichNextIdleChart(new AbortController().signal)
+  stored=internal.store.getDocument(doc.id)
+  expect(calls).toEqual(['dsh','paddle'])
+  expect(stored.rawText).toContain('photograph of a mountain')
+  expect(stored.rawText).toContain('Measured chart value')
+  expect(stored.deferredPhotoCaptions.revision).toBe(stored.processing.revision)
+  expect(stored.deferredChartEnrichment.revision).toBe(stored.processing.revision)
+  expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(false)
+ }finally{caption.mockRestore()}
 })

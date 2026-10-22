@@ -50,3 +50,10 @@ it('defers detailed charts without delaying text extraction or calling the chart
  expect(await enrichDocumentContent(input,output)).toBe(output)
  expect(mocks.caption).not.toHaveBeenCalled()
 })
+
+it('keeps deferred photos out of the initial import even when a vision provider is selected',async()=>{
+ const input={bytes:new TextEncoder().encode('source'),fileName:'sample.pdf',config:{...config,imageCaptionProvider:'dsh' as const,deferredPhotoCaptions:true}}
+ const output=await extractDocumentContent(input)
+ expect(await enrichDocumentContent(input,output)).toBe(output)
+ expect(mocks.caption).not.toHaveBeenCalled()
+})
