@@ -154,24 +154,27 @@ it('sends a page to idle NPU before queueing behind busy CUDA',async()=>{
  cuda.pending=0
 })
 
-it('releases idle CUDA model copies for another stage but preserves short rendering gaps', async () => {
+it('releases idle CUDA and Intel model copies for another stage but preserves short rendering gaps', async () => {
   const {knowledgeGpuAdmission}=await import('../src/knowledge/background-gpu.js')
   const availability=await import('../src/knowledge/embedding-device-availability.js')
-  const probe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:true,freeMiB:0,reason:'available'})
+  const probe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockImplementation(async()=>({available:true,freeMiB:0,reason:'available'}))
   const owner={}
-  const {manager,cuda}=fixture()
+  const {manager,cuda,igpu}=fixture()
   manager.configure({localOcrGpuWorkers:1})
   Object.assign(manager,{usedAt:Date.now()-5000,intelAvailability:{sample:async()=>({available:true})}})
   knowledgeGpuAdmission.request(owner,true)
   const update=()=> (manager as unknown as {updateDevices():Promise<void>}).updateDevices()
   try {
-    await update();expect(cuda.process.stopAndWait).not.toHaveBeenCalled()
+    await update();expect(cuda.process.stopAndWait).not.toHaveBeenCalled();expect(igpu.process.stopAndWait).not.toHaveBeenCalled()
     Object.assign(manager,{usedAt:Date.now()-20000})
     cuda.pending=1
-    await update();expect(cuda.process.stopAndWait).not.toHaveBeenCalled()
+    await update();expect(cuda.process.stopAndWait).not.toHaveBeenCalled();expect(igpu.process.stopAndWait).not.toHaveBeenCalled()
     cuda.pending=0
     await update();expect(cuda.process.stopAndWait).toHaveBeenCalledOnce()
-    expect(cuda.enabled).toBe(false)
+    expect(cuda.enabled).toBe(false);expect(igpu.enabled).toBe(false)
+    expect(igpu.process.stopAndWait).toHaveBeenCalledOnce()
+    Object.assign(manager,{usedAt:Date.now()})
+    await update();expect(igpu.enabled).toBe(true);expect(cuda.enabled).toBe(true)
   } finally {knowledgeGpuAdmission.request(owner,false);probe.mockRestore()}
 })
 

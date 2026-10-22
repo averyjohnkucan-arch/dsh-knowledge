@@ -95,15 +95,15 @@ export class OcrAcceleration {
       const pending = this.lanes.reduce((sum, lane) => sum + lane.pending, 0)
       const active = ocrDeviceWorkActive(0, this.usedAt, pending)
       // Keep short rendering gaps warm, but do not strand multiple OCR model
-      // copies in VRAM while structure/embedding needs the same device.
-      const yieldIdleCuda = pending === 0 && Date.now() - this.usedAt >= 10_000 && knowledgeGpuAdmission.hasOtherDemand(this)
+      // copies or Intel runtime polling threads while the next stage needs resources.
+      const yieldIdleAccelerators = () => this.lanes.every(lane => lane.pending === 0) && Date.now() - this.usedAt >= 10_000 && knowledgeGpuAdmission.hasOtherDemand(this)
       const idle = process.platform === 'linux' ? true : (await desktopIdle()).idleSeconds! >= 300
       const owned = () => backgroundDevicePids(new Set(this.lanes.flatMap(lane => lane.process.pid ? [lane.process.pid] : [])))
       const intel = active && idle ? await this.intelAvailability.sample(owned()) : { available: false }
       knowledgeGpuAdmission.request(this, !this.foreground && active && this.lanes.some(lane=>lane.pending>0))
       const nvidia: Awaited<ReturnType<typeof nvidiaEmbeddingAvailability>> = active && idle && knowledgeGpuAdmission.allowed ? await nvidiaEmbeddingAvailability(owned) : { available: false, reason: 'OCR is idle or foreground inference is active' }
-      if (this.stopped || this.foreground || this.igpuReservations) intel.available = false
-      if (this.stopped || this.foreground || yieldIdleCuda) nvidia.available = false
+      if (this.stopped || this.foreground || this.igpuReservations || yieldIdleAccelerators()) intel.available = false
+      if (this.stopped || this.foreground || yieldIdleAccelerators()) nvidia.available = false
       // Reserve headroom; each additional CUDA process can retain two model
       // arenas plus a context. Existing workers already count against free VRAM.
       const resident = this.lanes.filter(lane => lane.device.device.startsWith('CUDA') && lane.process.pid !== undefined).length
