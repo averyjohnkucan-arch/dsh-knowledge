@@ -257,11 +257,13 @@ async function route(
   // /probe-embedding-dimensions — embed one probe text and return the vector
   // width (Cherry's dimension probe, run before a config save).
   if (segments[0] === 'probe-embedding-dimensions' && method === 'POST') {
+    if (body.dimensions !== undefined && (typeof body.dimensions !== 'number' || !Number.isInteger(body.dimensions))) throw new InvalidRequestError('dimensions must be an integer')
     return service.probeEmbeddingDimensions({
       ...(typeof body.provider === 'string' ? { provider: body.provider as EmbeddingProvider } : {}),
       ...(typeof body.baseUrl === 'string' ? { baseUrl: body.baseUrl } : {}),
       ...(typeof body.model === 'string' ? { model: body.model } : {}),
       ...(typeof body.apiKey === 'string' ? { apiKey: body.apiKey } : {}),
+      ...(typeof body.dimensions === 'number' ? { dimensions: body.dimensions } : {}),
     })
   }
 
