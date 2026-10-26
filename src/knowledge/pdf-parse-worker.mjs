@@ -50,7 +50,9 @@ parentPort?.on('message', message => {
       // pdf-parse v1 is CommonJS; the default export is the parser function.
       const mod = await import('pdf-parse')
       const pages = [], scanned = []
-      const result = await mod.default(Buffer.from(data), { pagerender: async page => {
+      // pdf.js 1.x inspects backing buffers. A pooled Buffer can expose bytes
+      // from an earlier document in this persistent worker; own the full buffer.
+      const result = await mod.default(Uint8Array.from(data), { pagerender: async page => {
         const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false })
         const text = joinPdfTextItems(content.items)
         pages[page.pageNumber - 1] = text

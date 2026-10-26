@@ -177,7 +177,7 @@ export class EmbeddingAcceleration {
       let chosen:Lane|undefined
       while(!chosen) {
         if(this.stopped)throw Error('Embedding worker stopped')
-        const cpuLanes=this.lanes.filter(l=>l.device==='CPU').slice(0,embeddingCpuLaneLimit(availableParallelism(),this.threads))
+        const cpuLanes=this.lanes.filter(l=>l.device==='CPU'&&l.enabled&&l.qualified!==false).slice(0,embeddingCpuLaneLimit(availableParallelism(),this.threads))
         const eligible=this.lanes.filter(l=>(l.device!=='CPU'||cpuLanes.includes(l)&&(purpose==='query'||this.indexCpuAvailable()))&&l.enabled&&l.qualified!==false&&(!l.device.startsWith('GPU')||purpose==='index'&&!this.foreground&&!this.igpuReservations))
         if(!eligible.length){if(purpose==='index'&&!this.indexCpuAvailable()){await pause(20);continue}throw Error('No embedding device is available')}
         // Leave bulk work unassigned until a lane has capacity. Eagerly queuing
@@ -226,7 +226,7 @@ export class EmbeddingAcceleration {
             if(gpu)return await this.run(gpu,text,purpose)
             await pause(20);continue
           }
-          const cpu=this.lanes.filter(l=>l.device==='CPU').slice(0,embeddingCpuLaneLimit(availableParallelism(),this.threads)).find(l=>l.enabled&&l.qualified!==false&&l.pending<1)
+          const cpu=this.lanes.filter(l=>l.device==='CPU'&&l.enabled&&l.qualified!==false).slice(0,embeddingCpuLaneLimit(availableParallelism(),this.threads)).find(l=>l.enabled&&l.qualified!==false&&l.pending<1)
           if (!cpu) { await pause(5); continue }
           try { return await this.run(cpu,text,purpose) }
           catch (fallback) { if (!String(fallback).includes('yield')) throw fallback }

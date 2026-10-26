@@ -105,6 +105,7 @@ describe('complete and bounded OCR rasters (#37)', () => {
     setLocalModelCacheDir(dir)
     mock.recognize.mockResolvedValueOnce('page one').mockRejectedValueOnce(Object.assign(new Error('child exited'), { code: 'ocr_process_crash' }))
     await expect(ocrPdfText(new Uint8Array([1]))).rejects.toMatchObject({ code: 'ocr_process_crash' })
-    expect(mock.recognize).toHaveBeenCalledTimes(3) // another page may already be in flight in the bounded pool
+    expect(mock.recognize.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(mock.recognize.mock.calls.length).toBeLessThanOrEqual(3) // another page may already be in flight in the bounded pool
   })
 })

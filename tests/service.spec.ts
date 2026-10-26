@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { DocumentAdmission } from '../src/knowledge/processing-queue.js'
 import { createServer } from 'node:http'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, realpath, rm, writeFile, rename, readFile } from 'node:fs/promises'
@@ -1850,7 +1851,7 @@ it.each([{ large: false, peak: 9 }, { large: true, peak: 4 }])('bounds lightweig
   const service = await mountService()
   const root = await mkdtemp(join(tmpdir(), 'knowledge-batch-'))
   const privateService = service as unknown as { extractDocumentText(...args: unknown[]): Promise<unknown>; store: Store }
-  Object.assign(privateService, {processingConcurrency:4})
+  Object.assign(privateService, {processingConcurrency:4, documentAdmission:new DocumentAdmission(64,4)})
   const extract = privateService.extractDocumentText.bind(service)
   let active = 0, peak = 0
   let release!: () => void
@@ -2160,7 +2161,7 @@ it('overlaps committed-document embeddings with unfinished chunking after extrac
   const firstVector=new Promise<void>(resolve=>{releaseChunk=resolve})
   const extract=vi.spyOn(processing,'extractDocumentContent').mockImplementation(async input=>{
     expect(parsed).toBe(0);expect(published).toBe(0);expect(vectorCalls).toBe(0)
-    const output=await extractOriginal(input);extracted++;return output
+    const output=await extractOriginal(input);expect(output.document.text).toContain('Distinct source '+input.fileName.match(/source-(\d+)/)?.[1]);extracted++;return output
   })
   const enrich=vi.spyOn(processing,'enrichDocumentContent').mockImplementation(async(...args)=>{
     expect(extracted).toBe(3);expect(published).toBe(0);expect(vectorCalls).toBe(0)
