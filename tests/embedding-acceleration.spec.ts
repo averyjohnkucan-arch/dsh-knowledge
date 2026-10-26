@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EmbeddingBatcher } from '../src/knowledge/embedding-batcher.js'
 import { EmbeddingAcceleration } from '../src/knowledge/embedding-acceleration.js'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { tmpdir, availableParallelism } from 'node:os'
 import { join } from 'node:path'
 const managers: EmbeddingAcceleration[] = []
 afterEach(()=>{for(const manager of managers.splice(0))manager.dispose();vi.useRealTimers()})
@@ -83,14 +83,14 @@ describe('embedding device fallback and yielding',()=>{
  it('retries a CPU lane interrupted by foreground handoff on the surviving CPU',async()=>{
   const {manager,cpu}=fixture()
   const paused={...cpu,milliseconds:1,worker:{...cpu.worker,request:vi.fn(async()=>{paused.enabled=false;throw Error('Embedding device yielded')})}}
-  Object.assign(manager,{lanes:[paused,cpu]})
+  Object.assign(manager,{lanes:[paused,cpu],threads:availableParallelism()})
   expect(await manager.embed(['retained passage'])).toEqual([vector()])
   expect(cpu.worker.request).toHaveBeenCalledOnce();manager.dispose()
  })
  it('never sends device fallback to a disabled CPU lane',async()=>{
   const {manager,cpu,npu}=fixture()
   const paused={...cpu,enabled:false,pending:0,worker:{...cpu.worker,request:vi.fn(async()=>{throw Error('Embedding device yielded')})}}
-  Object.assign(manager,{lanes:[paused,cpu,npu]})
+  Object.assign(manager,{lanes:[paused,cpu,npu],threads:availableParallelism()})
   expect(await manager.embed(['retained passage'])).toEqual([vector()])
   expect(paused.worker.request).not.toHaveBeenCalled();expect(cpu.worker.request).toHaveBeenCalledOnce();manager.dispose()
  })
