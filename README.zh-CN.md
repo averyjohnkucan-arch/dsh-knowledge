@@ -204,7 +204,7 @@ v0.5.2 已修复 #51：证据和读取片段裁剪不会拆开 emoji 等字符�
 
 ### 模型工具
 
-插件向模型提供 14 个工具。所有读取、写入和自动检索都遵守“已启用知识库”边界；空或失效选择匹配零个知识库，不会静默扩大到全库。永久删除必须经过宿主确认。
+插件向模型提供 15 个工具。所有读取、写入和自动检索都遵守“已启用知识库”边界；空或失效选择匹配零个知识库，不会静默扩大到全库。永久删除必须经过宿主确认。
 
 <details>
 <summary>查看全部工具</summary>
@@ -219,6 +219,7 @@ v0.5.2 已修复 #51：证据和读取片段裁剪不会拆开 emoji 等字符�
 - `knowledge_import_url`
 - `knowledge_refresh_url`
 - `knowledge_stats`
+- `knowledge_read_evidence`
 - `knowledge_get_document`
 - `knowledge_read_document`
 - `knowledge_reindex_document`
@@ -429,7 +430,7 @@ dsh-knowledge 的检索目标不只是返回一组 Top K 文本，而是生成�
 | 组件 | 平台 | 职责 |
 |---|---|---|
 | `knowledge`（`ctx.knowledge`） | host | 存储、分块、embedding/解析调度、检索、OCR 调度及 `/knowledge/*` HTTP 服务 |
-| `tool-knowledge` | host | 注册并执行 14 个模型工具 |
+| `tool-knowledge` | host | 注册并执行 15 个模型工具 |
 | `ui-knowledge` | client | 侧边栏入口、工作区管理面板及同源 API 调用 |
 | `embed-process` | child process | transformers.js 本地 embedding 推理；严格 IPC、staging/readiness probe 与可恢复的原生模型生命周期 |
 | `ocr-process` | child process | PaddleOCR、OpenCV 和 Tesseract 识别；串行推理、超时终止及退出感知 |

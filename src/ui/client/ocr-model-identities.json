@@ -1,0 +1,76 @@
+{
+  "artifacts": [
+    {
+      "name": "structure-v3/models/official_models/SLANet_plus/inference.pdiparams",
+      "size": 7666515,
+      "sha256": "012986b0e2bfe90410618bfb4b7cf4fcb6c978caefd84c63c2934f8387b09ab8",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/PP-DocBlockLayout/inference.pdiparams",
+      "size": 128841073,
+      "sha256": "0ab733dcabfee41517b68b37fde4c696129b88096a93f8b9d8feaa43c27c8942",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/PP-LCNet_x1_0_textline_ori/inference.pdiparams",
+      "size": 6743918,
+      "sha256": "0de2bcf996cf553e2b848dd7b1769dafffc6917b1ccdf55c1d8efe7909fbf743",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/RT-DETR-L_wireless_table_cell_det/inference.pdiparams",
+      "size": 128841073,
+      "sha256": "c0f8c9ea07be8916ece73a8acf807bd21aed3ef11969b319c2dccb2406774c34",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/SLANeXt_wired/inference.pdiparams",
+      "size": 364771513,
+      "sha256": "ff0362a30f707fa7d27d8453c4396b992fca287377a42d01515bca6eeb3908f5",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/PP-LCNet_x1_0_table_cls/inference.pdiparams",
+      "size": 6743918,
+      "sha256": "d0224afd9cfddf22da17407c6c78491baaa1f25922fbb312c9b0d2037c802db0",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/PP-DocLayout_plus-L/inference.pdiparams",
+      "size": 129307978,
+      "sha256": "24ca3e2e442164505e250deef59f7ee9a54ea12dd32875c9cd6155d959dc97da",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/RT-DETR-L_wired_table_cell_det/inference.pdiparams",
+      "size": 128841073,
+      "sha256": "357321c2845f0a035e8d118622649685a3cdb89d28b09a64e45a5a3df7a9fedc",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/PP-OCRv5_mobile_det/inference.pdiparams",
+      "size": 4692937,
+      "sha256": "afa1820cb16c1fd0dad589d0f8b389139061c1ef6d68019685fd07be997dda5b",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/PP-LCNet_x1_0_doc_ori/inference.pdiparams",
+      "size": 6754166,
+      "sha256": "e8d6e7c5d264507e40e58a655779059d616b20d7441ea22047d829eb3931989c",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/en_PP-OCRv5_mobile_rec/inference.pdiparams",
+      "size": 7772315,
+      "sha256": "3ec8a97ed6cefe8568d3e2ee90bb193299b566a7661aa4fd52d224b96b59f66b",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    },
+    {
+      "name": "structure-v3/models/official_models/PP-Chart2Table_safetensors/model.safetensors",
+      "size": 2242172856,
+      "sha256": "725fec36a72e44cf5e1b5e8f1055b1a7d015b730919809a5cfa352f56b4d60bd",
+      "source": "Installed local OCR/Structure runtime asset; provision through the existing model setup controls."
+    }
+  ]
+}

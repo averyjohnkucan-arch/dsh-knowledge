@@ -221,7 +221,7 @@ A download is **not tied to the HTTP request that started it**: it keeps running
 
 ### Model-facing tools
 
-The plugin exposes 14 tools. Reads, writes, and proactive retrieval all obey the enabled-base boundary; an empty or stale selection matches zero bases instead of silently expanding to the entire library. Permanent deletion requires host approval.
+The plugin exposes 15 tools. Reads, writes, and proactive retrieval all obey the enabled-base boundary; an empty or stale selection matches zero bases instead of silently expanding to the entire library. Permanent deletion requires host approval.
 
 <details>
 <summary>View all tools</summary>
@@ -236,6 +236,7 @@ The plugin exposes 14 tools. Reads, writes, and proactive retrieval all obey the
 - `knowledge_import_url`
 - `knowledge_refresh_url`
 - `knowledge_stats`
+- `knowledge_read_evidence`
 - `knowledge_get_document`
 - `knowledge_read_document`
 - `knowledge_reindex_document`
@@ -484,7 +485,7 @@ One bundle mounts three plugin rows. Local embeddings, local reranking, and OCR 
 | Component | Platform | Responsibility |
 |---|---|---|
 | `knowledge` (`ctx.knowledge`) | host | Storage, chunking, embedding/parser orchestration, retrieval, OCR scheduling, and `/knowledge/*` HTTP APIs |
-| `tool-knowledge` | host | Registration and execution of the 14 model-facing tools |
+| `tool-knowledge` | host | Registration and execution of the 15 model-facing tools |
 | `ui-knowledge` | client | Sidebar entry, workspace management panel, and same-origin API calls |
 | `embed-process` | child process | Local transformers.js embedding inference; strict IPC, staging/readiness probing, and recoverable native-model lifecycle |
 | `ocr-process` | child process | PaddleOCR, OpenCV, and Tesseract recognition; serialized inference, timeout termination, and observed process exit |

@@ -1,3 +1,4 @@
+import ocrIdentities from './ocr-model-identities.json'
 import fp16Manifest from './qwen-fp16-manifest.json'
 import openvinoManifest from './openvino-embedding-manifest.json'
 import React, { useEffect, useState } from 'react'
@@ -31,6 +32,7 @@ export function EmbeddingPerformance({ api }: { api: KnowledgeApi }) {
     <button style={style.button} disabled={busy || fp16?.status === 'installing'} onClick={() => { void api.prepareEmbeddingAcceleration(fp16Model).then(setFp16).catch(e=>setMessage(String(e))) }}>Download / validate unified FP16 embedding</button>
     {fp16 && <p role="status" style={style.hint}>{fp16.status} · {fp16.message}</p>}
     {fp16?.devices.map(d=><p key={d.device} style={style.hint}>{d.name ?? d.device}: {d.qualified ? `Validated · ${Math.round(d.medianMs ?? 0)} ms` : d.error ?? 'Unavailable'}{d.maxTokens ? ` · NPU candidates up to ${d.maxTokens} tokens; longer inputs use CPU/GPU without truncation` : ''}{d.blockedReason ? ` · ${d.blockedReason}` : ''}</p>)}
+    <details><summary>OCR, layout, table and chart model hashes from this setup</summary><p style={style.hint}>Exact installed artifact identities. Download and validate these through the OCR and PP-StructureV3 setup controls. These hashes identify the current setup and do not replace readiness checks.</p>{ocrIdentities.artifacts.map(file => <p key={file.name} style={{overflowWrap:'anywhere'}}>{file.name} · {(file.size/1048576).toFixed(1)} MiB<br/><code>{file.sha256}</code></p>)}</details>
     <h4>Optional OpenVINO embedding · NPU</h4>
     <p style={style.hint}>Installs a separate Qwen3 model export with matching CPU fallback. Select “Qwen3 Embedding 0.6B · OpenVINO CPU/NPU” in base settings after validation. Existing ONNX vectors cannot be mixed with this export; use a new or rebuilt base.</p>
     <button style={style.button} disabled={busy || acceleration?.status === 'installing'} onClick={() => { void api.prepareEmbeddingAcceleration().then(setAcceleration).catch(e=>setMessage(String(e))) }}>Download / validate CPU and NPU embedding</button>
