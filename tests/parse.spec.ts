@@ -120,6 +120,6 @@ describe('parseDocumentBuffer — PDF', () => {
     // engines fail to extract text, so the import must reject either way.
     const pdf = makePdf('')
     await expect(parseDocumentBuffer(pdf, 'scanned.pdf', 'application/pdf'))
-      .rejects.toThrow(/no extractable text|PDF parsing failed/)
+      .rejects.toThrow(/no extractable text|PDF parsing failed|OCR could not process/)
   })
 })

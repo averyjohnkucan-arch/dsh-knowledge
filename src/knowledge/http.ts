@@ -58,6 +58,16 @@ async function handleRequest(service: KnowledgeService, req: IncomingMessage, re
 
     if (segments[0] === 'storage-writes' || segments[0] === 'embedding-acceleration' || segments[0] === 'ocr-acceleration' || segments[0] === 'structure-v3' || segments[0] === 'folder-picker' || segments[0] === 'processors' && segments[1] === 'managed') requireLocalManagement(req, service.managementBindHost)
 
+    if (method === 'GET' && segments[0] === 'documents' && segments[2] === 'range' && segments.length === 4) {
+      const range = /^(\d+)-(\d+)$/.exec(segments[3]), hash = url.searchParams.get('hash') ?? ''
+      if (!range || !/^[a-f0-9]{64}$/.test(hash)) throw new InvalidRequestError('Invalid citation range')
+      const snapshot = service.getCitationRange(segments[1], Number(range[1]), Number(range[2]), hash)
+      if (url.searchParams.get('format') === 'json') { writeJson(res, 200, { ok: true, value: snapshot }); return }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'private, no-store',
+        'x-content-type-options': 'nosniff', 'content-security-policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'" })
+      res.end(renderMarkdownSnapshot(snapshot, segments[3])); return
+    }
+
     if (method === 'GET' && segments[0] === 'documents' && segments[2] === 'passage' && segments.length === 4) {
       const hash = url.searchParams.get('hash') ?? ''
       if (!/^[a-f0-9]{64}$/.test(hash)) throw new InvalidRequestError('Invalid citation hash')

@@ -183,7 +183,7 @@ describe('local OCR fallback', () => {
 
   it('a scanned PDF without OCR models still fails with the clear error', async () => {
     await expect(parseDocumentBuffer(makeScannedPdf(8, 20, 20), 'scan.pdf', 'application/pdf'))
-      .rejects.toThrow(/no extractable text|PDF parsing failed/)
+      .rejects.toThrow(/no extractable text|PDF parsing failed|OCR could not process/)
   })
 
   it('keeps a failing pdf-parse run from leaking a host-level rejection', async () => {
@@ -198,7 +198,7 @@ describe('local OCR fallback', () => {
     process.on('unhandledRejection', onUnhandled)
     try {
       await expect(parseDocumentBuffer(makeScannedPdf(8, 20, 20), 'scan.pdf', 'application/pdf'))
-        .rejects.toThrow(/no extractable text|PDF parsing failed/)
+        .rejects.toThrow(/no extractable text|PDF parsing failed|OCR could not process/)
       await expect(parseDocumentBuffer(Buffer.from('this is not a pdf at all %%%'), 'broken.pdf', 'application/pdf'))
         .rejects.toThrow(/PDF parsing failed/)
       // Give any stray rejection created by the failed loads time to surface.

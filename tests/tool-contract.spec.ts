@@ -1,4 +1,4 @@
-import { KNOWLEDGE_CITATION_INSTRUCTIONS } from '../src/shared/citations.js'
+import { KNOWLEDGE_CITATION_REMINDER } from '../src/shared/citations.js'
 import { beforeAll, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -156,7 +156,7 @@ describe('model-facing knowledge tool contracts', () => {
     ] as const) {
       const result = await execute(ctx, name, args)
       valueOf(result)
-      expect(resultText(result), name).toContain(KNOWLEDGE_CITATION_INSTRUCTIONS)
+      expect(resultText(result), name).toContain(KNOWLEDGE_CITATION_REMINDER)
       if (name === 'knowledge_get_document') expect(resultText(result)).toContain('/passage/')
     }
   })
@@ -165,6 +165,8 @@ describe('model-facing knowledge tool contracts', () => {
     const assembly = await harness.ctx.systemPrompt.assemble()
     const usage = assembly.sections.find(section => section.name === 'knowledge:usage')
     expect(usage?.text).toBe('Available knowledge bases: primary, foreign.')
+    expect(assembly.sections.filter(section => section.name === 'knowledge:citations')).toHaveLength(1)
+    expect(assembly.sections.find(section => section.name === 'knowledge:citations')?.text).toContain('[[cite:REFERENCE]]')
     expect(usage?.text).not.toContain('extraQueries')
     expect(usage?.text).not.toContain('proactively')
   })

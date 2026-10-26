@@ -13,6 +13,9 @@ import type { DocumentProcessor, MineruTier } from './processing-types.js'
 
 export interface Config {
   ocrEnabled?: boolean
+  deferredPhotoCaptions?: boolean
+  deferredPhotoCaptionModel?: string
+  deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
   embeddingProvider: EmbeddingProvider
   embeddingBaseUrl: string
@@ -69,7 +72,7 @@ export interface Config {
   /** Auto-refresh URL documents older than this many hours (0 = off). */
   urlRefreshHours: number
   /** Image/table captioning: `off` / `openai` (vision chat API) / `ollama` (local VLM). */
-  imageCaptionProvider: 'off' | 'paddle' | 'openai' | 'ollama'
+  imageCaptionProvider: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'
   /** Captioning model id (OpenAI-compatible vision model, or an Ollama VLM like llava / qwen2.5vl). */
   imageCaptionModel: string
   /** Captioning API root; empty = the embedding base URL (openai) or http://127.0.0.1:11434 (ollama). */
@@ -115,6 +118,9 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   ocrEnabled: Schema.boolean().default(true),
+  deferredPhotoCaptions: Schema.boolean().default(false),
+  deferredPhotoCaptionModel: Schema.string().default(''),
+  deferredChartEnrichment: Schema.boolean().default(false),
   structureV3Charts: Schema.boolean().default(true),
   embeddingProvider: Schema.union(['openai', 'ollama', 'local', 'none']).default('none'),
   embeddingBaseUrl: Schema.string().default(''),
@@ -155,7 +161,7 @@ export const Config: Schema<Config> = Schema.object({
   chunkTokenLimit: Schema.number().default(0),
   conflictStrategy: Schema.union(['keep', 'replace', 'rename']).default('rename'),
   urlRefreshHours: Schema.number().default(0),
-  imageCaptionProvider: Schema.union(['off', 'paddle', 'openai', 'ollama']).default('off'),
+  imageCaptionProvider: Schema.union(['off', 'paddle', 'dsh', 'openai', 'ollama']).default('off'),
   imageCaptionModel: Schema.string().default(''),
   imageCaptionBaseUrl: Schema.string().default(''),
   imageCaptionApiKey: Schema.string().default(''),
@@ -169,7 +175,7 @@ export const Config: Schema<Config> = Schema.object({
   localEmbeddingThreads: Schema.number().default(0),
   localEmbeddingInstances: Schema.number().default(0),
   localEmbeddingMicroBatchSize: Schema.number().default(1),
-  localWorkerIdleTimeoutMs: Schema.number().default(60000),
+  localWorkerIdleTimeoutMs: Schema.number().default(0),
 })
 
 /** Resolve a full config from deployment defaults plus runtime overrides. */
@@ -225,6 +231,9 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     conflictStrategy: overrides.conflictStrategy ?? config.conflictStrategy,
     urlRefreshHours: clampInt(overrides.urlRefreshHours ?? config.urlRefreshHours, 0, 24 * 365, 0),
     ocrEnabled: overrides.ocrEnabled ?? config.ocrEnabled ?? true,
+    deferredPhotoCaptions: overrides.deferredPhotoCaptions ?? config.deferredPhotoCaptions ?? false,
+    deferredPhotoCaptionModel: overrides.deferredPhotoCaptionModel ?? config.deferredPhotoCaptionModel ?? '',
+    deferredChartEnrichment: overrides.deferredChartEnrichment ?? config.deferredChartEnrichment ?? false,
     structureV3Charts: overrides.structureV3Charts ?? config.structureV3Charts ?? true,
     imageCaptionProvider: overrides.imageCaptionProvider ?? config.imageCaptionProvider,
     imageCaptionModel: overrides.imageCaptionModel ?? config.imageCaptionModel,
@@ -240,7 +249,7 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     localEmbeddingThreads: clampInt(overrides.localEmbeddingThreads ?? config.localEmbeddingThreads ?? 0, 0, 64, 0),
     localEmbeddingInstances: clampInt(overrides.localEmbeddingInstances ?? config.localEmbeddingInstances ?? 0, 0, 4, 0),
     localEmbeddingMicroBatchSize: clampInt(overrides.localEmbeddingMicroBatchSize ?? config.localEmbeddingMicroBatchSize ?? 1, 1, 8, 1),
-    localWorkerIdleTimeoutMs: clampInt(overrides.localWorkerIdleTimeoutMs ?? config.localWorkerIdleTimeoutMs, 0, 24 * 3600 * 1000, 60000),
+    localWorkerIdleTimeoutMs: clampInt(overrides.localWorkerIdleTimeoutMs ?? config.localWorkerIdleTimeoutMs, 0, 24 * 3600 * 1000, 0),
     localModelCacheDir: overrides.localModelCacheDir ?? config.localModelCacheDir,
   }
 }
@@ -294,6 +303,9 @@ export function resolveConfigFor(config: Config, overrides: ConfigOverrides, bas
     conflictStrategy: baseConfig.conflictStrategy ?? resolved.conflictStrategy,
     urlRefreshHours: clampInt(baseConfig.urlRefreshHours ?? resolved.urlRefreshHours, 0, 24 * 365, 0),
     ocrEnabled: baseConfig.ocrEnabled ?? resolved.ocrEnabled ?? true,
+    deferredPhotoCaptions: baseConfig.deferredPhotoCaptions ?? resolved.deferredPhotoCaptions ?? false,
+    deferredPhotoCaptionModel: baseConfig.deferredPhotoCaptionModel ?? resolved.deferredPhotoCaptionModel ?? '',
+    deferredChartEnrichment: baseConfig.deferredChartEnrichment ?? resolved.deferredChartEnrichment ?? false,
     structureV3Charts: baseConfig.structureV3Charts ?? resolved.structureV3Charts ?? true,
     imageCaptionProvider: baseConfig.imageCaptionProvider ?? resolved.imageCaptionProvider,
     imageCaptionModel: baseConfig.imageCaptionModel ?? resolved.imageCaptionModel,

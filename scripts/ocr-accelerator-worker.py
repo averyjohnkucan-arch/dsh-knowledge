@@ -1,3 +1,4 @@
+from ocr_text_layout import assemble_ocr_text
 """Plugin-owned PP-OCRv5 execution using explicit Intel/CPU devices.
 
 RapidOCR supplies preprocessing/CTC decoding. OpenVINO owns bounded, cached
@@ -34,6 +35,7 @@ class Session:
    else:model.reshape({model.input(0).any_name:ov.PartialShape([shape[0],3,ov.Dimension(32,4096),ov.Dimension(32,4096)])})
    t=time.perf_counter();props={'PERFORMANCE_HINT':'LATENCY', 'CACHE_DIR':str(compiled_cache)}
    if requested=='CPU':props.update(INFERENCE_NUM_THREADS=cpu_threads,NUM_STREAMS=1)
+   if requested in ('CPU','GPU'):props['INFERENCE_PRECISION_HINT']='f32'
    compiled=self.core.compile_model(model,requested,props);self.compile_s+=time.perf_counter()-t;self.compiles+=1
   self.cache[key]=compiled
   while len(self.cache)>16:self.cache.popitem(last=False)
@@ -88,6 +90,8 @@ def calibrate(args):
  reports=[]
  for device in probe():
   if not device['allowed']:continue
+  if device['device'].startswith('NPU'):
+   reports.append({**device,'qualified':False,'error':'Full-page NPU OCR failed scanned-page fidelity checks; layout and embeddings are qualified separately.'});continue
   try:
    pipeline=create_pipeline(args.models,device['device'],args.cache);times=[]
    for index in range(4):
@@ -121,7 +125,7 @@ if __name__=='__main__':
      image=cv2.imdecode(np.frombuffer(base64.b64decode(request['png'],validate=True),dtype=np.uint8),cv2.IMREAD_COLOR)
      if image is None or image.size>96*1024*1024:raise ValueError('Invalid or oversized OCR image')
      result=pipeline(image,use_cls=False)
-     text='\n'.join(result.txts or [])
+     text=assemble_ocr_text(result.txts, getattr(result,'boxes',None))
     response={'id':request['id'],'ok':True,'text':text,'elapsedMs':(time.perf_counter()-started)*1000}
    except Exception as error:response={'id':request.get('id') if isinstance(request,dict) else None,'ok':False,'error':str(error)[:1000]}
    print('DSH_OCR_RESULT '+json.dumps(response),flush=True)

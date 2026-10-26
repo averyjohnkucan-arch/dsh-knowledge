@@ -1,3 +1,5 @@
+import fp16Manifest from './qwen-fp16-manifest.json'
+import openvinoManifest from './openvino-embedding-manifest.json'
 import React, { useEffect, useState } from 'react'
 import type { KnowledgeApi } from './api.js'
 import { style } from './theme.js'
@@ -23,7 +25,8 @@ export function EmbeddingPerformance({ api }: { api: KnowledgeApi }) {
     </div>
     <p style={style.hint}>Total threads are bounded by the detected CPU count; automatic instance count also considers available RAM. Four instances can use around 5 GB for this model without outperforming two.</p>
     <button style={style.button} disabled={busy} onClick={() => void save()}>Save embedding performance</button>
-    <h4>Unified Qwen FP16 acceleration</h4>
+    <h4>Recommended · Unified Qwen FP16 acceleration</h4>
+    <details><summary>Exact model revisions and SHA-256 hashes</summary>{[fp16Manifest, openvinoManifest].map(manifest => <div key={manifest.repository} style={{overflowWrap:'anywhere'}}><p>{manifest.repository} @ <code>{manifest.revision}</code></p>{manifest.files.map(file => <p key={file.name}>{file.name}<br/><code>{file.sha256}</code></p>)}</div>)}</details>
     <p style={style.hint}>The same pinned FP16 export across CPU, Intel NPU/iGPU and optional NVIDIA CUDA. This is a separate vector format from Q8. Select this model in base settings after setup; existing vectors must be regenerated. Linux monitors device activity and reserves GPUs for foreground inference; other systems require verified desktop idle.</p>
     <button style={style.button} disabled={busy || fp16?.status === 'installing'} onClick={() => { void api.prepareEmbeddingAcceleration(fp16Model).then(setFp16).catch(e=>setMessage(String(e))) }}>Download / validate unified FP16 embedding</button>
     {fp16 && <p role="status" style={style.hint}>{fp16.status} · {fp16.message}</p>}

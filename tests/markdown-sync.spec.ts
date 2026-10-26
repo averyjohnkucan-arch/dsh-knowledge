@@ -68,6 +68,18 @@ async function sync(service:KnowledgeService,id:string){
  throw Error('Sync did not finish')
 }
 describe('future-only Markdown and settings-aware folder sync',()=>{
+ it('waits for a text document vector pass instead of failing folder reconciliation',async()=>{
+  const {service,base}=await mount(false), root=await directory()
+  await writeFile(join(root,'article.md'),'Stable astronomy evidence.')
+  await service.importDirectoryTree(base.id,root);await service.waitForIdle()
+  const doc=service.listDocuments(base.id).find(d=>d.sourceType==='file')!
+  const internal=service as any
+  internal.indexing.set(doc.id,{baseId:base.id,title:doc.title,phase:'embedding'})
+  const pending=internal.syncDirectoryFile(doc,join(root,'article.md'),'article.md')
+  await new Promise(resolve=>setTimeout(resolve,70))
+  internal.indexing.delete(doc.id)
+  await expect(pending).resolves.toBe('unchanged')
+ })
  it('opens existing retention-off sources and rejects changed, foreign, or deleted passages',async()=>{
   const {service,base,handler}=await mount(false)
   const doc=await service.addTextDocument({baseId:base.id,title:'Existing source',content:'first line\nexact supporting passage'})
@@ -210,5 +222,27 @@ describe('future-only Markdown and settings-aware folder sync',()=>{
   const doc={id:'doc',baseId:'base',title:'test',sourceType:'file' as const,charCount:1,chunkCount:0,createdAt:1,markdownRevision:'saved-rev',indexingSettingsFingerprint:'fingerprint'}
   db.putDocumentMetadata(doc);db.close();const reopened=new ChunkDatabase(join(path,'test.sqlite'))
   expect(reopened.getDocumentMetadata('doc')).toMatchObject({markdownRevision:'saved-rev',indexingSettingsFingerprint:'fingerprint'});reopened.close()
+ })
+})
+
+describe('direct-read citation ranges',()=>{
+ it('verifies exact offsets and rejects stale, deleted and out-of-bounds evidence',async()=>{
+  const {service,base,handler}=await mount()
+  const doc=await service.addTextDocument({baseId:base.id,title:'Range source',content:'First line\nSecond line with evidence\nThird line'})
+  const url=service.citationRangeUrl(doc.id,11,36)
+  const parsed=new URL(url,'http://localhost'),hash=parsed.searchParams.get('hash')!
+  const snap=service.getCitationRange(doc.id,11,36,hash)
+  expect(snap.passages[0].text).toBe('Second line with evidence')
+  expect(snap.passages[0].ranges[0]).toMatchObject({lineStart:2,lineEnd:2})
+  const server=createServer(handler as Parameters<typeof createServer>[0])
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));cleanup.push(()=>new Promise<void>(resolve=>server.close(()=>resolve())))
+  const origin=`http://127.0.0.1:${(server.address() as {port:number}).port}`
+  const response=await fetch(origin+url)
+  expect(response.status).toBe(200);expect(await response.text()).toContain('<mark id="citation">')
+  expect((await fetch(origin+url.replace(hash,'0'.repeat(64)))).status).toBe(409)
+  expect(()=>service.getCitationRange(doc.id,11,36,'0'.repeat(64))).toThrow('changed')
+  expect(()=>service.getCitationRange(doc.id,-1,36,hash)).toThrow('Invalid')
+  await service.deleteBase(base.id)
+  expect(()=>service.getCitationRange(doc.id,11,36,hash)).toThrow('available')
  })
 })

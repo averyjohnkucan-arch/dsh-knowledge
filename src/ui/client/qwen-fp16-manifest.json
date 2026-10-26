@@ -1,0 +1,21 @@
+{
+  "repository": "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+  "revision": "c25a394dd583836952667c12f008335071b3f43d",
+  "files": [
+    {
+      "name": "onnx/model_fp16.onnx",
+      "size": 583522,
+      "sha256": "f376cf065d912675dd559270e19361367ebc28c938b9811dd61d5834c78d0834"
+    },
+    {
+      "name": "onnx/model_fp16.onnx_data",
+      "size": 1199927296,
+      "sha256": "06fbfded30166e3a33fe5252d7002ed1c370a4ec1bf45aba778cdf6cf7d31439"
+    },
+    {
+      "name": "tokenizer.json",
+      "size": 11423705,
+      "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a"
+    }
+  ]
+}

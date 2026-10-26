@@ -1,3 +1,5 @@
+from ocr_text_layout import assemble_ocr_text
+from ocr_recognition_batch import WidthStableRecognizer
 """PP-OCRv5 on explicit NVIDIA CUDA; CPU fallback is never reported as CUDA."""
 import argparse,base64,contextlib,json,pathlib,sys,time,runpy,os,hashlib
 MODEL_HASH=None
@@ -16,7 +18,7 @@ class CudaSession:
    try:import onnx
    except ImportError:self.compact=False
   model=_ctc['compact_model'](cfg['model_path'],os.environ['DSH_CTC_CACHE']) if self.compact else cfg['model_path']
-  self.session=ort.InferenceSession(str(model),sess_options=options,providers=[('CUDAExecutionProvider',{'device_id':0,'gpu_mem_limit':1024**3,'cudnn_conv_algo_search':'HEURISTIC'})])
+  self.session=ort.InferenceSession(str(model),sess_options=options,providers=[('CUDAExecutionProvider',{'device_id':0,'gpu_mem_limit':1024**3,'cudnn_conv_algo_search':'HEURISTIC','use_tf32':0})])
   if 'CUDAExecutionProvider' not in self.session.get_providers():raise RuntimeError('NVIDIA CUDA session unavailable; refusing silent CPU fallback')
  def have_key(self,key='character'):return False
  def __call__(self,x):
@@ -47,7 +49,7 @@ def create_pipeline(models,cache):
  for role,filename in [('Det','ppocrv5_det.onnx'),('Rec','ppocrv5_rec.onnx')]:
   params.update({role+'.engine_type':EngineType.ONNXRUNTIME,role+'.ocr_version':OCRVersion.PPOCRV5,role+'.model_path':str(root/filename)})
  backend.OrtInferSession=CudaSession
- pipeline=RapidOCR(params=params);pipeline._load_det_model();pipeline._load_rec_model();return pipeline
+ pipeline=RapidOCR(params=params);pipeline._load_det_model();pipeline._load_rec_model();pipeline.text_rec=WidthStableRecognizer(pipeline.text_rec);return pipeline
 
 if __name__=='__main__':
  import cv2
@@ -64,7 +66,7 @@ if __name__=='__main__':
     if pipeline is None:pipeline=create_pipeline(args.models,args.cache)
     image=cv2.imdecode(np.frombuffer(base64.b64decode(request['png'],validate=True),dtype=np.uint8),cv2.IMREAD_COLOR)
     if image is None or image.size>96*1024*1024:raise ValueError('Invalid or oversized OCR image')
-    result=pipeline(image,use_cls=False);text='\n'.join(result.txts or [])
+    result=pipeline(image,use_cls=False);text=assemble_ocr_text(result.txts, getattr(result,'boxes',None))
    response={'id':request['id'],'ok':True,'text':text,'elapsedMs':(time.perf_counter()-start)*1000,'provider':'CUDAExecutionProvider','modelHash':MODEL_HASH}
   except Exception as error:response={'id':request.get('id') if isinstance(request,dict) else None,'ok':False,'error':str(error)[:1000]}
   print('DSH_OCR_RESULT '+json.dumps(response),flush=True)

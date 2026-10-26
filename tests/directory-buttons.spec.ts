@@ -36,6 +36,7 @@ function load(file: string, modules: Record<string, unknown>, globals: Record<st
 
 function clientEntry(globals: Record<string, unknown> = {}) {
   return load('index.tsx', {
+    './KnowledgeSource.js': { installKnowledgeSource: () => {} },
     './KnowledgeRetrieval.js': { KnowledgeRetrieval: () => null, retrievalDefinition: {} },
     './api.js': { KnowledgeApi: class {} },
     './KnowledgeSection.js': { KnowledgePanel: () => null, SidebarKnowledgeAction: () => null },
@@ -340,7 +341,8 @@ describe('directory action injection (#42)', () => {
     }
     const get = vi.fn((name: string) => services[name])
     const entry = load('index.tsx', {
-      './KnowledgeRetrieval.js': { KnowledgeRetrieval: () => null, retrievalDefinition: {} },
+      './KnowledgeSource.js': { installKnowledgeSource: () => {} },
+    './KnowledgeRetrieval.js': { KnowledgeRetrieval: () => null, retrievalDefinition: {} },
       './api.js': { KnowledgeApi: class {} },
       './KnowledgeSection.js': { KnowledgePanel: () => null, SidebarKnowledgeAction: () => null },
       './LocalModelsSection.js': { LocalModelsSection: mineruPlaceholder },

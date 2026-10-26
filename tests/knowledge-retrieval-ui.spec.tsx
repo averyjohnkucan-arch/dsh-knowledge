@@ -1,3 +1,4 @@
+import * as citations from '../src/shared/citations.js'
 import { readFile } from 'node:fs/promises'
 import { runInNewContext } from 'node:vm'
 import { transform } from 'esbuild'
@@ -7,7 +8,7 @@ import type { retrievalDefinition as Definition, retrievalRecord as Record } fro
 const module = { exports: {} as { retrievalDefinition: typeof Definition; retrievalRecord: typeof Record; KnowledgeRetrieval: (props: unknown) => unknown } }
 const code = (await transform(await readFile(new URL('../src/ui/client/KnowledgeRetrieval.tsx', import.meta.url), 'utf8'), { loader: 'tsx', jsx: 'automatic', format: 'cjs' })).code
 const jsx = (type: unknown, props: unknown) => ({ type, props })
-runInNewContext(code, { module, exports: module.exports, require: (name: string) => name === '@deepseek-ai/dsh-client-ui-primitives' ? { DisclosureRow: 'DisclosureRow', IconBrowseOutlineRegular: 'IconBrowseOutlineRegular' } : ({ jsx, jsxs: jsx }) })
+runInNewContext(code, { module, exports: module.exports, require: (name: string) => name === '../../shared/citations.js' ? citations : name === '@deepseek-ai/dsh-client-ui-primitives' ? { DisclosureRow: 'DisclosureRow', IconBrowseOutlineRegular: 'IconBrowseOutlineRegular' } : ({ jsx, jsxs: jsx }) })
 const { retrievalDefinition, retrievalRecord, KnowledgeRetrieval } = module.exports
 const render = (data: ReturnType<typeof Record>) => JSON.stringify(KnowledgeRetrieval({ node: { data }, useDisclosure: () => ({ expanded: true, toggle() {} }) }))
 

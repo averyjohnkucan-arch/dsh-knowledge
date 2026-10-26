@@ -1,16 +1,57 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EmbeddingBatcher } from '../src/knowledge/embedding-batcher.js'
 import { EmbeddingAcceleration } from '../src/knowledge/embedding-acceleration.js'
-afterEach(()=>vi.useRealTimers())
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+const managers: EmbeddingAcceleration[] = []
+afterEach(()=>{for(const manager of managers.splice(0))manager.dispose();vi.useRealTimers()})
 const vector=()=>[1,...Array(1023).fill(0)]
 function fixture() {
  const cpu={device:'CPU',milliseconds:100,pending:0,enabled:true,tail:Promise.resolve(),worker:{request:vi.fn(async()=>({vector:vector(),elapsedMs:100})),stopAndWait:vi.fn(async()=>{}),dispose:vi.fn()}}
- const npu={...cpu,device:'NPU',milliseconds:1,worker:{...cpu.worker,request:vi.fn(async()=>{throw Error('Device disappeared')})}}
- const manager=new EmbeddingAcceleration()
+ const npu={...cpu,device:'NPU',milliseconds:1,worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{}),request:vi.fn(async()=>{throw Error('Device disappeared')})}}
+ const manager=new EmbeddingAcceleration();managers.push(manager)
+ // These fixtures exercise fake lanes; background hardware probing would
+ // otherwise launch real calibration requests and make assertions race.
+ vi.spyOn(manager as unknown as {updateGpus():Promise<void>},'updateGpus').mockResolvedValue(undefined)
  Object.assign(manager,{warmed:true,ready:{status:'ready',message:'validated',devices:[]},lanes:[cpu,npu]})
  return {manager,cpu,npu}
 }
 describe('embedding device fallback and yielding',()=>{
+ it('initializes only one worker set when startup and query readiness overlap',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'embedding-ready-'))
+  const {manager,cpu}=fixture()
+  const lane=vi.fn((device:string)=>({...cpu,device}))
+  Object.assign(manager,{cache:root,ready:undefined,lanes:[],cpuInstances:1,lane})
+  try {
+   await mkdir(join(root,'embedding-accelerators'),{recursive:true})
+   await writeFile(join(root,'embedding-accelerators','ready.json'),JSON.stringify({schema:1,modelId:'OpenVINO/Qwen3-Embedding-0.6B-int8-ov',devices:[{device:'CPU',qualified:true},{device:'NPU',qualified:true}]}))
+   await Promise.all([manager.status(),manager.status(),manager.status()])
+   expect(lane).toHaveBeenCalledTimes(2)
+   manager.dispose()
+   expect((await manager.status()).status).toBe('not_installed')
+   expect(lane).toHaveBeenCalledTimes(2)
+  }finally{manager.dispose();await rm(root,{recursive:true,force:true})}
+ })
+
+ it('sends a lookup to idle CPU instead of queuing behind a busy NPU',async()=>{
+  const {manager,cpu,npu}=fixture()
+  npu.pending=1
+  expect(await manager.embed(['question'],'query')).toEqual([vector()])
+  expect(cpu.worker.request).toHaveBeenCalledOnce()
+  expect(npu.worker.request).not.toHaveBeenCalled()
+ })
+
+ it('can query the same hot NPU while nested chat reservations are active',async()=>{
+  const {manager,cpu,npu}=fixture()
+  npu.worker.request.mockResolvedValue({vector:vector(),elapsedMs:1} as never)
+  const first=await manager.enterForeground(),second=await manager.enterForeground(true)
+  expect(await manager.embed(['question'],'query')).toEqual([vector()])
+  expect(npu.worker.stopAndWait).not.toHaveBeenCalled()
+  expect(npu.worker.request).toHaveBeenCalledOnce()
+  expect(cpu.worker.request).not.toHaveBeenCalled()
+  second();first()
+ })
  it('runs CPU, NPU and available GPU lanes concurrently instead of switching the whole pipeline',async()=>{
   const {manager,cpu}=fixture();let finish!:()=>void
   const gate=new Promise<void>(resolve=>{finish=resolve})
@@ -39,6 +80,20 @@ describe('embedding device fallback and yielding',()=>{
   expect(npu.worker.request).toHaveBeenCalled();expect(cpu.worker.request).toHaveBeenCalledTimes(2)
   manager.dispose()
  })
+ it('retries a CPU lane interrupted by foreground handoff on the surviving CPU',async()=>{
+  const {manager,cpu}=fixture()
+  const paused={...cpu,milliseconds:1,worker:{...cpu.worker,request:vi.fn(async()=>{paused.enabled=false;throw Error('Embedding device yielded')})}}
+  Object.assign(manager,{lanes:[paused,cpu]})
+  expect(await manager.embed(['retained passage'])).toEqual([vector()])
+  expect(cpu.worker.request).toHaveBeenCalledOnce();manager.dispose()
+ })
+ it('never sends device fallback to a disabled CPU lane',async()=>{
+  const {manager,cpu,npu}=fixture()
+  const paused={...cpu,enabled:false,pending:0,worker:{...cpu.worker,request:vi.fn(async()=>{throw Error('Embedding device yielded')})}}
+  Object.assign(manager,{lanes:[paused,cpu,npu]})
+  expect(await manager.embed(['retained passage'])).toEqual([vector()])
+  expect(paused.worker.request).not.toHaveBeenCalled();expect(cpu.worker.request).toHaveBeenCalledOnce();manager.dispose()
+ })
  it('keeps retrieval off GPUs even when a GPU lane is much faster',async()=>{
   const {manager,cpu}=fixture()
   const gpu={...cpu,device:'GPU:main',milliseconds:1,worker:{...cpu.worker,request:vi.fn(async()=>({vector:vector(),elapsedMs:1}))}}
@@ -46,7 +101,7 @@ describe('embedding device fallback and yielding',()=>{
   await manager.embed(['question'],'query')
   expect(cpu.worker.request).toHaveBeenCalledTimes(1);expect(gpu.worker.request).not.toHaveBeenCalled();manager.dispose()
  })
- it('releases GPU after its current job completes and never stops CPU or NPU lanes',async()=>{
+ it('releases GPU after its current job completes while retaining hot CPU and NPU',async()=>{
   const {manager,cpu,npu}=fixture();let finish!:()=>void
   const second={...cpu.worker,stopAndWait:vi.fn(async()=>{})}
   const gpu={...cpu,device:'GPU:main',extraWorkers:[second],current:new Promise<void>(r=>{finish=r}),worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})}}
@@ -57,11 +112,11 @@ describe('embedding device fallback and yielding',()=>{
  it('forces GPU release at ten seconds when the current job does not finish',async()=>{
   vi.useFakeTimers();const {manager,cpu}=fixture()
   const gpu={...cpu,device:'GPU:intel',current:new Promise<void>(()=>{}),worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})}}
-  Object.assign(manager,{lanes:[cpu,gpu]});const pending=manager.enterForeground()
+  Object.assign(manager,{lanes:[cpu,gpu]});const pending=manager.enterForeground(true)
   await vi.advanceTimersByTimeAsync(9999);expect(gpu.worker.stopAndWait).not.toHaveBeenCalled()
   await vi.advanceTimersByTimeAsync(1);const release=await pending;expect(gpu.worker.stopAndWait).toHaveBeenCalledTimes(1);release();manager.dispose()
  })
- it('falls back after a five-second NPU queue wait without disabling or stopping the NPU',async()=>{
+ it('falls back after a bounded NPU queue wait without disabling or stopping the NPU',async()=>{
   vi.useFakeTimers();const {manager,cpu,npu}=fixture()
   let finish!:()=>void
   const gate=new Promise<void>(resolve=>{finish=resolve})
@@ -71,7 +126,7 @@ describe('embedding device fallback and yielding',()=>{
   const active=batcher.request('bulk')
   await vi.advanceTimersByTimeAsync(3)
   const query=manager.embed(['question'],'query')
-  await vi.advanceTimersByTimeAsync(4999);expect(cpu.worker.request).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(249);expect(cpu.worker.request).not.toHaveBeenCalled()
   await vi.advanceTimersByTimeAsync(1);expect(await query).toEqual([vector()])
   expect(npu.enabled).toBe(true);expect(npu.worker.dispose).not.toHaveBeenCalled()
   finish();await active;await vi.advanceTimersByTimeAsync(10)
@@ -100,7 +155,7 @@ describe('embedding device fallback and yielding',()=>{
 })
 
 describe('foreground embedding CPU budget',()=>{
- it('keeps one CPU lane and NPU while releasing extra CPU/GPU workers, then resumes CPU lanes',async()=>{
+ it('keeps CPU and NPU hot while releasing extra CPU workers, then resumes them',async()=>{
   const {manager,cpu,npu}=fixture();npu.worker.request.mockResolvedValue({vector:vector(),elapsedMs:100} as never)
   const extra={...cpu,worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})},batcher:{pause:vi.fn(),resume:vi.fn()}}
   Object.assign(manager,{lanes:[cpu,extra,npu]})
@@ -109,4 +164,111 @@ describe('foreground embedding CPU budget',()=>{
   expect(extra.worker.stopAndWait).toHaveBeenCalledOnce()
   release();release();expect(extra.enabled).toBe(true);expect(extra.batcher.resume).toHaveBeenCalledOnce();manager.dispose()
  })
+})
+
+it('releases Intel during chat and keeps accelerators stopped across nested reservations',async()=>{
+ const {manager,cpu,npu}=fixture()
+ const intel={...cpu,device:'GPU:intel',worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})}}
+ Object.assign(manager,{lanes:[cpu,npu,intel]})
+ const chat=await manager.enterForeground()
+ expect(intel.enabled).toBe(false);expect(npu.enabled).toBe(true)
+ const otherModel=await manager.enterForeground(true)
+ expect(intel.enabled).toBe(false);expect(intel.worker.stopAndWait).toHaveBeenCalledTimes(2)
+ otherModel();expect(npu.enabled).toBe(true)
+ chat();expect(npu.enabled).toBe(true);manager.dispose()
+})
+
+it('reserves CPU for parsing, uses an accelerator, then restores CPU embedding after parsing',async()=>{
+ const {manager,cpu,npu}=fixture();let parsing=true
+ npu.worker.request.mockResolvedValue({vector:vector(),elapsedMs:100} as never)
+ manager.setIndexCpuAvailability(()=>!parsing)
+ expect(await manager.embed(['accelerator passage'])).toEqual([vector()])
+ expect(cpu.worker.request).not.toHaveBeenCalled();expect(npu.worker.request).toHaveBeenCalledOnce()
+ Object.assign(manager,{lanes:[cpu]})
+ const waiting=manager.embed(['CPU passage'])
+ await new Promise(resolve=>setTimeout(resolve,30));expect(cpu.worker.request).not.toHaveBeenCalled()
+ parsing=false
+ expect(await waiting).toEqual([vector()]);expect(cpu.worker.request).toHaveBeenCalledOnce();manager.dispose()
+})
+
+it('routes NPU long inputs to CUDA while CPU is reserved for parsing',async()=>{
+ const {manager,cpu,npu}=fixture()
+ npu.worker.request.mockRejectedValueOnce(new Error('NPU_LONG_INPUT'))
+ const gpu={...cpu,device:'GPU:main',milliseconds:1000,worker:{...cpu.worker,request:vi.fn(async()=>({vector:vector(),elapsedMs:1}))}}
+ Object.assign(manager,{lanes:[cpu,npu,gpu]})
+ manager.setIndexCpuAvailability(()=>false)
+ try {
+  expect(await manager.embed(['long article'])).toEqual([vector()])
+  expect(gpu.worker.request).toHaveBeenCalledTimes(1)
+  expect(cpu.worker.request).not.toHaveBeenCalled()
+ } finally {manager.dispose()}
+})
+
+it('does not qualify indexing GPUs for readiness queries and yields idle GPU memory to enrichment',async()=>{
+ const {manager,cpu}=fixture()
+ const internal=manager as unknown as {updateGpus():Promise<void>}
+ vi.mocked(internal.updateGpus).mockRestore()
+ const availability=await import('../src/knowledge/embedding-device-availability.js')
+ const policy=await import('../src/knowledge/resource-policy.js')
+ const {knowledgeGpuAdmission}=await import('../src/knowledge/background-gpu.js')
+ const gpuProbe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:true,freeMiB:16000,reason:'available'})
+ const desktop=vi.spyOn(policy,'desktopIdle').mockResolvedValue({idleSeconds:600} as never)
+ Object.assign(manager,{used:true,fp16:true,intelAvailability:{sample:async()=>({available:true,reason:'available'})},lanes:[cpu]})
+ const owner={}
+ try {
+  await internal.updateGpus()
+  expect(cpu.worker.request).not.toHaveBeenCalled()
+  expect(manager.snapshot.devices.filter(device=>device.device.startsWith('GPU')).every(device=>device.blockedReason==='Waiting for embedding work')).toBe(true)
+  const gpu={...cpu,device:'GPU:main',worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})}}
+  Object.assign(manager,{lanes:[cpu,gpu],lastIndexUse:Date.now()-20000})
+  knowledgeGpuAdmission.request(owner,true)
+  await internal.updateGpus()
+  expect(gpu.worker.stopAndWait).toHaveBeenCalledOnce();expect(gpu.enabled).toBe(false)
+ }finally{knowledgeGpuAdmission.request(owner,false);gpuProbe.mockRestore();desktop.mockRestore()}
+})
+
+ it.each(['NPU_LONG_INPUT','IGPU_LONG_INPUT'])('routes %s to qualified CUDA capacity rather than a CPU-only backlog',async(code)=>{
+  const {manager,cpu,npu}=fixture()
+  npu.worker.request.mockRejectedValue(new Error(code))
+  const gpu={...cpu,device:'GPU:main',milliseconds:10,qualified:true,worker:{...cpu.worker,request:vi.fn(async()=>({vector:vector(),elapsedMs:10}))}}
+  Object.assign(manager,{lanes:[cpu,npu,gpu]})
+  expect(await manager.embed(['long passage'])).toEqual([vector()])
+  expect(npu.worker.request).toHaveBeenCalledOnce()
+  expect(gpu.worker.request).toHaveBeenCalledOnce()
+  expect(cpu.worker.request).not.toHaveBeenCalled()
+ })
+ it('keeps long-input fallback on CPU while foreground inference reserves accelerators',async()=>{
+  const {manager,cpu,npu}=fixture()
+  npu.worker.request.mockImplementation(async()=>{Object.assign(manager,{foreground:1});throw Error('NPU_LONG_INPUT')})
+  const gpu={...cpu,device:'GPU:main',milliseconds:10,qualified:true,worker:{...cpu.worker,request:vi.fn(async()=>({vector:vector(),elapsedMs:10}))}}
+  Object.assign(manager,{lanes:[cpu,npu,gpu]})
+  expect(await manager.embed(['long passage'])).toEqual([vector()])
+  expect(gpu.worker.request).not.toHaveBeenCalled()
+  expect(cpu.worker.request).toHaveBeenCalledOnce()
+ })
+
+it('retries failed GPU qualification after cooldown without weakening reference checks',async()=>{
+ const {manager,cpu}=fixture();const internal=manager as any
+ vi.mocked(internal.updateGpus).mockRestore()
+ const availability=await import('../src/knowledge/embedding-device-availability.js')
+ const policy=await import('../src/knowledge/resource-policy.js')
+ const gpuProbe=vi.spyOn(availability,'nvidiaEmbeddingAvailability').mockResolvedValue({available:true,freeMiB:16000,reason:'available'})
+ const desktop=vi.spyOn(policy,'desktopIdle').mockResolvedValue({idleSeconds:600} as never)
+ let now=1_000_000,correct=false
+ const clock=vi.spyOn(Date,'now').mockImplementation(()=>now)
+ Object.assign(manager,{used:true,fp16:true,activeIndexBatches:1,mainGpuAllowed:false,intelAvailability:{sample:async()=>({available:true,reason:'available'})},lanes:[cpu]})
+ const factory=vi.spyOn(internal,'lane').mockImplementation(()=>({...cpu,device:'GPU',worker:{...cpu.worker,
+  request:vi.fn(async()=>({vector:correct?vector():[0,1,...Array(1022).fill(0)],elapsedMs:10})),stopAndWait:vi.fn(async()=>{}),dispose:vi.fn()
+ }}))
+ try{
+  await internal.updateGpus()
+  const failed=manager.snapshot.devices.find(device=>device.device==='GPU:intel')!
+  expect(failed).toMatchObject({qualified:false,minimumCosine:0})
+  expect(failed.error).toContain('minimum cosine 0.00000000')
+  await internal.updateGpus();expect(factory).toHaveBeenCalledTimes(1)
+  now+=300_001;correct=true
+  await internal.updateGpus();expect(factory).toHaveBeenCalledTimes(2)
+  expect(manager.snapshot.devices.find(device=>device.device==='GPU:intel')).toMatchObject({qualified:true,minimumCosine:1})
+  expect(manager.snapshot.devices.find(device=>device.device==='GPU:intel')!.error).toBeUndefined()
+ }finally{clock.mockRestore();gpuProbe.mockRestore();desktop.mockRestore();factory.mockRestore()}
 })

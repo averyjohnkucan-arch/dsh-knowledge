@@ -188,7 +188,8 @@ function onMessage(message: unknown, generation: number): void {
     const value = validateSuccess(entry, message)
     // A scored response proves the model is loaded in this child, i.e. the next
     // request will not pay the load again.
-    if (entry.request.operation === 'rerank') childWarm = true
+    if (['rerank', 'self_test', 'load'].includes(entry.request.operation)) childWarm = true
+    if (['dispose', 'shutdown'].includes(entry.request.operation)) childWarm = false
     finishActive(undefined, value)
   } catch (error) {
     finishActive(error instanceof Error ? error : new Error(String(error)))

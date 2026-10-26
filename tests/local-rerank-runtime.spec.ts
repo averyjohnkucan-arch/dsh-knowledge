@@ -57,6 +57,9 @@ vi.mock('node:child_process', () => ({
 
 import {
   LocalRerankError,
+  loadLocalReranker,
+  localRerankChildIsWarm,
+  releaseLocalReranker,
   disposeLocalRerankProcess,
   localRerankRuntimeSnapshot,
   rerankInLocalProcess,
@@ -75,6 +78,25 @@ describe('local rerank child-process runtime', () => {
     await disposeLocalRerankProcess()
     setLocalRerankIdleTimeoutMs(60_000)
     vi.useRealTimers()
+  })
+
+  it('keeps the loaded CPU model warm beyond idle periods when keep-hot is selected', async () => {
+    await loadLocalReranker('test/keep-hot', 'cache')
+    expect(localRerankChildIsWarm()).toBe(true)
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    expect(state.instances[0]?.killed).toBe(false)
+    await rerankInLocalProcess('test/keep-hot', 'cache', undefined, 'q', ['a'], 1000)
+    expect(state.instances).toHaveLength(1)
+    await releaseLocalReranker('test/keep-hot', 'cache')
+    expect(localRerankChildIsWarm()).toBe(false)
+  })
+
+  it('still honors an explicit idle unload setting', async () => {
+    setLocalRerankIdleTimeoutMs(60_000)
+    await loadLocalReranker('test/idle-unload', 'cache')
+    await vi.advanceTimersByTimeAsync(60_001)
+    expect(state.instances[0]?.killed).toBe(true)
+    expect(localRerankChildIsWarm()).toBe(false)
   })
 
   it('dispatches a strict score response from the isolated process', async () => {

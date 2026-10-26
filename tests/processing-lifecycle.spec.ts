@@ -42,6 +42,27 @@ describe('processing lifecycle', () => {
     expect(() => admission.run('late.md', async () => 1)).toThrow()
   })
 
+  it('releases parsing admission during enrichment but bounds retained documents', async () => {
+    const admission = new DocumentAdmission(8, 1)
+    const release: Array<() => void> = []
+    let parsed = 0
+    const tasks = Array.from({ length: 6 }, (_, i) => admission.run(`${i}.pdf`, async () => {
+      parsed++
+      admission.parsed()
+      await new Promise<void>(resolve => release.push(resolve))
+    }))
+    for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve))
+    expect(parsed).toBe(4) // bounded downstream buffer, not the old one-document stall
+    expect(await admission.runReady(async () => 'vectors from saved text')).toBe('vectors from saved text')
+    release.shift()!()
+    for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve))
+    expect(parsed).toBe(5)
+    admission.close()
+    const settled = Promise.allSettled(tasks)
+    release.forEach(done => done())
+    expect((await settled).filter(result => result.status === 'rejected')).toHaveLength(1)
+  })
+
   it('stores immutable revisions and rejects cross-document access and tampering', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-artifacts-')); dirs.push(root)
     const repository = new ArtifactRepository(root)

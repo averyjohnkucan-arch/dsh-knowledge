@@ -55,6 +55,9 @@ describe('resolveConfig', () => {
     expect(resolveConfig(base, {})).toEqual({
       ...expected,
       embeddingDimensions: 0,
+      deferredChartEnrichment: false,
+      deferredPhotoCaptions: false,
+      deferredPhotoCaptionModel: '',
       ocrEnabled: true,
       structureV3Charts: true,
       mineruLocalUrl: 'http://127.0.0.1:8000',
@@ -102,10 +105,9 @@ describe('resolveConfig', () => {
   })
 
   it('configures the local model worker idle timeout (default, zero, and clamp)', () => {
-    // Default 60000 = idle release unloads the MODELS but keeps the worker
-    // alive, so onnxruntime's binding is never reloaded (avoids the Linux
-    // 'Module did not self-register' respawn bug).
+    // Explicit idle timeouts remain supported; new deployments keep models hot.
     expect(resolveConfig(base, {}).localWorkerIdleTimeoutMs).toBe(60000)
+    expect(resolveConfig({ ...base, localWorkerIdleTimeoutMs: undefined } as unknown as Config, {}).localWorkerIdleTimeoutMs).toBe(0)
     expect(resolveConfig(base, { localWorkerIdleTimeoutMs: 0 }).localWorkerIdleTimeoutMs).toBe(0)
     expect(resolveConfig(base, { localWorkerIdleTimeoutMs: 24 * 3600 * 1000 }).localWorkerIdleTimeoutMs).toBe(24 * 3600 * 1000)
     expect(resolveConfig(base, { localWorkerIdleTimeoutMs: 999999999 }).localWorkerIdleTimeoutMs).toBe(24 * 3600 * 1000)

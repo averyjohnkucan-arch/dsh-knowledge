@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { foreignNvidiaGraphics, intelActivityAvailable, parseIntelActivity, nvidiaMemorySufficient } from '../src/knowledge/embedding-device-availability.js'
+import { describe, expect, it, vi } from 'vitest'
+import { NvidiaActivityProbe, IntelEmbeddingAvailability, foreignNvidiaGraphics, intelActivityAvailable, parseIntelActivity, nvidiaMemorySufficient } from '../src/knowledge/embedding-device-availability.js'
 describe('embedding GPU availability', () => {
   it('requires launch headroom without evicting its own already resident workers', () => {
     expect(nvidiaMemorySufficient(3000,false)).toBe(false)
@@ -24,4 +24,61 @@ describe('embedding GPU availability', () => {
     expect(foreignNvidiaGraphics('0 5555 G - - - - - - game',new Set())).toBe(true)
     expect(foreignNvidiaGraphics('0 2993 G 20 - - - - - gnome-shell',new Set())).toBe(true)
   })
+})
+
+it('allows known desktop rendering but still yields to compute activity and unknown applications',()=>{
+ const separate='drm-driver: i915\ndrm-client-id: 7\ndrm-engine-render: 100000000 ns\ndrm-engine-compute: 60000000 ns\ndrm-engine-video: 30000000 ns\n'
+ for(const name of ['Xwayland','gnome-shell','ChatGPT']){
+  expect(parseIntelActivity(separate,name)).toEqual({client:'7',nanoseconds:60000000})
+  expect(intelActivityAvailable(0,parseIntelActivity(separate,name)!.nanoseconds,1000)).toBe(false)
+  expect(parseIntelActivity(separate.replace('60000000 ns','0 ns'),name)).toEqual({client:'7',nanoseconds:0})
+ }
+ expect(parseIntelActivity(separate,'python')).toEqual({client:'7',nanoseconds:190000000})
+ expect(parseIntelActivity(separate.replace('drm-engine-compute: 60000000 ns\n',''),'Xwayland')).toEqual({client:'7',nanoseconds:130000000})
+})
+
+ it('coalesces concurrent Intel scans for the same ownership and retries after a failed scan', async () => {
+  const monitor = new IntelEmbeddingAvailability()
+  let finish!: (value: {available:boolean;reason:string}) => void
+  const probe = vi.spyOn(monitor as any, 'sampleNow').mockImplementation(() => new Promise(resolve => {finish=resolve}))
+  const first=monitor.sample(new Set([1,2]))
+  const second=monitor.sample(new Set([2,1]))
+  expect(first).toBe(second)
+  expect(probe).toHaveBeenCalledOnce()
+  finish({available:true,reason:'measured'});await first
+  probe.mockRejectedValueOnce(new Error('scan failed'))
+  await expect(monitor.sample(new Set([1,2]))).rejects.toThrow('scan failed')
+  probe.mockResolvedValueOnce({available:false,reason:'foreign compute'})
+  expect(await monitor.sample(new Set([1,2]))).toMatchObject({available:false})
+  expect(probe).toHaveBeenCalledTimes(3)
+ })
+ it('does not reuse a permission decision for different device ownership', async () => {
+  const monitor=new IntelEmbeddingAvailability()
+  const probe=vi.spyOn(monitor as any,'sampleNow').mockImplementation(async (owned:any)=>({available:owned.has(7),reason:'sample'}))
+  const results=await Promise.all([monitor.sample(new Set([7])),monitor.sample(new Set())])
+  expect(results.map(value=>value.available)).toEqual([true,false])
+  expect(probe).toHaveBeenCalledTimes(2)
+ })
+
+it('shares concurrent NVIDIA reads without caching completed hardware samples',async()=>{
+ const finish:Array<(text:string)=>void>=[]
+ const query=vi.fn((_args:string[])=>new Promise<string>(resolve=>finish.push(resolve)))
+ const probe=new NvidiaActivityProbe(query)
+ const first=probe.sample(),second=probe.sample()
+ expect(first).toBe(second)
+ const count=process.platform==='linux'?3:2
+ expect(query).toHaveBeenCalledTimes(count)
+ finish.splice(0).forEach(resolve=>resolve('sample'))
+ expect(await first).toMatchObject({apps:'sample',memory:'sample'})
+ const next=probe.sample()
+ expect(next).not.toBe(first)
+ expect(query).toHaveBeenCalledTimes(count*2)
+ finish.splice(0).forEach(resolve=>resolve('fresh'))
+ expect(await next).toMatchObject({apps:'fresh',memory:'fresh'})
+})
+it('retries NVIDIA monitoring after a rejected hardware query',async()=>{
+ const query=vi.fn(async(_args:string[])=>'fresh').mockRejectedValueOnce(new Error('unavailable'))
+ const probe=new NvidiaActivityProbe(query)
+ await expect(probe.sample()).rejects.toThrow('unavailable')
+ expect(await probe.sample()).toMatchObject({apps:'fresh',memory:'fresh'})
 })

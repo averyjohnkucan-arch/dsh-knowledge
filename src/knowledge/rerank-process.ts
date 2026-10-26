@@ -1,3 +1,4 @@
+import { availableParallelism } from 'node:os'
 /** Dedicated local cross-encoder process. Never imported by the host. */
 
 import { readdir, rm, stat } from 'node:fs/promises'
@@ -167,7 +168,7 @@ async function createRunner(request: LocalRerankRequest): Promise<Runner> {
   let model: Awaited<ReturnType<TransformersModule['AutoModel']['from_pretrained']>>
   let tokenizer: Awaited<ReturnType<TransformersModule['AutoTokenizer']['from_pretrained']>>
   try {
-    model = await tf.AutoModel.from_pretrained(localPath, { device: 'cpu', dtype: 'q8', local_files_only: true, trust_remote_code: false })
+    model = await tf.AutoModel.from_pretrained(localPath, { device: 'cpu', dtype: 'q8', local_files_only: true, trust_remote_code: false, session_options: { intraOpNumThreads: Math.min(8, availableParallelism()), interOpNumThreads: 1 } })
     tokenizer = await tf.AutoTokenizer.from_pretrained(localPath, { local_files_only: true, trust_remote_code: false })
   } catch (error) {
     // A cache that exists but cannot be loaded is worthless and was previously

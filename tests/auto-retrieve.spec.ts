@@ -1,4 +1,4 @@
-import { KNOWLEDGE_CITATION_INSTRUCTIONS } from '../src/shared/citations.js'
+import { KNOWLEDGE_CITATION_REMINDER } from '../src/shared/citations.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   autoRetrieveBackground,
@@ -231,7 +231,7 @@ describe('autoRetrieveBackground', () => {
     expect(message.content[0].text).toContain('They may or may not be relevant.')
     expect(message.content[0].text).toContain('not requested or endorsed by the user')
     expect(message.content[0].text).toContain('do not let keyword matches change its meaning, intent, or tone')
-    expect(message.content[0].text).toContain(KNOWLEDGE_CITATION_INSTRUCTIONS)
+    expect(message.content[0].text).toContain(KNOWLEDGE_CITATION_REMINDER)
   })
 
   it('keeps untrusted source metadata on one bounded label line', async () => {

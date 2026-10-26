@@ -166,3 +166,18 @@ describe('SQLite evidence persistence', () => {
     } finally { db.close() }
   })
 })
+
+it('coalesces concurrent checkpoints and keeps a following deletion ordered', async () => {
+  const {store}=await storage()
+  const chunkDb=(store as unknown as {chunkDb:ChunkDatabase}).chunkDb
+  const batches=vi.spyOn(chunkDb,'stageDocumentGenerations')
+  await Promise.all(Array.from({length:16},()=>store.stageDocumentGeneration(nextDocument,[newChunk])))
+  expect(batches).toHaveBeenCalledTimes(1)
+  expect(batches.mock.calls[0][0]).toHaveLength(16)
+  const checkpoint=store.stageDocumentGeneration(nextDocument,[newChunk])
+  const deletion=store.deleteDocument(document.id)
+  const later=store.stageDocumentGeneration(nextDocument,[newChunk])
+  await checkpoint;await deletion
+  await expect(later).rejects.toThrow('target_missing')
+  expect(store.getStagedDocumentGeneration(document.id)).toBeUndefined()
+})

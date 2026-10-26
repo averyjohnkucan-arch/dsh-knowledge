@@ -27,6 +27,7 @@
  */
 
 import { parentPort } from 'node:worker_threads'
+import { joinPdfTextItems } from './pdf-text-layout.mjs'
 
 // Installing a listener keeps this thread alive through a library-internal
 // stray rejection instead of letting Node's default policy terminate it. The
@@ -37,24 +38,21 @@ process.on('unhandledRejection', reason => {
   console.warn(`[dsh-knowledge] pdf-parse worker ignored a stray rejection: ${message.slice(0, 200)}`)
 })
 
+let queue = Promise.resolve()
 parentPort?.on('message', message => {
   if (message?.type === 'shutdown') {
     process.exit(0)
     return
   }
   const { id, data } = message
-  void (async () => {
+  queue = queue.then(async () => {
     try {
       // pdf-parse v1 is CommonJS; the default export is the parser function.
       const mod = await import('pdf-parse')
       const pages = [], scanned = []
       const result = await mod.default(Buffer.from(data), { pagerender: async page => {
         const content = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false })
-        let text = '', lastY
-        for (const item of content.items) {
-          if (lastY !== undefined && lastY !== item.transform[5]) text += '\n'
-          text += item.str; lastY = item.transform[5]
-        }
+        const text = joinPdfTextItems(content.items)
         pages[page.pageNumber - 1] = text
         // Text extraction must not decode images. pdf.js 1.10's operator-list
         // path uses browser Image globals and is expensive on scanned PDFs.
@@ -66,5 +64,5 @@ parentPort?.on('message', message => {
     } catch (error) {
       parentPort?.postMessage({ id, ok: false, error: error instanceof Error ? error.message : String(error) })
     }
-  })()
+  })
 })

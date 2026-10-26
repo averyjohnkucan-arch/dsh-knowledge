@@ -783,6 +783,30 @@ describe('KnowledgeService', () => {
     }
   })
 
+  it('reports semantic segment inference as embedding with advancing progress', async () => {
+    const service = await mountService()
+    const base = await service.createBase({ name: 'semantic-progress' })
+    const observations: Array<{ phase: string; progress: number }> = []
+    const embed = vi.spyOn(service as unknown as { embedTextsOnce(config: unknown, texts: string[]): Promise<number[][]> }, 'embedTextsOnce')
+      .mockImplementation(async (_config, texts) => {
+        const status = service.indexingStatus().find(row => row.title === 'semantic progress')
+        if (status) observations.push({ phase: status.phase, progress: status.progress })
+        return texts.map(() => [1, 0, 0])
+      })
+    try {
+      const doc = await service.addTextDocument({ baseId: base.id, title: 'semantic progress',
+        content: ['First astronomy paragraph. '.repeat(30), 'Second geology paragraph. '.repeat(30), 'Third biology paragraph. '.repeat(30)].join('\n\n') })
+      await service.setConfig({ semanticChunk: true, semanticChunkCandidateTokens: 128, embeddingBatchSize: 1,
+        embeddingProvider: 'openai', embeddingBaseUrl: 'http://127.0.0.1:1', embeddingModel: 'test-embed' })
+      await service.reindexDocument(doc.id, { mode: 'rechunk' })
+      await service.waitForIdle()
+      expect(observations.length).toBeGreaterThan(1)
+      expect(observations.every(row => row.phase === 'embedding')).toBe(true)
+      expect(observations[0].progress).toBe(0)
+      expect(observations.some(row => row.progress > 0)).toBe(true)
+    } finally { embed.mockRestore() }
+  })
+
   it('rejects unsupported file types before creating a row', async () => {
     const service = await mountService()
     const base = await service.createBase({ name: 'reject-ext' })
@@ -1829,9 +1853,12 @@ it.each([{ large: false, peak: 9 }, { large: true, peak: 4 }])('bounds lightweig
   Object.assign(privateService, {processingConcurrency:4})
   const extract = privateService.extractDocumentText.bind(service)
   let active = 0, peak = 0
+  let release!: () => void
+  const admitted = new Promise<void>(resolve => { release = resolve })
   const parser = vi.spyOn(privateService, 'extractDocumentText').mockImplementation(async (...args) => {
     active++; peak = Math.max(peak, active)
-    try { await new Promise(resolve => setTimeout(resolve, 10)); return await extract(...(fixture.large ? [{ ...(args[0] as object), bytes: Buffer.from('Small parser fixture for ' + String((args[0] as {fileName?:string}).fileName)) }] : args)) }
+    if (active >= fixture.peak) release()
+    try { await admitted; return await extract(...args) }
     finally { active-- }
   })
   try {
@@ -1845,8 +1872,8 @@ it.each([{ large: false, peak: 9 }, { large: true, peak: 4 }])('bounds lightweig
     expect(active).toBe(0)
     expect(writes.mock.calls.length).toBeLessThanOrEqual(3)
     expect(service.listDocuments(base.id).filter(d => d.sourceType === 'file')).toHaveLength(9)
-  } finally { parser.mockRestore(); await rm(root, { recursive: true, force: true }) }
-})
+  } finally { release(); parser.mockRestore(); await rm(root, { recursive: true, force: true }) }
+}, 15000)
 
 
 it('rebuilds an incomplete internal file even when live and stored bytes match', async () => {
@@ -1915,7 +1942,10 @@ it('reconciles indexing settings from saved parsing evidence without rerunning O
     expect(service.getDocument(doc.id).processing?.revision).toBe(revision)
     await service.renameBase(base.id,{config:{embeddingProvider:'openai',embeddingModel:'new-vector-model',embeddingBaseUrl:'http://127.0.0.1:1'}})
     const vectorChange=await service.importDirectoryTree(base.id,root)
-    expect(vectorChange.sync?.failed).toBe(0)
+    // A staged import now waits for vectors; this deliberately mocked-out
+    // backfill leaves them missing and must not report end-to-end success.
+    expect(vectorChange.sync?.failed).toBe(1)
+    expect(vectorChange.errors[0].error).toContain('missing embeddings')
     expect(parser).not.toHaveBeenCalled()
     expect(service.getDocument(doc.id).processing?.revision).toBe(revision)
     await writeFile(join(root,'source.txt'),'Changed source text about new findings. '.repeat(80))
@@ -2074,4 +2104,109 @@ it('does not resume source processing after its base is deleted', async () => {
   await internal.resumeInterruptedDocuments([doc.id])
   expect(rebuild).not.toHaveBeenCalled()
   rebuild.mockRestore()
+})
+
+it('keeps embedding behind all raw-source recovery work and exposes parsing progress', async()=>{
+ const service=await mountService(),internal=service as any
+ const base=await service.createBase({name:'Recovery stage barrier'})
+ const docs=await Promise.all(['one','two'].map(title=>service.addTextDocument({baseId:base.id,title,content:'Original source '+title})))
+ for(const doc of docs) await internal.store.putDocument({...internal.store.getDocument(doc.id),sourceType:'file',rawFilePath:doc.title+'.pdf',rawText:undefined,incomplete:true})
+ Object.defineProperty(internal.store,'raw',{configurable:true,value:{read:async()=>new Uint8Array([1])}})
+ const releases:Array<()=>void>=[]
+ const parse=vi.spyOn(internal,'extractDocumentText').mockImplementation(async()=>{
+   expect(internal.hasOcrWork()).toBe(true);expect(internal.hasParsingWork()).toBe(true)
+   await new Promise<void>(resolve=>releases.push(resolve));return {text:'Recovered evidence'}
+ })
+ const ingest=vi.spyOn(internal,'ingestDocument').mockResolvedValue(docs[0])
+ const recovery=internal.resumeInterruptedDocuments(docs.map(doc=>doc.id))
+ let embeddingReleased=false
+ const waiting=internal.yieldEmbeddingWork().then(()=>{embeddingReleased=true})
+ try{
+  await vi.waitFor(()=>expect(releases.length).toBe(1))
+  expect(service.indexingStatus().find(row=>row.docId===docs[0].id)?.phase).toBe('parsing')
+  expect(embeddingReleased).toBe(false)
+  releases[0]();await vi.waitFor(()=>expect(releases.length).toBe(2))
+  expect(embeddingReleased).toBe(false)
+  expect(service.indexingStatus().find(row=>row.docId===docs[1].id)?.phase).toBe('parsing')
+  releases[1]();await recovery;await waiting
+  expect(embeddingReleased).toBe(true);expect(internal.hasOcrWork()).toBe(false)
+  expect(service.indexingStatus().filter(row=>docs.some(doc=>doc.id===row.docId))).toEqual([])
+ }finally{releases.forEach(release=>release());parse.mockRestore();ingest.mockRestore()}
+})
+
+it('releases the recovery stage barrier after a parser failure',async()=>{
+ const service=await mountService(),internal=service as any,base=await service.createBase({name:'Recovery failure barrier'})
+ const doc=await service.addTextDocument({baseId:base.id,title:'failure',content:'Original'})
+ await internal.store.putDocument({...internal.store.getDocument(doc.id),sourceType:'file',rawFilePath:'source.pdf',rawText:undefined,incomplete:true})
+ Object.defineProperty(internal.store,'raw',{configurable:true,value:{read:async()=>new Uint8Array([1])}})
+ const parse=vi.spyOn(internal,'extractDocumentText').mockRejectedValue(new Error('fixture parse failure'))
+ try{
+  await internal.resumeInterruptedDocuments([doc.id])
+  expect(internal.hasOcrWork()).toBe(false);expect(internal.hasParsingWork()).toBe(false)
+  expect(service.indexingStatus().find(row=>row.docId===doc.id)).toBeUndefined()
+  expect(internal.store.getDocument(doc.id).errorCode).toBe('parse_failed')
+ }finally{parse.mockRestore()}
+})
+
+it('overlaps committed-document embeddings with unfinished chunking after extraction and parsing',async()=>{
+  const service=await mountService(),internal=service as any
+  const root=await mkdtemp(join(tmpdir(),'knowledge-stage-barriers-'))
+  const processing=await import('../src/knowledge/document-processing.js')
+  const embedding=await import('../src/knowledge/embed.js')
+  const extractOriginal=processing.extractDocumentContent,enrichOriginal=processing.enrichDocumentContent
+  const ingestOriginal=internal.ingestDocument.bind(service)
+  let extracted=0,parsed=0,published=0,vectorCalls=0,ingesting=0
+  let releaseChunk!:()=>void
+  const firstVector=new Promise<void>(resolve=>{releaseChunk=resolve})
+  const extract=vi.spyOn(processing,'extractDocumentContent').mockImplementation(async input=>{
+    expect(parsed).toBe(0);expect(published).toBe(0);expect(vectorCalls).toBe(0)
+    const output=await extractOriginal(input);extracted++;return output
+  })
+  const enrich=vi.spyOn(processing,'enrichDocumentContent').mockImplementation(async(...args)=>{
+    expect(extracted).toBe(3);expect(published).toBe(0);expect(vectorCalls).toBe(0)
+    const output=await enrichOriginal(...args);parsed++;return output
+  })
+  const ingest=vi.spyOn(internal,'ingestDocument').mockImplementation(async(...args:any[])=>{
+    expect(parsed).toBe(3)
+    if(++ingesting===3)await firstVector
+    const result=await ingestOriginal(...args);published++;return result
+  })
+  const embed=vi.spyOn(embedding,'embedTexts').mockImplementation(async(_provider,_url,_model,_key,texts)=>{
+    expect(extracted).toBe(3);expect(parsed).toBe(3)
+    if(vectorCalls===0)expect(published).toBeLessThan(3)
+    vectorCalls++;releaseChunk()
+    return texts.map(()=>[1,0,0])
+  })
+  try {
+    for(let i=0;i<3;i++)await writeFile(join(root,`source-${i}.pdf`),makeTestPdf(`Distinct source ${i} orbital navigation.`))
+    const base=await service.createBase({name:'Stage barrier fixture',config:{embeddingProvider:'openai',embeddingModel:'staged-test-model',embeddingBaseUrl:'http://unused.invalid',semanticChunk:false}})
+    const result=await service.importDirectoryTree(base.id,root)
+    expect(result.errors).toEqual([]);expect(result.imported).toBe(3)
+    expect(extracted).toBe(3);expect(parsed).toBe(3);expect(published).toBe(3);expect(vectorCalls).toBeGreaterThan(0)
+    const chunks=internal.store.listChunks(base.id)
+    expect(chunks.length).toBeGreaterThan(0);expect(chunks.every((chunk:any)=>chunk.embedding?.length===3)).toBe(true)
+  }finally{releaseChunk();extract.mockRestore();enrich.mockRestore();ingest.mockRestore();embed.mockRestore();await rm(root,{recursive:true,force:true})}
+})
+
+it('registers staged folder recovery before asynchronous work and bounds restart attempts',async()=>{
+ const service=await mountService(),internal=service as any
+ const base=await service.createBase({name:'Staged recovery'})
+ const first=await service.createDirectory(base.id,'first'),second=await service.createDirectory(base.id,'second')
+ await internal.store.putDocument({...first,sourcePath:'/fixture/first',stagedImport:{startupAttempts:1}})
+ await internal.store.putDocument({...second,sourcePath:'/fixture/second',stagedImport:{startupAttempts:3}})
+ let release!:()=>void
+ const held=new Promise<void>(resolve=>{release=resolve})
+ const sync=vi.spyOn(internal,'syncDirectorySource').mockImplementation(async(root:any)=>{
+  expect(root.stagedImport.startupAttempts).toBe(2)
+  await held
+ })
+ try{
+  const pending=internal.resumeStagedDirectoryImports()
+  expect(internal.hasOcrWork()).toBe(true)
+  await vi.waitFor(()=>expect(sync).toHaveBeenCalledOnce())
+  release();await pending
+  expect(internal.recoveryParsing.size).toBe(0)
+  expect(internal.store.getDocument(second.id)).toMatchObject({errorCode:'interrupted'})
+  expect(internal.store.getDocument(second.id).stagedImport).toBeUndefined()
+ }finally{release();sync.mockRestore()}
 })

@@ -179,6 +179,38 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
     expect(service.listChunks(doc.id).every(chunk => chunk.embeddingModel === 'local:dsh-local/Qwen3-Embedding-0.6B-FP16-Accelerated:canonical-fp16-v1')).toBe(true)
   })
 
+  it('waits for OCR enrichment, then embeds while normalization remains', async () => {
+    const service = await mountService(), internal = service as any
+    const base = await service.createBase({ name: 'independent stage queues' })
+    const doc = await service.addTextDocument({ baseId: base.id, title: 'ready', content: 'Ready astronomy evidence.' })
+    internal.syncingRoots.add('active-import')
+    internal.indexing.set('slow-pdf', { baseId: base.id, title: 'slow PDF', phase: 'parsing', total: 0, progress: 0 })
+    try {
+      await service.renameBase(base.id, { config: { embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'concurrent-model' } })
+      await new Promise(resolve=>setTimeout(resolve,100))
+      expect(service.listChunks(doc.id).some(chunk => chunk.embeddingModel === 'openai:concurrent-model')).toBe(false)
+      internal.processingProgress.set('slow-pdf',{stage:'normalizing'})
+      await vi.waitFor(() => expect(service.listChunks(doc.id).every(chunk => chunk.embeddingModel === 'openai:concurrent-model')).toBe(true))
+      expect(internal.indexing.has('slow-pdf')).toBe(true)
+    } finally { internal.indexing.delete('slow-pdf'); internal.syncingRoots.clear(); await service.waitForIdle() }
+  })
+
+  it('does not treat a text folder reconciliation as OCR, but waits for pending PDFs', async () => {
+    const service = await mountService(), internal = service as any
+    const base = await service.createBase({ name: 'text folder overlap' })
+    const doc = await service.addTextDocument({ baseId: base.id, title: 'ready', content: 'Astronomy evidence.' })
+    internal.folderOcrSources.set('root', new Set(['/source/scan.pdf']))
+    internal.indexing.set('root', { baseId: base.id, title: 'articles', phase: 'parsing' })
+    internal.indexing.set('text', { baseId: base.id, title: 'article.md', phase: 'parsing' })
+    try {
+      await service.renameBase(base.id, { config: { embeddingProvider: 'openai', embeddingBaseUrl: 'http://x', embeddingModel: 'overlap' } })
+      await new Promise(resolve => setTimeout(resolve, 100))
+      expect(service.listChunks(doc.id).some(c => c.embeddingModel === 'openai:overlap')).toBe(false)
+      internal.folderOcrSources.get('root').clear()
+      await vi.waitFor(() => expect(service.listChunks(doc.id).every(c => c.embeddingModel === 'openai:overlap')).toBe(true))
+    } finally { internal.indexing.clear(); internal.folderOcrSources.clear(); await service.waitForIdle() }
+  })
+
   it('backfills unchanged folder files from canonical text instead of a sync that skips them', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kb-embedding-folder-'))
     try {
@@ -379,8 +411,8 @@ describe('embedding hash reuse (Cherry decision A4)', () => {
   })
 })
 
-describe('OCR-first scheduling across knowledge bases', () => {
-  it('persists lexical text first and delays another base’s embeddings until parsing drains', async () => {
+describe('Concurrent stage scheduling across knowledge bases', () => {
+  it('defers vectorization until the other base source queue drains', async () => {
     const service = await mountService()
     const first = await service.createBase({name:'OCR queue'})
     const second = await service.createBase({name:'Vector queue',config:{embeddingProvider:'openai',embeddingBaseUrl:'http://x',embeddingModel:'m1',embeddingApiKey:'k',semanticChunk:true}})
@@ -389,12 +421,13 @@ describe('OCR-first scheduling across knowledge bases', () => {
     ;(service as unknown as {enqueueIngest(baseId:string, task:()=>Promise<void>):void}).enqueueIngest(first.id,()=>gate)
     embedTextsMock.mockClear()
     const doc=await service.addTextDocument({baseId:second.id,title:'Deferred semantic evidence',content:'The laboratory studies river water.\n\nThe laboratory checks river samples daily.'})
-    await new Promise(resolve=>setTimeout(resolve,150))
-    expect(embedTextsMock).not.toHaveBeenCalled()
-    expect(service.listChunks(doc.id).length).toBeGreaterThan(0)
-    expect(service.listChunks(doc.id).every(chunk=>chunk.embedding===undefined)).toBe(true)
-    finish();await service.waitForIdle()
-    expect(embedTextsMock).toHaveBeenCalled()
-    expect(service.listChunks(doc.id).every(chunk=>chunk.embeddingModel==='openai:m1')).toBe(true)
+    try {
+      expect(service.listChunks(doc.id).length).toBeGreaterThan(0)
+      await new Promise(resolve=>setTimeout(resolve,100))
+      expect(embedTextsMock).not.toHaveBeenCalled()
+      finish()
+      await vi.waitFor(() => expect(service.listChunks(doc.id).every(chunk=>chunk.embeddingModel==='openai:m1')).toBe(true))
+      expect(embedTextsMock).toHaveBeenCalled()
+    } finally { finish(); await service.waitForIdle() }
   })
 })

@@ -77,8 +77,11 @@ export interface BaseConfig {
   readonly conflictStrategy?: 'keep' | 'replace' | 'rename'
   readonly urlRefreshHours?: number
   readonly ocrEnabled?: boolean
+  readonly deferredPhotoCaptions?: boolean
+  readonly deferredPhotoCaptionModel?: string
+  readonly deferredChartEnrichment?: boolean
   readonly structureV3Charts?: boolean
-  readonly imageCaptionProvider?: 'off' | 'paddle' | 'openai' | 'ollama'
+  readonly imageCaptionProvider?: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'
   readonly imageCaptionModel?: string
   readonly imageCaptionBaseUrl?: string
   readonly imageCaptionApiKey?: string
@@ -197,6 +200,11 @@ export interface DeleteImpact {
 
 /** One imported document inside a knowledge base. */
 export interface KnowledgeDocument {
+  readonly deferredPhotoCaptions?: {readonly revision: string; readonly status: 'completed' | 'failed'}
+  readonly deferredChartEnrichment?: {readonly revision: string; readonly status: 'completed' | 'failed'}
+  /** Restart marker for a folder whose staged import has not settled. */
+  readonly stagedImport?: { readonly startupAttempts: number }
+
   readonly markdownRevision?: string
   readonly indexingSettingsFingerprint?: string
   readonly sourceSignature?: string
@@ -334,8 +342,11 @@ export interface KnowledgeConfig {
   readonly localModelCacheDir: string
   /** Image/table captioning: `off` / `openai` (vision chat API) / `ollama` (local VLM). */
   readonly ocrEnabled?: boolean
+  readonly deferredPhotoCaptions?: boolean
+  readonly deferredPhotoCaptionModel?: string
+  readonly deferredChartEnrichment?: boolean
   readonly structureV3Charts?: boolean
-  readonly imageCaptionProvider: 'off' | 'paddle' | 'openai' | 'ollama'
+  readonly imageCaptionProvider: 'off' | 'paddle' | 'dsh' | 'openai' | 'ollama'
   /** Captioning model id (OpenAI-compatible vision model, or an Ollama VLM like llava / qwen2.5vl). */
   readonly imageCaptionModel: string
   /** Captioning API root; empty = the embedding base URL (openai) or http://127.0.0.1:11434 (ollama). */

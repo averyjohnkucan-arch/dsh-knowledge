@@ -11,6 +11,10 @@ export const SOURCE_CSS = `@keyframes kb-cite-pulse{0%,45%{background:#f5cb5588}
 .kb-line-number{display:inline-block;min-width:3.5em;opacity:.6;user-select:none}
 a[href*="/knowledge/documents/"][href*="#citation"]:not([data-knowledge-source-external]){display:inline-block;vertical-align:baseline;max-width:100%;padding:.08em .45em;margin:0 .18em;border:1px solid #8884;border-radius:.4em;background:#8882;color:inherit;font-size:.78em;line-height:1.5;overflow-wrap:anywhere;text-decoration:none}
 a[href*="/knowledge/documents/"][href*="#citation"]:not([data-knowledge-source-external]):hover{text-decoration:underline}
+a[href*="/knowledge/documents/"][href*="/raw?inline=1"]{display:inline-block;vertical-align:baseline;padding:.08em .45em;margin:0 .18em;border:1px solid #8884;border-radius:.4em;background:#8882;font-size:.78em;line-height:1.5;color:#3b82f6;text-decoration:underline;text-underline-offset:2px}
+a[href*="/knowledge/documents/"][href*="/raw?inline=1"] svg,a[href*="/knowledge/documents/"][href*="#citation"] svg{display:none}
+a[href*="/knowledge/documents/"][href*="#citation"]:has(+ a[href*="/raw?inline=1"]){border-radius:.4em 0 0 .4em;border-right:0;margin-right:0;max-width:calc(100% - 7em);box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+a[href*="/knowledge/documents/"][href*="#citation"] + a[href*="/raw?inline=1"]{border-radius:0 .4em .4em 0;border-left:0;margin-left:0;white-space:nowrap;vertical-align:bottom}
 @media(prefers-reduced-motion:reduce){.kb-cited{animation:none}}`
 
 /** Uses the tab's persisted navigation, so sessions and repeated clicks stay independent. */
