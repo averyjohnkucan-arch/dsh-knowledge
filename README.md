@@ -284,6 +284,7 @@ Filters apply only to the current request. No database migration, reindex, or do
 - Lexical retrieval uses a SQLite FTS5 trigram index; vectors use a resident Float32Array cache with precise invalidation.
 - Legacy JSON chunk data is migrated idempotently on first start. The service falls back to memory storage when no persistent backend is available.
 - After changing chunk or embedding settings, rebuild one document or the entire base from the panel or model tools.
+- Metadata writes share a serialized queue, retry transient filesystem locks and retain readable durable state when startup repairs cannot be written. Back up domain metadata, SQLite and raw sources together.
 
 ---
 

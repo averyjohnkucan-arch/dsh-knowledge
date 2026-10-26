@@ -80,6 +80,7 @@ import { hashEmbeddingText, resolveChunkStorePath } from './chunkdb.js'
 import type { RetrievalDocumentFilter } from './chunkdb.js'
 import { openStore, StorageUnavailableError } from './store.js'
 import type { StorageDomainFacility, Store } from './store.js'
+import { isMetadataWriteFailure } from './metadata-write.js'
 import {
   activeOllamaPulls as activeOllamaPullsHelper,
   cancelOllamaPull as cancelOllamaPullHelper,
@@ -458,27 +459,34 @@ export class KnowledgeService extends Service {
       // A recovering staged folder owns its descendants. Do not concurrently
       // resume the same files through the old per-document processor path.
       resumeIds=resumeIds.filter(id=>{
-        let doc=store.getDocument(id);const seen=new Set<string>()
-        while(doc && !seen.has(doc.id)) {
-          if(this.stagedRecoveryRoots.has(doc.id))return false
-          seen.add(doc.id);doc=doc.parentDirectoryId?store.getDocument(doc.parentDirectoryId):undefined
-        }
+        try {
+          let doc=store.getDocument(id);const seen=new Set<string>()
+          while(doc && !seen.has(doc.id)) {
+            if(this.stagedRecoveryRoots.has(doc.id))return false
+            seen.add(doc.id);doc=doc.parentDirectoryId?store.getDocument(doc.parentDirectoryId):undefined
+          }
+        } catch { /* The per-document recovery loop isolates unreadable metadata. */ }
         return true
       })
       if (resumeIds.length === 0) return
       if (!this.getConfig().resumeInterruptedOnStartup) {
         const reason = 'import was interrupted by a shutdown; reindex to resume'
+        let marked = 0
         for (const id of resumeIds) {
-          const doc = store.getDocument(id)
-          if (doc !== undefined && store.getBase(doc.baseId)) {
-            // Clear the resumable marker as part of the decision: leaving it set
-            // meant every later start re-marked the same document failed and
-            // overwrote its real embeddingError with `interrupted`, forever.
-            const { incomplete: _resumableMarker, ...rest } = doc
-            await store.putDocument({ ...rest, embeddingError: reason, errorCode: 'interrupted', updatedAt: Date.now() })
+          try {
+            const doc = store.getDocument(id)
+            if (doc !== undefined && store.getBase(doc.baseId)) {
+              // Clear the resumable marker only after the status is durable.
+              // A failed write retains the old row for a later recovery.
+              const { incomplete: _resumableMarker, ...rest } = doc
+              await store.putDocument({ ...rest, embeddingError: reason, errorCode: 'interrupted', updatedAt: Date.now() })
+              marked += 1
+            }
+          } catch (error) {
+            this.ctx.logger.warn(`knowledge: could not mark interrupted import ${id} failed; previous metadata retained: ${error instanceof Error ? error.message : String(error)}`)
           }
         }
-        this.ctx.logger.info(`knowledge: marked ${resumeIds.length} interrupted import(s) failed (auto-resume disabled)`)
+        this.ctx.logger.info(`knowledge: marked ${marked} interrupted import(s) failed (auto-resume disabled)`)
         return
       }
       this.ctx.logger.info(`knowledge: resuming ${resumeIds.length} interrupted import(s)`)
@@ -667,17 +675,20 @@ export class KnowledgeService extends Service {
     // Register the whole raw-source recovery backlog before any asynchronous
     // reads. Otherwise vector backfill can take the GPU between resumed files.
     const parsing = ids.filter(id => {
-      const doc = store.getDocument(id)
-      return doc !== undefined && store.getBase(doc.baseId) !== undefined && doc.sourceType !== 'directory'
-        && doc.rawFilePath !== undefined && doc.rawText === undefined
+      try {
+        const doc = store.getDocument(id)
+        return doc !== undefined && store.getBase(doc.baseId) !== undefined && doc.sourceType !== 'directory'
+          && doc.rawFilePath !== undefined && doc.rawText === undefined
+      } catch { return false }
     })
     parsing.forEach(id => this.recoveryParsing.add(id))
     try {
     for (const id of ids) {
       if (this.shuttingDown) return
-      const doc = store.getDocument(id)
-      if (doc === undefined || !store.getBase(doc.baseId) || doc.sourceType === 'directory') continue
       try {
+        const store = this.requireStore()
+        const doc = store.getDocument(id)
+        if (doc === undefined || !store.getBase(doc.baseId) || doc.sourceType === 'directory') continue
         if (doc.rawFilePath !== undefined && doc.rawText === undefined) {
           this.indexing.set(id, { baseId: doc.baseId, title: doc.title, phase: 'parsing', total: 0, progress: 0 })
           // Crash before the text was persisted: rebuild from the raw copy.
@@ -723,13 +734,27 @@ export class KnowledgeService extends Service {
           }
         }
       } catch (error) {
+        // A storage failure says nothing about parsing/embedding. Preserve the
+        // resumable row and any published-generation journal for the next boot.
+        if (isMetadataWriteFailure(error) || (error as { published?: boolean } | null)?.published === true) {
+          this.ctx.logger.warn(`knowledge: interrupted import recovery deferred for ${id}; previous metadata retained: ${error instanceof Error ? error.message : String(error)}`)
+          continue
+        }
         this.ctx.logger.warn(`knowledge: interrupted import recovery failed (${processorErrorCode(error)})`)
         // A settled recovery failure must not be selected again on every boot.
         // Keep raw sources/chunks for a manual rebuild, but leave the row failed.
-        const current = store.getDocument(id)
-        if (current !== undefined && !this.shuttingDown && store.getBase(current.baseId)) {
-          await store.putDocument({ ...current, incomplete: false, embeddingError: processorErrorMessage(error),
-            errorCode: current.rawText === undefined ? 'parse_failed' : 'embedding_provider', updatedAt: Date.now() })
+        // Best-effort: the marker writes the same metadata unit that may have
+        // caused the recovery failure. Guard both lookup and write so another
+        // failure cannot escape the per-document recovery loop.
+        try {
+          const store = this.requireStore()
+          const current = store.getDocument(id)
+          if (current !== undefined && !this.shuttingDown && store.getBase(current.baseId)) {
+            await store.putDocument({ ...current, incomplete: false, embeddingError: processorErrorMessage(error),
+              errorCode: current.rawText === undefined ? 'parse_failed' : 'embedding_provider', updatedAt: Date.now() })
+          }
+        } catch (writeError) {
+          this.ctx.logger.warn(`knowledge: could not record failed recovery for ${id}; previous metadata retained: ${writeError instanceof Error ? writeError.message : String(writeError)}`)
         }
       } finally {
         if (parsing.includes(id)) {
@@ -791,6 +816,19 @@ export class KnowledgeService extends Service {
   /** Emit a structured warning on behalf of model-facing retrieval helpers. */
   warn(message: string): void {
     this.ctx.logger.warn(`knowledge: ${message}`)
+  }
+
+  /**
+   * Detach a background task so its rejection can never surface as an
+   * unhandledRejection — the host treats one as a fatal load failure and the
+   * desktop app exits with it. Metadata persistence goes through an atomic
+   * `tmp + rename` unit, which can fail transiently on Windows (`EPERM` while
+   * another handle holds the file); such a failure must degrade to a warning.
+   */
+  private runBackground(label: string, task: Promise<unknown>): void {
+    void task.catch(error => {
+      this.ctx.logger.warn(`knowledge: ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
   }
 
   /**
@@ -1520,6 +1558,10 @@ export class KnowledgeService extends Service {
       } catch (error) {
         this.indexing.delete(docId)
         taskController.abort()
+        if (isMetadataWriteFailure(error)) {
+          this.ctx.logger.warn(`knowledge: import metadata write deferred for ${docId}; saved sources retained: ${error instanceof Error ? error.message : String(error)}`)
+          return
+        }
         if ((error as { published?: boolean }).published === true) return
         const message = processorErrorMessage(error)
         // The row may have been deleted (or its base removed) while the task
@@ -1623,7 +1665,7 @@ export class KnowledgeService extends Service {
       errors: [],
       done: false,
     })
-    void this.runDirectoryImport(jobId, files)
+    this.runBackground('directory import job', this.runDirectoryImport(jobId, files))
     return { jobId, total: files.length }
   }
 
@@ -2336,6 +2378,7 @@ export class KnowledgeService extends Service {
       await this.touchBase(document.baseId)
       return next
     } catch (error) {
+      if (isMetadataWriteFailure(error)) throw error
       if (!candidateCommitted && (error as { published?: boolean }).published !== true) {
         await store.discardStagedDocumentGeneration(id)
         await discardCandidate()
@@ -3097,7 +3140,7 @@ export class KnowledgeService extends Service {
     } catch (error) {
       // A published SQLite generation is authoritative even if DomainKV needs
       // startup reconciliation. Never delete its referenced raw source.
-      if ((error as { published?: boolean }).published !== true) {
+      if (!isMetadataWriteFailure(error) && (error as { published?: boolean }).published !== true) {
         if (store.getDocument(documentId) !== undefined) await this.deleteDocumentRecursive(documentId)
         else if (rawFilePath !== undefined) await store.raw?.delete(rawFilePath)
       }
@@ -3262,7 +3305,7 @@ export class KnowledgeService extends Service {
       errors: [],
       done: false,
     })
-    void this.runReindexJob(jobId, baseId)
+    this.runBackground('reindex job', this.runReindexJob(jobId, baseId))
     return { jobId, total: roots.length, documentTotal: documents.length }
   }
 
@@ -5151,6 +5194,7 @@ export class KnowledgeService extends Service {
           this.indexing.set(docId, { baseId, title, phase: 'embedding', total: need.length, progress: Math.round((Math.min(i + batch.length, need.length) / need.length) * 100), controller: taskController })        }
       } catch (error) {
         signal?.throwIfAborted()
+        if (isMetadataWriteFailure(error)) throw error
         embeddingError = error instanceof Error ? error.message : String(error)
         embeddingErrorCode ??= 'embedding_provider'
         // Record it where /indexing-status can see it, with the REAL phase and

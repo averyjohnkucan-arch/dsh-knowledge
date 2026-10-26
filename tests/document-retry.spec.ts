@@ -1,3 +1,4 @@
+import { MetadataWriteError } from '../src/knowledge/metadata-write.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ArtifactRepository } from '../src/knowledge/artifacts.js'
 import { processDocumentFile } from '../src/knowledge/document-processing.js'
@@ -61,4 +62,11 @@ describe('three attempts before a document fails', () => {
     expect(parse).toHaveBeenCalledTimes(1)
     expect(await file.artifacts.getJob('base', 'document')).toMatchObject({ state: 'running', errorCode: 'submission_unknown' })
   })
+})
+
+it('does not restart a complete import after metadata storage has exhausted its own retries', async () => {
+ const error=new MetadataWriteError(Object.assign(new Error('locked'),{code:'EPERM'}))
+ const operation=vi.fn(async()=>{throw error})
+ await expect(retryDocument(operation)).rejects.toBe(error)
+ expect(operation).toHaveBeenCalledTimes(1)
 })

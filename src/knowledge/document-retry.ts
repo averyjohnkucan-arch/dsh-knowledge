@@ -1,3 +1,4 @@
+import { isMetadataWriteFailure } from './metadata-write.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { AsyncLocalStorage } from 'node:async_hooks'
 
@@ -29,7 +30,7 @@ export async function retryDocument<T>(operation: (attempt: number) => Promise<T
       options.signal?.throwIfAborted()
       const code = (error as { code?: string } | null)?.code
       // An uncertain remote submission must be reconciled, not submitted twice.
-      if ((error as { name?: string } | null)?.name === 'AbortError' || (error as { published?: boolean } | null)?.published ||
+      if (isMetadataWriteFailure(error) || (error as { name?: string } | null)?.name === 'AbortError' || (error as { published?: boolean } | null)?.published ||
         ['submission_unknown', 'job_lost', 'recovery_limit_reached'].includes(code ?? '') || attemptsExhausted(error)) throw error
       if (attempt === DOCUMENT_MAX_ATTEMPTS) {
         if (typeof error === 'object' && error !== null) markAttemptsExhausted(error)
