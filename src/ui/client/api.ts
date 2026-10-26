@@ -18,6 +18,7 @@ export interface BaseConfig {
   embeddingProvider?: EmbeddingProvider
   embeddingBaseUrl?: string
   embeddingModel?: string
+  embeddingDimensions?: number
   embeddingApiKey?: string
   rerankModel?: string
   rerankBaseUrl?: string
@@ -206,6 +207,7 @@ export interface KnowledgeConfig {
   embeddingProvider: EmbeddingProvider
   embeddingBaseUrl: string
   embeddingModel: string
+  embeddingDimensions?: number
   embeddingApiKey: string
   rerankModel: string
   rerankBaseUrl: string
@@ -544,6 +546,7 @@ export class KnowledgeApi {
     baseUrl?: string
     model?: string
     apiKey?: string
+    dimensions?: number
   } = {}): Promise<number> {
     return this.call('POST', '/probe-embedding-dimensions', options)
   }

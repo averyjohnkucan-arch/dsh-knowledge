@@ -1,3 +1,4 @@
+import { embeddingDimensionTag, embeddingOutputDimensions } from './embedding-dimensions.js'
 import { disposePdfParsers } from './parse.js'
 import { availableParallelism, freemem } from 'node:os'
 import { MarkdownSnapshots } from './markdown-snapshots.js'
@@ -674,7 +675,17 @@ export class KnowledgeService extends Service {
   }
 
   async setConfig(overrides: ConfigOverrides): Promise<KnowledgeConfig> {
-    await this.requireStore().setConfigOverrides(overrides)
+    const store = this.requireStore()
+    const previous = new Map(store.listBases().map(base => [base.id, embeddingDimensionTag(this.getConfigFor(base.id))]))
+    const merged = { ...store.getConfigOverrides(), ...overrides }
+    embeddingOutputDimensions(resolveConfigFor(this.baseConfig, merged))
+    for (const base of store.listBases()) embeddingOutputDimensions(resolveConfigFor(this.baseConfig, merged, base.config))
+    await store.setConfigOverrides(overrides)
+    for (const base of store.listBases()) {
+      if (previous.get(base.id) !== embeddingDimensionTag(this.getConfigFor(base.id))) {
+        void this.backfillBaseEmbeddings(base.id).catch(error => this.ctx.logger.warn(`knowledge: dimension backfill failed: ${String(error)}`))
+      }
+    }
     const resolved = this.getConfig()
     // Reapply the mirror switch, model cache dir, and worker idle timeout
     // live, so the panel can change them without a restart.
@@ -772,6 +783,7 @@ export class KnowledgeService extends Service {
       createdAt: now,
       updatedAt: now,
     }
+    embeddingOutputDimensions(resolveConfigFor(this.baseConfig, store.getConfigOverrides(), base.config))
     await store.putBase(base)
     if (mode === 'external') this.externalFolders?.request(base.id)
     return base
@@ -888,11 +900,13 @@ export class KnowledgeService extends Service {
     if (patch !== undefined) {
       const oldConfig = this.getConfigFor(id)
       const newConfig = resolveConfigFor(this.baseConfig, store.getConfigOverrides(), next.config)
+      embeddingOutputDimensions(newConfig)
+      const dimensionsChanged = embeddingDimensionTag(newConfig) !== embeddingDimensionTag(oldConfig)
       const modelChanged = newConfig.embeddingProvider !== oldConfig.embeddingProvider
         || newConfig.embeddingModel !== oldConfig.embeddingModel
-      if (modelChanged && store.listDocuments(id, { includeRawText: false }).length > 0) {
+      if ((modelChanged || dimensionsChanged) && store.listDocuments(id, { includeRawText: false }).length > 0) {
         const hadModel = oldConfig.embeddingProvider !== 'none' && oldConfig.embeddingModel.trim() !== ''
-        if (hadModel && !canMigrateQwenVectors(oldConfig, newConfig)) {
+        if (hadModel && modelChanged && !canMigrateQwenVectors(oldConfig, newConfig)) {
           throw new Error('Changing the embedding model invalidates existing vectors. Use Rebuild knowledge base to generate vectors with the new model')
         }
         // BM25-only → enable-in-place: commit the model, then backfill vectors
@@ -905,7 +919,7 @@ export class KnowledgeService extends Service {
           throw new Error('Some documents have no saved source text, so their embeddings cannot be generated. Re-add the affected documents from their originals')
         }
         await store.putBase(next)
-        this.externalFolders?.request(id, true)
+        if (!dimensionsChanged) this.externalFolders?.request(id, true)
         const baseId = id
         void this.backfillBaseEmbeddings(baseId).catch((error: unknown) => {
           this.ctx.logger.warn(`knowledge: in-place embedding backfill failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -915,7 +929,7 @@ export class KnowledgeService extends Service {
     }
     await store.putBase(next)
     if (patch !== undefined) this.externalFolders?.request(id, true)
-    if (patch !== undefined && ('embeddingProvider' in patch || 'embeddingModel' in patch)) {
+    if (patch !== undefined && ('embeddingProvider' in patch || 'embeddingModel' in patch || 'embeddingDimensions' in patch)) {
       const effective = this.getConfigFor(id)
       if (effective.embeddingProvider !== 'none' && effective.embeddingModel.trim() !== '') {
         void this.backfillBaseEmbeddings(id).catch(error => this.ctx.logger.warn(`knowledge: embedding backfill failed: ${error instanceof Error ? error.message : String(error)}`))
@@ -3322,14 +3336,16 @@ export class KnowledgeService extends Service {
     baseUrl?: string
     model?: string
     apiKey?: string
+    dimensions?: number
   } = {}): Promise<number> {
     const config = this.getConfig()
     const provider = options.provider ?? config.embeddingProvider
     if (provider === 'none') throw new Error('no embedding provider configured')
     const model = options.model ?? config.embeddingModel
+    const dimensions = embeddingOutputDimensions({ embeddingProvider: provider, embeddingModel: model, embeddingDimensions: options.dimensions ?? 0 })
     if (provider === 'local') {
       const descriptor = LOCAL_MODELS.find(entry => entry.kind === 'embedding' && entry.id === model)
-      if (descriptor?.dimensions !== undefined) return descriptor.dimensions
+      if (descriptor?.dimensions !== undefined) return dimensions || descriptor.dimensions
     }
     const [vector] = await embedTexts(
       provider,
@@ -3337,6 +3353,7 @@ export class KnowledgeService extends Service {
       model,
       options.apiKey ?? config.embeddingApiKey,
       ['test'],
+      undefined, 'query', dimensions,
     )
     if (vector === undefined || vector.length === 0) throw new Error('embedding returned an empty vector')
     return vector.length
@@ -3801,6 +3818,20 @@ export class KnowledgeService extends Service {
     if (query.length === 0) return emptySearchResult(query, request.mode ?? 'lexical', 0)
     if (query.length > 2000) throw new Error('search query must not exceed 2000 characters')
 
+    // A search spanning bases must encode its query at each base's vector
+    // width. Never silently drop reduced-width bases using the global width.
+    if (request.baseId === undefined && request.mode !== 'lexical') {
+      const globalConfig = this.getConfig()
+      const scope = this.requireStore().listBases().filter(base => request.baseIds === undefined || request.baseIds.includes(base.id))
+      if (scope.some(base => embeddingDimensionTag(this.getConfigFor(base.id)) !== embeddingDimensionTag(globalConfig))) {
+        const topK = clampInt(request.topK ?? globalConfig.topK, 1, 50, 6)
+        const results = await Promise.all(scope.map(base => this.search({ ...request, query, baseId: base.id, baseIds: undefined, topK: Math.min(50, Math.max(topK * 2, 12)) }, { ...execution, rerank: 'skip' })))
+        throwIfAborted(execution.signal)
+        throwIfDeadline(execution.deadlineAt)
+        return this.finishMultiQuerySearch(globalConfig, query, request.mode ?? globalConfig.searchMode, results, topK, request.threshold, startedAt, execution.rerank !== 'skip', execution.signal)
+      }
+    }
+
     const variants = normalizeQueryVariants(query, request.queries)
     const allowRerank = execution.rerank !== 'skip'
     if (variants.length === 1) {
@@ -3880,6 +3911,7 @@ export class KnowledgeService extends Service {
             config.embeddingApiKey,
             [query],
             signal?AbortSignal.any([signal,embeddingBudget]):embeddingBudget,
+            'query', config.embeddingDimensions ?? 0,
           )
           throwIfAborted(signal)
           queryVector = vector
@@ -4017,6 +4049,7 @@ export class KnowledgeService extends Service {
           config.embeddingApiKey,
           [query],
           signal,
+          'query', config.embeddingDimensions ?? 0,
         )
         throwIfAborted(signal)
         queryVector = vector
@@ -4775,6 +4808,7 @@ export class KnowledgeService extends Service {
       texts,
       signal,
       'index',
+      config.embeddingDimensions ?? 0,
     )
   }
 
@@ -4833,7 +4867,7 @@ function embeddingKey(config: KnowledgeConfig): string | undefined {
   // canonical single-text path, despite identical dimensions and weights.
   const format = config.embeddingProvider === 'local' && model === FP16_EMBEDDING_MODEL ? ':canonical-fp16-v1' : config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
     ? ':canonical-single-v1' : config.embeddingProvider === 'local' && /(?:bge|gte|e5)/i.test(model) ? ':full-context-v1' : ''
-  return `${config.embeddingProvider}:${model}${format}`
+  return `${config.embeddingProvider}:${model}${format}${embeddingDimensionTag(config)}`
 }
 
 function retrievalStatus(

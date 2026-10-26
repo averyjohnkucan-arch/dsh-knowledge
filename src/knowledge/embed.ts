@@ -1,3 +1,4 @@
+import { embeddingOutputDimensions, resizeEmbeddingVectors } from './embedding-dimensions.js'
 import { localEmbeddingPool } from './local-embedding-pool.js'
 import { embeddingAcceleration, embeddingFp16Acceleration, FP16_EMBEDDING_MODEL, OPENVINO_EMBEDDING_MODEL } from './embedding-acceleration.js'
 /**
@@ -91,24 +92,27 @@ export async function embedTexts(
   texts: readonly string[],
   signal?: AbortSignal,
   purpose: 'query' | 'index' = 'query',
+  dimensions = 0,
 ): Promise<number[][]> {
   throwIfAborted(signal)
   if (texts.length === 0) return []
   if (provider === 'none') throw new Error('embedding provider is "none" — configure an endpoint or a local model, or keep lexical search')
+  const outputDimensions = embeddingOutputDimensions({ embeddingProvider: provider, embeddingModel: model, embeddingDimensions: dimensions })
+  const project = (vectors: number[][]) => resizeEmbeddingVectors(vectors, outputDimensions)
   const safeTexts = texts.map(ensureWellFormed)
   if (provider === 'local') {
     // The owning search can stop waiting immediately while the isolated child
     // finishes its current job; only a hard fault terminates that child.
-    return await withAbortSignal(embedLocal(model.trim() === '' ? DEFAULT_LOCAL_MODEL : model, safeTexts, purpose), signal)
+    return project(await withAbortSignal(embedLocal(model.trim() === '' ? DEFAULT_LOCAL_MODEL : model, safeTexts, purpose), signal))
   }
   if (model.trim() === '') throw new Error('embedding model is empty')
   if (provider === 'openai') {
     if (baseUrl.trim() === '') throw new Error('embedding base URL is empty')
-    return embedOpenAI(baseUrl, model, apiKey, safeTexts, signal)
+    return project(await embedOpenAI(baseUrl, model, apiKey, safeTexts, signal))
   }
   // Ollama defaults an empty base URL to the well-known local endpoint, so a
   // base with an unset URL still embeds against http://127.0.0.1:11434.
-  if (provider === 'ollama') return embedOllama(baseUrl, model, apiKey, safeTexts, signal)
+  if (provider === 'ollama') return project(await embedOllama(baseUrl, model, apiKey, safeTexts, signal))
   throw new Error(`unknown embedding provider ${String(provider)}`)
 }
 

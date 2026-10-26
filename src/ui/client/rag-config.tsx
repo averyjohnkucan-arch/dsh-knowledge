@@ -1,3 +1,7 @@
+import { embeddingDimensionSupport, embeddingDimensionTag } from '../../knowledge/embedding-dimensions.js'
+import { NumberSlider } from './NumberSlider.js'
+import { SettingHelp } from './SettingHelp.js'
+import { SETTINGS_HELP } from './settings-help.js'
 import { canMigrateQwenVectors } from '../../knowledge/qwen-embedding-variants.js'
 /**
  * Cherry Studio-style per-base retrieval settings panel (the 设置 view): the
@@ -8,7 +12,6 @@ import { canMigrateQwenVectors } from '../../knowledge/qwen-embedding-variants.j
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import type { CSSProperties } from 'react'
 import { KnowledgeApi } from './api.js'
 import type { BaseConfig, BaseSummary, EmbeddingProvider, KnowledgeConfig, LocalModelStatus, ModelSuggestions } from './api.js'
 import { C, style } from './theme.js'
@@ -176,7 +179,11 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
   const vectorMigration = embeddingChanged && hadModel && canMigrateQwenVectors(initial, values) && (base.documentCount ?? 0) > 0
   const needsRebuild = embeddingChanged && hadModel && !vectorMigration && (base.documentCount ?? 0) > 0
 
-  const patch = (p: Partial<KnowledgeConfig>): void => setValues(prev => ({ ...prev, ...p }))
+  const patch = (p: Partial<KnowledgeConfig>): void => setValues(prev => ({ ...prev,
+    ...(('embeddingModel' in p && p.embeddingModel !== prev.embeddingModel) || ('embeddingProvider' in p && p.embeddingProvider !== prev.embeddingProvider) ? { embeddingDimensions: 0 } : {}), ...p }))
+  const dimensionSupport = embeddingDimensionSupport(values.embeddingModel)
+  const dimensionsChanged = (values.embeddingDimensions ?? 0) !== (initial.embeddingDimensions ?? 0)
+  const effectiveDimensionsChanged = embeddingDimensionTag(values) !== embeddingDimensionTag(initial)
 
   // Number inputs. Two traps, both of which used to reach the durable schema and
   // come back as an opaque validation error on save:
@@ -225,7 +232,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
     // front instead of surfacing later at import time (the host re-checks on
     // every embed and would refuse mid-import).
     const embeddingChangedNow = values.embeddingProvider !== initial.embeddingProvider
-      || values.embeddingModel !== initial.embeddingModel
+      || values.embeddingModel !== initial.embeddingModel || dimensionsChanged
     if (embeddingChangedNow && values.embeddingProvider !== 'none') {
       setProbing(true)
       try {
@@ -234,6 +241,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           baseUrl: values.embeddingBaseUrl,
           model: values.embeddingModel,
           apiKey: values.embeddingApiKey ?? '',
+          dimensions: values.embeddingDimensions ?? 0,
         })
         if (!Number.isFinite(dimensions) || dimensions <= 0) {
           throw new Error('embedding returned an invalid dimension')
@@ -271,7 +279,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
       <div style={{ ...style.card, flex: 1, overflowY: 'auto' }} className="kb-scroll kb-rag-config">
         {/* 文档处理 */}
-        <Section title={t('docProcessing')} hint={t('docProcessingHint')}>
+        <Section title={t('docProcessing')} help={SETTINGS_HELP.docProcessing} hint={t('docProcessingHint')}>
           <select
             style={style.input}
             value={values.documentProcessorProvider}
@@ -322,13 +330,13 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
               {!processorDirty && processorCheckResult !== null && <div role="status" style={{ fontSize: 12, color: processorCheckError ? C.danger : C.success }}>{processorCheckResult}</div>}
             </div>
           )}
-          <FieldRow label="PaddleOCR for scanned PDFs" hint="Recognize scanned pages locally on CPU when ordinary text extraction is insufficient. OCR models must be downloaded first.">
+          <FieldRow label="PaddleOCR for scanned PDFs" help={SETTINGS_HELP.ocr} hint="Recognize scanned pages locally when ordinary text extraction is insufficient. OCR models must be downloaded first.">
             <Switch checked={values.ocrEnabled !== false} onChange={v => patch({ ocrEnabled: v })} />
           </FieldRow>
-          <FieldRow label={t('processingTimeout')}>
+          <FieldRow label={t('processingTimeout')} help={SETTINGS_HELP.processingTimeout}>
             <input type="number" style={style.input} min={10000} max={7200000} step={1000} value={values.documentProcessingTimeoutMs ?? 1_800_000} onChange={e => patchNumber('documentProcessingTimeoutMs', e.target.value)} />
           </FieldRow>
-          <FieldRow label={t('structuredChunking')} hint={t('structuredChunkingHint')}>
+          <FieldRow label={t('structuredChunking')} help={SETTINGS_HELP.structuredChunking} hint={t('structuredChunkingHint')}>
             <Switch checked={values.structuredChunking ?? true} onChange={v => patch({ structuredChunking: v })} />
           </FieldRow>
           <button type="button" style={style.button} disabled={busy} onClick={() => {
@@ -341,7 +349,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           <p style={style.hint}>Defaults apply to bases without their own overrides. Save below to apply changes to this base. Existing documents are only changed by an explicit reprocess.</p>
           {/* Optional chart and image processing */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 16 }}>
-            <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>{t('imageCaptionHint')}</div>
+            <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>{t('imageCaptionHint')}<SettingHelp label="Image and table captioning" text={SETTINGS_HELP.imageCaption} /></div>
             <select
               style={style.input}
               value={values.imageCaptionProvider}
@@ -421,7 +429,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           <p>Qwen3 Embedding 0.6B + BGE Reranker Base + PP-StructureV3, all on CPU. Download models in Settings → Local Models before saving.</p>
         </div>
         {/* 嵌入模型 */}
-        <Section title={t('embeddingProvider')} hint={t('perBaseHint')}>
+        <Section title={t('embeddingProvider')} help={SETTINGS_HELP.embeddingProvider} hint={t('perBaseHint')}>
           <select
             style={style.input}
             value={values.embeddingProvider}
@@ -567,6 +575,22 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
               </div>
             </>
           )}
+          {values.embeddingProvider !== 'none' && <div style={{ marginTop: 18 }}>
+            <Section title="Vector dimensions" help={SETTINGS_HELP.dimensions} hint="Numbers per vector. Smaller vectors use less storage; the number of chunks is separate.">
+              {dimensionSupport.min !== undefined && dimensionSupport.native !== undefined ? <>
+                <label style={{ ...style.hint, display: 'block', marginBottom: 10 }}>
+                  <input type="checkbox" checked={!values.embeddingDimensions} onChange={event => patch({ embeddingDimensions: event.target.checked ? 0 : dimensionSupport.native })} /> Use model default ({dimensionSupport.native})
+                </label>
+                <NumberSlider label="Vector dimensions" min={dimensionSupport.min} max={dimensionSupport.native} step={1}
+                  value={values.embeddingDimensions || dimensionSupport.native} onChange={value => patch({ embeddingDimensions: value })} />
+                <p style={style.hint}>{((values.embeddingDimensions || dimensionSupport.native) * 4 / 1024).toFixed(2)} KiB of raw float32 data per vector, plus index metadata.</p>
+              </> : <p style={style.hint}>{dimensionSupport.native ? `${dimensionSupport.native} dimensions (fixed model output).` : 'Native model dimensions. Custom reduction is not supported for this model.'}</p>}
+              {effectiveDimensionsChanged && !embeddingChanged && (base.documentCount ?? 0) > 0 && <p style={style.warningHint}>Saving starts background re-vectorization from saved chunks. Old-width vectors are excluded from search until replaced; keyword search remains available. OCR is not repeated.</p>}
+            </Section>
+            <Section title={t('batchSize')} help={SETTINGS_HELP.batchSize} hint="Maximum chunks per indexing request; device and token limits can reduce the actual batch.">
+              <NumberSlider label={t('batchSize')} min={1} max={512} step={1} value={values.embeddingBatchSize} onChange={value => patch({ embeddingBatchSize: value })} />
+            </Section>
+          </div>}
           {vectorMigration && <p style={style.hint}>Saving regenerates vectors in the background using the selected Qwen export. Documents and chunks stay intact; incompatible old vectors are excluded from search during the migration.</p>}
           {needsRebuild && (
             <div style={{ marginTop: 10 }}>
@@ -576,7 +600,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
         </Section>
 
         {/* 重排模型 */}
-        <Section title={t('rerankModel')} hint={t('rerankHint')}>
+        <Section title={t('rerankModel')} help={SETTINGS_HELP.rerankModel} hint={t('rerankHint')}>
           <label style={style.label}>Local reranker · CPU</label>
           <select style={{ ...style.input, marginBottom: 12 }} value={values.rerankModel.startsWith('local:') ? values.rerankModel : ''} onChange={e => patch({ rerankModel: e.target.value, rerankBaseUrl: '', rerankApiKey: '' })}>
             <option value="">Disabled / use API settings below</option>
@@ -625,46 +649,48 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
 
         <section aria-label={t('retrievalTuning')} style={{ marginBottom: 20, padding: '18px 18px 4px', border: `1px solid ${C.border}`, borderRadius: 14, background: C.surface2 }}>
           <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 18px', color: C.text }}>{t('retrievalTuning')}</h3>
+          <Section title="Search mode" help={SETTINGS_HELP.searchMode}>
+            <select style={style.input} aria-label="Search mode" value={values.searchMode} onChange={event => patch({ searchMode: event.target.value as KnowledgeConfig['searchMode'] })}>
+              <option value="auto">Auto</option><option value="hybrid">Hybrid · keywords + vectors</option><option value="vector">Vector · semantic similarity</option><option value="lexical">Lexical · keywords</option>
+            </select>
+          </Section>
           {/* Top K + 阈值 */}
-          <Section title={t('topK')} hint={t('topKHint')}>
-            <Slider
-              value={values.topK}
+          <Section title={t('topK')} help={SETTINGS_HELP.topK} hint={t('topKHint')}>
+            <NumberSlider
+              label={t('topK')} value={values.topK}
               min={1}
               max={50}
               step={1}
               onChange={(v) => patch({ topK: v })}
-              minLabel="1"
-              maxLabel="50"
-              format={(v) => String(v)}
             />
           </Section>
           {usesThreshold && (
-            <Section title={t('threshold')} hint={t('thresholdHint')}>
-              <Slider
-                value={values.similarityThreshold}
+            <Section title={t('threshold')} help={SETTINGS_HELP.threshold} hint={t('thresholdHint')}>
+              <NumberSlider
+                label={t('threshold')} value={values.similarityThreshold}
                 min={0}
                 max={1}
                 step={0.01}
                 onChange={(v) => patch({ similarityThreshold: v })}
-                minLabel="0.00"
-                maxLabel="1.00"
-                format={(v) => v.toFixed(2)}
               />
             </Section>
           )}
 
           {/* 上下文拼接 */}
-          <Section title={t('siblingChunks')} hint={t('siblingChunksHint')}>
-            <Slider
-              value={values.siblingChunks}
+          <Section title={t('siblingChunks')} help={SETTINGS_HELP.siblingChunks} hint={t('siblingChunksHint')}>
+            <NumberSlider
+              label={t('siblingChunks')} value={values.siblingChunks}
               min={0}
               max={3}
               step={1}
               onChange={(v) => patch({ siblingChunks: v })}
-              minLabel="0"
-              maxLabel="3"
-              format={(v) => String(v)}
             />
+          </Section>
+          <Section title={t('rrfVectorWeight')} help={SETTINGS_HELP.rrfVectorWeight} hint={t('rrfVectorWeightHint')}>
+            <NumberSlider label={t('rrfVectorWeight')} min={0.1} max={5} step={0.1} value={values.rrfVectorWeight} onChange={value => patch({ rrfVectorWeight: value })} />
+          </Section>
+          <Section title="MMR relevance balance" help={SETTINGS_HELP.diversity} hint="0 disables MMR; higher enabled values favor relevance over diversity.">
+            <NumberSlider label="MMR relevance balance" min={0} max={1} step={0.05} value={values.mmrDiversity} onChange={value => patch({ mmrDiversity: value })} />
           </Section>
         </section>
 
@@ -679,14 +705,14 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
               <FieldRow label="Keep internal Markdown" hint="Save a versioned copy of the exact indexed text for citation highlighting. Saving this setting does not change existing documents. Folder Sync applies current settings recursively; when off, it removes existing internal Markdown copies, including older citation revisions. Indexed text and original files are preserved.">
                 <Switch checked={values.keepInternalMarkdown ?? false} onChange={value => patch({ keepInternalMarkdown: value })} />
               </FieldRow>
-              <FieldRow label={t('smartChunk')} hint={t('smartChunkHint')}>
+              <FieldRow label={t('smartChunk')} help={SETTINGS_HELP.smartChunk} hint={t('smartChunkHint')}>
                 <Switch checked={values.smartChunk} onChange={(v) => patch({ smartChunk: v })} />
               </FieldRow>
-              <FieldRow label={t('semanticChunk')} hint={t('semanticChunkHint')}>
+              <FieldRow label={t('semanticChunk')} help={SETTINGS_HELP.semanticChunk} hint={t('semanticChunkHint')}>
                 <Switch checked={values.semanticChunk} onChange={(v) => patch({ semanticChunk: v })} />
               </FieldRow>
               {values.semanticChunk && (
-                <FieldRow label={t('semanticChunkThreshold')} hint={t('semanticChunkThresholdHint')}>
+                <FieldRow label={t('semanticChunkThreshold')} help={SETTINGS_HELP.semanticChunkThreshold} hint={t('semanticChunkThresholdHint')}>
                   <input
                     style={{ ...style.input, width: 100 }}
                     type="number"
@@ -698,11 +724,11 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   />
                 </FieldRow>
               )}
-              {values.semanticChunk && <FieldRow label="Semantic candidate size (tokens)" hint="Group short neighboring paragraphs within the same heading before embedding, then merge similar groups up to the chunk budget. Default 128; zero embeds each paragraph separately. Saved results are reused for unchanged files.">
+              {values.semanticChunk && <FieldRow label="Semantic candidate size (tokens)" help={SETTINGS_HELP.semanticCandidates} hint="Group short neighboring paragraphs within the same heading before embedding, then merge similar groups up to the chunk budget. Default 128; zero embeds each paragraph separately. Saved results are reused for unchanged files.">
                 <input style={{ ...style.input, width: 100 }} type="number" min={0} max={Math.min(1024, values.chunkSize)} step={32}
                   value={values.semanticChunkCandidateTokens ?? 128} onChange={e => patchNumber('semanticChunkCandidateTokens', e.target.value)} />
               </FieldRow>}
-              <FieldRow label={t('chunkTokenLimit')} hint={t('chunkTokenLimitHint')}>
+              <FieldRow label={t('chunkTokenLimit')} help={SETTINGS_HELP.chunkTokenLimit} hint={t('chunkTokenLimitHint')}>
                 <input
                   style={{ ...style.input, width: 100 }}
                   type="number"
@@ -711,7 +737,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   onChange={(e) => patchNumber('chunkTokenLimit', e.target.value)}
                 />
               </FieldRow>
-              <FieldRow label={t('conflictStrategy')} hint={t('conflictStrategyHint')}>
+              <FieldRow label={t('conflictStrategy')} help={SETTINGS_HELP.conflictStrategy} hint={t('conflictStrategyHint')}>
                 <select
                   style={{ ...style.input, width: 140 }}
                   value={values.conflictStrategy}
@@ -722,7 +748,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   <option value="keep">{t('conflictKeep')}</option>
                 </select>
               </FieldRow>
-              <FieldRow label={t('urlRefreshHours')} hint={t('urlRefreshHoursHint')}>
+              <FieldRow label={t('urlRefreshHours')} help={SETTINGS_HELP.urlRefreshHours} hint={t('urlRefreshHoursHint')}>
                 <input
                   style={{ ...style.input, width: 100 }}
                   type="number"
@@ -731,21 +757,21 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   onChange={(e) => patchNumber('urlRefreshHours', e.target.value)}
                 />
               </FieldRow>
-              <FieldRow label={t('resumeInterrupted')} hint={t('resumeInterruptedHint')}>
+              <FieldRow label={t('resumeInterrupted')} help={SETTINGS_HELP.resumeInterrupted} hint={t('resumeInterruptedHint')}>
                 <input
                   type="checkbox"
                   checked={values.resumeInterruptedOnStartup}
                   onChange={(e) => patch({ resumeInterruptedOnStartup: e.target.checked })}
                 />
               </FieldRow>
-              <FieldRow label={t('autoRetrieve')} hint={t('autoRetrieveHint')}>
+              <FieldRow label={t('autoRetrieve')} help={SETTINGS_HELP.autoRetrieve} hint={t('autoRetrieveHint')}>
                 <input
                   type="checkbox"
                   checked={values.autoRetrieve}
                   onChange={(e) => patch({ autoRetrieve: e.target.checked })}
                 />
               </FieldRow>
-              <FieldRow label={t('autoRetrieveWeight')} hint={t('autoRetrieveWeightHint')}>
+              <FieldRow label={t('autoRetrieveWeight')} help={SETTINGS_HELP.autoRetrieveWeight} hint={t('autoRetrieveWeightHint')}>
                 <input
                   style={{ ...style.input, width: 100 }}
                   type="number"
@@ -755,7 +781,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   onChange={(e) => patchNumber('autoRetrieveWeight', e.target.value)}
                 />
               </FieldRow>
-              <FieldRow label={t('injectUsagePrompt')} hint={t('injectUsagePromptHint')}>
+              <FieldRow label={t('injectUsagePrompt')} help={SETTINGS_HELP.injectUsagePrompt} hint={t('injectUsagePromptHint')}>
                 <input
                   type="checkbox"
                   aria-label={t('injectUsagePrompt')}
@@ -763,14 +789,14 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   onChange={(e) => patch({ injectUsagePrompt: e.target.checked })}
                 />
               </FieldRow>
-              <FieldRow label={t('chunkSeparator')} hint={t('chunkSeparatorHint')}>
+              <FieldRow label={t('chunkSeparator')} help={SETTINGS_HELP.chunkSeparator} hint={t('chunkSeparatorHint')}>
                 <input
                   style={{ ...style.input, width: 140 }}
                   value={values.chunkSeparator}
                   onChange={(e) => patch({ chunkSeparator: e.target.value })}
                 />
               </FieldRow>
-              <FieldRow label={t('chunkSize')}>
+              <FieldRow label={t('chunkSize')} help={SETTINGS_HELP.chunkSize}>
                 <input
                   style={{ ...style.input, width: 100 }}
                   type="number"
@@ -778,7 +804,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   onChange={(e) => patchNumber('chunkSize', e.target.value)}
                 />
               </FieldRow>
-              <FieldRow label={t('chunkOverlap')}>
+              <FieldRow label={t('chunkOverlap')} help={SETTINGS_HELP.chunkOverlap}>
                 <input
                   style={{ ...style.input, width: 100 }}
                   type="number"
@@ -786,17 +812,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                   onChange={(e) => patchNumber('chunkOverlap', e.target.value)}
                 />
               </FieldRow>
-              <FieldRow label={t('rrfVectorWeight')} hint={t('rrfVectorWeightHint')}>
-                <input
-                  style={{ ...style.input, width: 100 }}
-                  type="number"
-                  step="0.1"
-                  min="0.1"
-                  max="5"
-                  value={values.rrfVectorWeight}
-                  onChange={(e) => patchNumber('rrfVectorWeight', e.target.value)}
-                />
-              </FieldRow>
+
               <div style={style.warningHint}>{t('chunkChangeWarning')}</div>
             </div>
           )}
@@ -836,21 +852,21 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
   )
 }
 
-function Section(props: { title: string; hint?: string; children: React.ReactNode }): JSX.Element {
+function Section(props: { title: string; hint?: string; help?: string; children: React.ReactNode }): JSX.Element {
   return (
     <div style={{ marginBottom: 24 }}>
-      <p style={{ ...style.sectionTitle, fontSize: 15, margin: '0 0 5px', lineHeight: 1.45 }}>{props.title}</p>
+      <p style={{ ...style.sectionTitle, fontSize: 15, margin: '0 0 5px', lineHeight: 1.45 }}>{props.title}{(props.help || props.hint) && <SettingHelp label={props.title} text={props.help || props.hint!} />}</p>
       {props.hint !== undefined && <p style={{ ...style.sectionHint, fontSize: 13, margin: '0 0 14px', lineHeight: 1.65, maxWidth: 680 }}>{props.hint}</p>}
       {props.children}
     </div>
   )
 }
 
-function FieldRow(props: { label: string; hint?: string; children: React.ReactNode }): JSX.Element {
+function FieldRow(props: { label: string; hint?: string; help?: string; children: React.ReactNode }): JSX.Element {
   return (
     <div className="kb-rag-config-field">
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.45 }}>{props.label}</div>
+        <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.45 }}>{props.label}{(props.help || props.hint) && <SettingHelp label={props.label} text={props.help || props.hint!} />}</div>
         {props.hint !== undefined && <div style={{ fontSize: 12, color: C.muted, marginTop: 4, lineHeight: 1.55 }}>{props.hint}</div>}
       </div>
       <div className="kb-rag-config-control">{props.children}</div>
@@ -868,38 +884,5 @@ function Switch(props: { checked: boolean; onChange: (next: boolean) => void }):
     >
       <span style={{ ...style.switchKnob, transform: props.checked ? 'translateX(16px)' : 'none' }} />
     </button>
-  )
-}
-
-function Slider(props: {
-  value: number
-  min: number
-  max: number
-  step: number
-  onChange: (value: number) => void
-  minLabel: string
-  maxLabel: string
-  format: (value: number) => string
-}): JSX.Element {
-  return (
-    <div>
-      <div style={style.sliderRow}>
-        <span />
-        <span style={style.sliderValue}>{props.format(props.value)}</span>
-      </div>
-      <input
-        type="range"
-        min={props.min}
-        max={props.max}
-        step={props.step}
-        value={props.value}
-        onChange={(e) => props.onChange(Number(e.target.value))}
-        style={{ width: '100%', accentColor: C.accent }}
-      />
-      <div style={style.sliderBounds}>
-        <span>{props.minLabel}</span>
-        <span>{props.maxLabel}</span>
-      </div>
-    </div>
   )
 }

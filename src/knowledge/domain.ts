@@ -20,6 +20,7 @@ export const baseConfigSchema = z.object({
   embeddingProvider: z.enum(['openai', 'ollama', 'local', 'none']).optional(),
   embeddingBaseUrl: z.string().optional(),
   embeddingModel: z.string().optional(),
+  embeddingDimensions: z.number().int().gte(0).lte(1024).optional(),
   embeddingApiKey: z.string().optional(),
   rerankModel: z.string().optional(),
   rerankBaseUrl: z.string().optional(),
@@ -136,6 +137,7 @@ export const configOverridesSchema = z.object({
   embeddingProvider: z.enum(['openai', 'ollama', 'local', 'none']).optional(),
   embeddingBaseUrl: z.string().optional(),
   embeddingModel: z.string().optional(),
+  embeddingDimensions: z.number().int().gte(0).lte(1024).optional(),
   embeddingApiKey: z.string().optional(),
   rerankModel: z.string().optional(),
   rerankBaseUrl: z.string().optional(),
@@ -195,6 +197,7 @@ export interface ConfigOverrides {
   embeddingProvider?: KnowledgeConfig['embeddingProvider']
   embeddingBaseUrl?: string
   embeddingModel?: string
+  embeddingDimensions?: number
   embeddingApiKey?: string
   rerankModel?: string
   rerankBaseUrl?: string

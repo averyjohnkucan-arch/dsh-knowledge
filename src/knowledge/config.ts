@@ -17,6 +17,7 @@ export interface Config {
   embeddingProvider: EmbeddingProvider
   embeddingBaseUrl: string
   embeddingModel: string
+  embeddingDimensions?: number
   embeddingApiKey: string
   rerankModel: string
   rerankBaseUrl: string
@@ -118,6 +119,7 @@ export const Config: Schema<Config> = Schema.object({
   embeddingProvider: Schema.union(['openai', 'ollama', 'local', 'none']).default('none'),
   embeddingBaseUrl: Schema.string().default(''),
   embeddingModel: Schema.string().default(''),
+  embeddingDimensions: Schema.number().min(0).max(1024).step(1).default(0),
   embeddingApiKey: Schema.string().default(''),
   rerankModel: Schema.string().default(''),
   rerankBaseUrl: Schema.string().default(''),
@@ -188,6 +190,7 @@ export function resolveConfig(config: Config, overrides: ConfigOverrides): Knowl
     embeddingProvider: overrides.embeddingProvider ?? config.embeddingProvider,
     embeddingBaseUrl: overrides.embeddingBaseUrl ?? config.embeddingBaseUrl,
     embeddingModel: overrides.embeddingModel ?? config.embeddingModel,
+    embeddingDimensions: overrides.embeddingDimensions ?? config.embeddingDimensions ?? 0,
     embeddingApiKey: apiKey,
     rerankModel: overrides.rerankModel ?? config.rerankModel,
     rerankBaseUrl: overrides.rerankBaseUrl ?? config.rerankBaseUrl,
@@ -258,6 +261,7 @@ export function resolveConfigFor(config: Config, overrides: ConfigOverrides, bas
     embeddingProvider: baseConfig.embeddingProvider ?? resolved.embeddingProvider,
     embeddingBaseUrl: baseConfig.embeddingBaseUrl ?? resolved.embeddingBaseUrl,
     embeddingModel: baseConfig.embeddingModel ?? resolved.embeddingModel,
+    embeddingDimensions: baseConfig.embeddingDimensions ?? resolved.embeddingDimensions ?? 0,
     embeddingApiKey: baseConfig.embeddingApiKey ?? resolved.embeddingApiKey,
     rerankModel: baseConfig.rerankModel ?? resolved.rerankModel,
     rerankBaseUrl: baseConfig.rerankBaseUrl ?? resolved.rerankBaseUrl,

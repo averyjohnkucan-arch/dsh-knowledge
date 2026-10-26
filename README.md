@@ -95,7 +95,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.25.tgz
+dsh plugin --profile <name> add ./dsh-knowledge-0.5.26.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
@@ -286,6 +286,10 @@ Filters apply only to the current request. No database migration, reindex, or do
 - After changing chunk or embedding settings, rebuild one document or the entire base from the panel or model tools.
 
 ---
+
+## v0.5.26 highlights
+
+Tune vector dimensions, embedding batches and retrieval result counts with paired sliders and number boxes. Hover or focus the information buttons for explanations of quality, speed, storage and when reprocessing is needed. See [embedding settings release notes](docs/releases/v0.5.26.md).
 
 ## v0.5.25 highlights
 

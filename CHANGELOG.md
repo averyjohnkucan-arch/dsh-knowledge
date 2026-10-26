@@ -1,3 +1,10 @@
+## 0.5.26 — Embedding controls and explanatory settings help
+
+- Add paired sliders and editable number boxes for vector dimensions, embedding batch size, retrieval count, thresholds, context stitching, fusion weight and CPU worker tuning.
+- Support 32–1024-dimensional Qwen3 Embedding 0.6B vectors with matching normalized document/query projections. Preserve native dimensions for other models.
+- Re-vectorize saved chunks after a dimension change, exclude incompatible vectors during migration, and search bases with different widths correctly.
+- Add hover, focus and click information popovers explaining effects, tradeoffs and refresh requirements across common settings.
+
 ## 0.5.25 — Import backpressure and lower write amplification
 
 - Make internal parser congestion wait for capacity instead of failing documents. Admit source reads globally, with up to 128 lightweight jobs and four heavy documents on large hosts; nested sync/reindex operations share admission.

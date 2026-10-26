@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import type { KnowledgeApi } from './api.js'
 import { style } from './theme.js'
+import { NumberSlider } from './NumberSlider.js'
+import { SettingHelp } from './SettingHelp.js'
 export function EmbeddingPerformance({ api }: { api: KnowledgeApi }) {
   const [threads, setThreads] = useState(0), [instances, setInstances] = useState(0), [batch, setBatch] = useState(1)
   const [igpu, setIgpu] = useState(true), [gpu, setGpu] = useState(true)
@@ -15,9 +17,9 @@ export function EmbeddingPerformance({ api }: { api: KnowledgeApi }) {
     <h3 style={{ marginTop: 0 }}>Embedding performance · CPU</h3>
     <p style={style.hint}>Automatic uses two independent eight-thread models on a machine with at least 16 logical CPUs and enough RAM. Smaller machines use fewer resources. Qwen3 ONNX always uses one text per inference to preserve vector consistency; the micro-batch setting applies to other models. Models run in the plugin’s isolated process.</p>
     <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-      <label>Threads per instance (0 = automatic)<input type="number" min={0} max={64} value={threads} onChange={e => setThreads(Number(e.target.value))} style={style.input}/></label>
-      <label>Instances (0 = automatic)<input type="number" min={0} max={4} value={instances} onChange={e => setInstances(Number(e.target.value))} style={style.input}/></label>
-      <label>Texts per micro-batch<input type="number" min={1} max={8} value={batch} onChange={e => setBatch(Number(e.target.value))} style={style.input}/></label>
+      <div style={{ flex: '1 1 220px', minWidth: 0 }}><div>Threads per instance (0 = automatic)<SettingHelp label="Threads per instance (0 = automatic)" text={"CPU threads control how much processor parallelism each embedding worker can request. Zero uses automatic tuning. More threads may speed up large inputs, but also compete with foreground inference and can be slower once memory bandwidth is saturated.\n\nThe runtime bounds the total against available CPUs. This changes future requests without rebuilding existing vectors."} /></div><NumberSlider label="Threads per instance (0 = automatic)" min={0} max={64} step={1} value={threads} onChange={setThreads} /></div>
+      <div style={{ flex: '1 1 220px', minWidth: 0 }}><div>Instances (0 = automatic)<SettingHelp label="Instances (0 = automatic)" text={"Each instance loads an independent embedding worker. More instances can process independent chunks concurrently, but each adds model and runtime memory; zero lets automatic tuning choose based on CPU and memory availability.\n\nMore is not always faster. Keep this conservative if memory use or foreground responsiveness matters. Changes apply between embedding requests."} /></div><NumberSlider label="Instances (0 = automatic)" min={0} max={4} step={1} value={instances} onChange={setInstances} /></div>
+      <div style={{ flex: '1 1 220px', minWidth: 0 }}><div>Texts per micro-batch<SettingHelp label="Texts per micro-batch" text={"A micro-batch is the group of texts processed inside one CPU worker invocation. It is separate from the larger indexing-request batch setting in base settings. Larger groups can improve throughput but need more memory.\n\nQwen3 ONNX uses one text per inference to keep its vector format consistent; this control applies to other compatible CPU models. Device-specific batching may impose a smaller limit."} /></div><NumberSlider label="Texts per micro-batch" min={1} max={8} step={1} value={batch} onChange={setBatch} /></div>
     </div>
     <p style={style.hint}>Total threads are bounded by the detected CPU count; automatic instance count also considers available RAM. Four instances can use around 5 GB for this model without outperforming two.</p>
     <button style={style.button} disabled={busy} onClick={() => void save()}>Save embedding performance</button>
