@@ -107,7 +107,7 @@ describe('embedding device fallback and yielding',()=>{
   const gpu={...cpu,device:'GPU:main',extraWorkers:[second],current:new Promise<void>(r=>{finish=r}),worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})}}
   Object.assign(manager,{lanes:[cpu,npu,gpu]})
   const pending=manager.enterForeground();expect(gpu.enabled).toBe(false);expect(gpu.worker.stopAndWait).not.toHaveBeenCalled()
-  finish();const release=await pending;expect(gpu.worker.stopAndWait).toHaveBeenCalledTimes(1);expect(second.stopAndWait).toHaveBeenCalledTimes(1);expect(cpu.worker.stopAndWait).not.toHaveBeenCalled();expect(npu.worker.stopAndWait).not.toHaveBeenCalled();release();release();manager.dispose()
+  finish();const release=await pending;expect(gpu.worker.stopAndWait).toHaveBeenCalledTimes(1);expect(second.stopAndWait).toHaveBeenCalledTimes(1);expect(cpu.worker.stopAndWait).not.toHaveBeenCalled();expect(npu.worker.stopAndWait).toHaveBeenCalledOnce();release();release();manager.dispose()
  })
  it('forces GPU release at ten seconds when the current job does not finish',async()=>{
   vi.useFakeTimers();const {manager,cpu}=fixture()
@@ -160,7 +160,7 @@ describe('foreground embedding CPU budget',()=>{
   const extra={...cpu,worker:{...cpu.worker,stopAndWait:vi.fn(async()=>{})},batcher:{pause:vi.fn(),resume:vi.fn()}}
   Object.assign(manager,{lanes:[cpu,extra,npu]})
   const release=await manager.enterForeground()
-  expect(cpu.enabled).toBe(true);expect(npu.enabled).toBe(true);expect(extra.enabled).toBe(false)
+  expect(cpu.enabled).toBe(true);expect(npu.enabled).toBe(false);expect(extra.enabled).toBe(false)
   expect(extra.worker.stopAndWait).toHaveBeenCalledOnce()
   release();release();expect(extra.enabled).toBe(true);expect(extra.batcher.resume).toHaveBeenCalledOnce();manager.dispose()
  })

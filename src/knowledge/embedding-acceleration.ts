@@ -100,7 +100,7 @@ export class EmbeddingAcceleration {
       if(this.ready)return this.ready
       if(this.stopped||root!==this.root())return {status:'not_installed',message:'Embedding configuration changed',devices:[]}
       this.lanes=receipt.devices.filter(d=>d.qualified&&['CPU','NPU'].includes(d.device)).flatMap(d=>Array.from({length:d.device==='CPU'?this.cpuInstances:1},()=>this.lane(d.device,d.medianMs??150)))
-      if (this.foreground) { for (const lane of this.lanes.filter(lane => lane.device === 'CPU').slice(1)) { lane.enabled=false;lane.batcher?.pause() } }
+      if (this.foreground) { for (const lane of [...this.lanes.filter(lane => lane.device === 'CPU').slice(1), ...this.lanes.filter(lane => lane.device === 'NPU')]) { lane.enabled=false;lane.batcher?.pause() } }
       this.ready={status:'ready',message:this.fp16 ? 'One FP16 vector space across CPU, NPU, Intel iGPU and optional NVIDIA CUDA. GPU workers yield for foreground inference.' : 'OpenVINO CPU/NPU model; separate vector space from the ONNX model. GPU workers require verified idle state and matching vectors.',devices:receipt.devices}
       return this.ready
     } catch {return {status:'not_installed',message:'Download and validate the separate OpenVINO embedding model to enable NPU execution.',devices:[]}}
@@ -236,7 +236,7 @@ export class EmbeddingAcceleration {
     })) } finally { if(purpose==='index'){this.activeIndexBatches--;this.lastIndexUse=Date.now()} }
   }
   private async revalidateNpu():Promise<void>{
-    if(this.npuRevalidation||this.stopped)return
+    if(this.npuRevalidation||this.stopped||this.foreground)return
     const failed=this.lanes.find(lane=>lane.device==='NPU'&&!lane.enabled)
     const cpu=this.lanes.find(lane=>lane.device==='CPU'&&lane.enabled)
     if(!failed||!cpu||(this.gpuRetryAt.get('NPU')??0)>Date.now())return
@@ -247,7 +247,7 @@ export class EmbeddingAcceleration {
         const [reference,vector]=await Promise.all([this.run(cpu,text,'query'),this.run(candidate,text,'query')])
         const cosine=reference.reduce((sum,value,index)=>sum+value*vector[index],0)
         if(cosine<.995)throw Error('NPU recovery vectors did not match CPU reference')
-        if(this.stopped||!this.lanes.includes(failed))throw Error('NPU recovery yielded during plugin disposal')
+        if(this.stopped||this.foreground||!this.lanes.includes(failed))throw Error('NPU recovery yielded during plugin disposal')
         candidate.qualified=true;this.lanes[this.lanes.indexOf(failed)]=candidate
         const state=this.ready?.devices.find(device=>device.device==='NPU')
         if(state){state.qualified=true;state.minimumCosine=cosine;state.medianMs=candidate.milliseconds;delete state.error}
