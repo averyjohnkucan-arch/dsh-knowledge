@@ -34,6 +34,7 @@ export interface BaseConfig {
     readonly embeddingProvider?: EmbeddingProvider;
     readonly embeddingBaseUrl?: string;
     readonly embeddingModel?: string;
+    readonly embeddingDimensions?: number;
     readonly embeddingApiKey?: string;
     readonly rerankModel?: string;
     readonly rerankBaseUrl?: string;
@@ -268,6 +269,7 @@ export interface KnowledgeConfig {
     readonly embeddingProvider: EmbeddingProvider;
     readonly embeddingBaseUrl: string;
     readonly embeddingModel: string;
+    readonly embeddingDimensions?: number;
     readonly embeddingApiKey: string;
     /** Optional rerank model (empty = disabled), Cherry Studio style. */
     readonly rerankModel: string;

@@ -536,6 +536,7 @@ export declare class KnowledgeService extends Service {
         baseUrl?: string;
         model?: string;
         apiKey?: string;
+        dimensions?: number;
     }): Promise<number>;
     enterEmbeddingForeground(): Promise<() => void>;
     embeddingAccelerationStatus(model?: string): Promise<import("./embedding-acceleration.js").EmbeddingAccelerationStatus>;

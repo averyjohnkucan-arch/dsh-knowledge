@@ -15,6 +15,7 @@ export interface Config {
     embeddingProvider: EmbeddingProvider;
     embeddingBaseUrl: string;
     embeddingModel: string;
+    embeddingDimensions?: number;
     embeddingApiKey: string;
     rerankModel: string;
     rerankBaseUrl: string;

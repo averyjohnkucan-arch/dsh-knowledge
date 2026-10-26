@@ -11,13 +11,14 @@ import type { KnowledgeBase, KnowledgeConfig, KnowledgeDocument } from './types.
 /** Per-base config overrides, validated at the durable boundary. */
 export declare const baseConfigSchema: z.ZodObject<{
     embeddingProvider: z.ZodOptional<z.ZodEnum<{
+        none: "none";
+        local: "local";
         openai: "openai";
         ollama: "ollama";
-        local: "local";
-        none: "none";
     }>>;
     embeddingBaseUrl: z.ZodOptional<z.ZodString>;
     embeddingModel: z.ZodOptional<z.ZodString>;
+    embeddingDimensions: z.ZodOptional<z.ZodNumber>;
     embeddingApiKey: z.ZodOptional<z.ZodString>;
     rerankModel: z.ZodOptional<z.ZodString>;
     rerankBaseUrl: z.ZodOptional<z.ZodString>;
@@ -175,13 +176,14 @@ export declare const documentSchema: z.ZodObject<{
 /** Runtime overrides merged over the plugin Config defaults (user-editable). */
 export declare const configOverridesSchema: z.ZodObject<{
     embeddingProvider: z.ZodOptional<z.ZodEnum<{
+        none: "none";
+        local: "local";
         openai: "openai";
         ollama: "ollama";
-        local: "local";
-        none: "none";
     }>>;
     embeddingBaseUrl: z.ZodOptional<z.ZodString>;
     embeddingModel: z.ZodOptional<z.ZodString>;
+    embeddingDimensions: z.ZodOptional<z.ZodNumber>;
     embeddingApiKey: z.ZodOptional<z.ZodString>;
     rerankModel: z.ZodOptional<z.ZodString>;
     rerankBaseUrl: z.ZodOptional<z.ZodString>;
@@ -263,6 +265,7 @@ export interface ConfigOverrides {
     embeddingProvider?: KnowledgeConfig['embeddingProvider'];
     embeddingBaseUrl?: string;
     embeddingModel?: string;
+    embeddingDimensions?: number;
     embeddingApiKey?: string;
     rerankModel?: string;
     rerankBaseUrl?: string;
@@ -321,13 +324,14 @@ export declare const knowledgeDomainSpec: {
         schema: z.ZodObject<{
             overrides: z.ZodObject<{
                 embeddingProvider: z.ZodOptional<z.ZodEnum<{
+                    none: "none";
+                    local: "local";
                     openai: "openai";
                     ollama: "ollama";
-                    local: "local";
-                    none: "none";
                 }>>;
                 embeddingBaseUrl: z.ZodOptional<z.ZodString>;
                 embeddingModel: z.ZodOptional<z.ZodString>;
+                embeddingDimensions: z.ZodOptional<z.ZodNumber>;
                 embeddingApiKey: z.ZodOptional<z.ZodString>;
                 rerankModel: z.ZodOptional<z.ZodString>;
                 rerankBaseUrl: z.ZodOptional<z.ZodString>;

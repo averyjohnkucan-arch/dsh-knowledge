@@ -20,7 +20,7 @@ export declare function expandHomePath(input: string): string;
 /** Persistent cache directory for downloaded local models (mirrors DSH's `resolveDshHome`). */
 export declare function localModelCacheDir(): string;
 /** Embed many texts into normalized vectors. Throws when the provider is `none` or the call fails. */
-export declare function embedTexts(provider: EmbeddingProvider, baseUrl: string, model: string, apiKey: string, texts: readonly string[], signal?: AbortSignal, purpose?: 'query' | 'index'): Promise<number[][]>;
+export declare function embedTexts(provider: EmbeddingProvider, baseUrl: string, model: string, apiKey: string, texts: readonly string[], signal?: AbortSignal, purpose?: 'query' | 'index', dimensions?: number): Promise<number[][]>;
 export interface LocalModelStatus {
     model: string;
     status: 'idle' | 'downloading' | 'ready' | 'error';

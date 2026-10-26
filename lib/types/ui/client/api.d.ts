@@ -15,6 +15,7 @@ export interface BaseConfig {
     embeddingProvider?: EmbeddingProvider;
     embeddingBaseUrl?: string;
     embeddingModel?: string;
+    embeddingDimensions?: number;
     embeddingApiKey?: string;
     rerankModel?: string;
     rerankBaseUrl?: string;
@@ -198,6 +199,7 @@ export interface KnowledgeConfig {
     embeddingProvider: EmbeddingProvider;
     embeddingBaseUrl: string;
     embeddingModel: string;
+    embeddingDimensions?: number;
     embeddingApiKey: string;
     rerankModel: string;
     rerankBaseUrl: string;
@@ -520,6 +522,7 @@ export declare class KnowledgeApi {
         baseUrl?: string;
         model?: string;
         apiKey?: string;
+        dimensions?: number;
     }): Promise<number>;
     pickFolder(): Promise<{
         path: string | null;
