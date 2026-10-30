@@ -1,7 +1,7 @@
 {
   "name": "dsh-knowledge",
   "description": "Cherry Studio-style knowledge base system for DeepSeek Harness (DSH): bases, documents, chunking, embeddings (OpenAI-compatible / Ollama / local / lexical fallback), retrieval, model-facing tools, and a browser management panel",
-  "version": "0.5.26",
+  "version": "0.5.27",
   "packageManager": "pnpm@11.7.0",
   "license": "AGPL-3.0",
   "repository": {
@@ -14,7 +14,8 @@
   },
   "type": "module",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -47,11 +48,12 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-client-ui-primitives"
       ]
     }
   },
@@ -96,7 +98,8 @@
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
     "prepack": "node build.mjs",
     "benchmark:ocr": "node scripts/benchmark-ocr-corpus.mjs",
-    "benchmark:writes": "node scripts/benchmark-import-writes.mjs"
+    "benchmark:writes": "node scripts/benchmark-import-writes.mjs",
+    "check:dsh": "node scripts/check-dsh-compatibility.mjs"
   },
   "keywords": [
     "dsh",
@@ -143,6 +146,6 @@
     "esbuild": "^0.25.0",
     "typescript": "^5.9.0",
     "vitest": "^4.1.8",
-    "zod": "^4.4.3"
+    "zod": "4.4.3"
   }
 }

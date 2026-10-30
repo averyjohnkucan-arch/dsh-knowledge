@@ -21,3 +21,7 @@ docs/issues/
 # Python runtime caches and developer bytecode are not source.
 __pycache__/
 *.pyc
+
+# DSH compatibility workflow scratch data
+.compat-home/
+.compat-packed/
