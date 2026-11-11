@@ -678,3 +678,5 @@ processor-level concurrency limits, and combines base timestamp writes across a
 scan. Two source roots can reconcile concurrently, without overlapping scans of
 the same root. Metadata still uses the DSH storage API; this is not a migration
 of document metadata to SQLite, and a full 50,000-file speedup has not been measured.
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for supported DSH versions and upgrade checks.
