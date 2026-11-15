@@ -28,7 +28,7 @@ export class PdfParserPool {
       else pending.reject(Error(message.error ?? 'pdf-parse worker failed'))
       if (!lane.pending.size) worker.unref()
     })
-    worker.on('error', error => this.fail(lane, error))
+    worker.on('error', error => this.fail(lane, error instanceof Error ? error : Error(String(error))))
     worker.on('exit', () => this.fail(lane, Error('pdf-parse worker exited')))
     worker.unref(); this.lanes.push(lane)
     return lane

@@ -1,3 +1,4 @@
+import { apply as installNativeExecutor } from '@deepseek-ai/dsh-tool-executor-native'
 import { KNOWLEDGE_CITATION_REMINDER } from '../src/shared/citations.js'
 import { beforeAll, beforeEach, describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
@@ -69,6 +70,7 @@ async function mountHarness(): Promise<Harness> {
   ctx.provide('webServer', fakeWebServer())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  installNativeExecutor(ctx)
   await ctx.plugin(KnowledgeService, DEFAULT_CONFIG)
   await ctx.plugin(ToolKnowledge)
   const knowledge = ctx.get('knowledge') as unknown as KnowledgeService
@@ -102,14 +104,13 @@ async function mountHarness(): Promise<Harness> {
 let callSequence = 0
 const signal = new AbortController().signal
 
-function execute(ctx: Context, name: string, args: unknown): Promise<ToolExecutionResult> {
+async function execute(ctx: Context, name: string, args: unknown): Promise<ToolExecutionResult> {
   callSequence += 1
-  return ctx.tools.execute({
+  const batch = await ctx.tools.execute({
     signal,
-    callId: `knowledge-contract-${callSequence}` as never,
-    name,
-    arguments: args,
+    calls: [{ type: 'tool-call', id: `knowledge-contract-${callSequence}` as never, name, arguments: JSON.stringify(args) }],
   })
+  return batch.results[0].result
 }
 
 function resultText(result: ToolExecutionResult): string {

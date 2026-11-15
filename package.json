@@ -1,7 +1,7 @@
 {
   "name": "dsh-knowledge",
   "description": "Cherry Studio-style knowledge base system for DeepSeek Harness (DSH): bases, documents, chunking, embeddings (OpenAI-compatible / Ollama / local / lexical fallback), retrieval, model-facing tools, and a browser management panel",
-  "version": "0.5.26",
+  "version": "0.5.27",
   "packageManager": "pnpm@11.7.0",
   "license": "AGPL-3.0",
   "repository": {
@@ -14,7 +14,8 @@
   },
   "type": "module",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0"
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -47,11 +48,11 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives"
       ]
     }
   },
@@ -70,7 +71,8 @@
     "scripts",
     "pnpm-workspace.yaml",
     "locale",
-    "icon.svg"
+    "icon.svg",
+    "COMPATIBILITY.md"
   ],
   "scripts": {
     "build": "node build.mjs",
@@ -130,19 +132,30 @@
     "@napi-rs/canvas-win32-x64-msvc": "^1.0.6"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.5",
-    "@deepseek-ai/dsh-host-webserver": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-storage": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-storage-domain": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
-    "@deepseek-ai/schemastery": "3.18.5",
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-storage": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "~3.19.0",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "@types/turndown": "^5.0.6",
     "esbuild": "^0.25.0",
     "typescript": "^5.9.0",
     "vitest": "^4.1.8",
-    "zod": "^4.4.3"
+    "zod": "4.4.3",
+    "@deepseek-ai/dsh-tool-executor-native": "0.2.2-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-storage": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "zod": "4.4.3"
   }
 }

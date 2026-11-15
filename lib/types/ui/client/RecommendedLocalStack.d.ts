@@ -15,5 +15,5 @@ export declare const RECOMMENDED_LOCAL: {
 };
 export declare function RecommendedLocalStack({ api }: {
     api: KnowledgeApi;
-}): import("react").JSX.Element;
+}): import("react/jsx-runtime").JSX.Element;
 //# sourceMappingURL=RecommendedLocalStack.d.ts.map

@@ -23,6 +23,12 @@ class FakeTable<K extends string, V> implements KvTable<K, V> {
   get size(): number { return this.map.size }
   async put(key: K, value: V): Promise<void> { this.map.set(key, value) }
   async delete(key: K): Promise<boolean> { return this.map.delete(key) }
+  async deleteMany(keys: readonly K[]): Promise<number> {
+    let removed = 0
+    for (const key of new Set(keys)) if (this.map.delete(key)) removed += 1
+    return removed
+  }
+
   async update(key: K, fn: (current: V) => V): Promise<V> {
     const current = this.map.get(key)
     if (current === undefined) throw new Error(`missing key ${key}`)

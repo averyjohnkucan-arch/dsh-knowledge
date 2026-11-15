@@ -1,4 +1,3 @@
-import React from 'react';
 /** Only producer-owned user/message events are claimed; ordinary chat stays with DSH. */
 interface RetrievalEvent {
     type: string;
@@ -81,6 +80,6 @@ export declare function KnowledgeRetrieval({ node, useDisclosure }: {
         expanded: boolean;
         toggle: () => void;
     };
-}): React.JSX.Element;
+}): import("react/jsx-runtime").JSX.Element;
 export {};
 //# sourceMappingURL=KnowledgeRetrieval.d.ts.map
