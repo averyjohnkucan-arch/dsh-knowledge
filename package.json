@@ -1,7 +1,7 @@
 {
   "name": "dsh-knowledge",
   "description": "Cherry Studio-style knowledge base system for DeepSeek Harness (DSH): bases, documents, chunking, embeddings (OpenAI-compatible / Ollama / local / lexical fallback), retrieval, model-facing tools, and a browser management panel",
-  "version": "0.5.27",
+  "version": "0.5.28-rc4.1",
   "packageManager": "pnpm@11.7.0",
   "license": "AGPL-3.0",
   "repository": {
@@ -14,8 +14,8 @@
   },
   "type": "module",
   "engines": {
-    "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+    "node": ">=24.9.0",
+    "dsh": "0.2.2-rc.4"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
@@ -133,11 +133,11 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-storage": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-storage": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.4",
     "@deepseek-ai/schemastery": "~3.19.0",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
@@ -145,17 +145,17 @@
     "esbuild": "^0.25.0",
     "typescript": "^5.9.0",
     "vitest": "^4.1.8",
-    "zod": "4.4.3",
-    "@deepseek-ai/dsh-tool-executor-native": "0.2.2-rc.1"
+    "zod": "4.6.6",
+    "@deepseek-ai/dsh-tool-executor-native": "0.2.2-rc.4"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh-host-webserver": ">=0.2.2-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-storage": ">=0.2.2-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-storage-domain": ">=0.2.2-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-system-prompt": ">=0.2.2-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-host-webserver": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-storage": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.4",
     "@deepseek-ai/schemastery": "~3.19.0",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   }
 }
