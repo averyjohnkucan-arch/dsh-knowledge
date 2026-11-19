@@ -1,6 +1,6 @@
 > Development fork: [averyjohnkucan-arch/dsh-knowledge](https://github.com/averyjohnkucan-arch/dsh-knowledge), based on [Soren-ABT/dsh-knowledge](https://github.com/Soren-ABT/dsh-knowledge). The original AGPL-3.0 license and upstream history are preserved. Local accelerator and document-pipeline changes are under development; see [fork status](docs/fork-status.md) for validation limits.
 
-**RC4 installation trial.** Start DeepSeek Harness with `npx @deepseek-ai/dsh@0.2.2-rc.4 web` (Node.js 24.9 or newer). In **Plugins → Add plugin**, paste the full path to this RC4 trial’s `.tgz` file and enable the plugin.
+This branch targets DeepSeek Harness `0.2.2-rc.4` and Node.js 24.9 or newer.
 
 <div align="center">
 

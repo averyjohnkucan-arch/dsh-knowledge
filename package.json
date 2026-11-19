@@ -1,7 +1,7 @@
 {
   "name": "dsh-knowledge",
   "description": "Cherry Studio-style knowledge base system for DeepSeek Harness (DSH): bases, documents, chunking, embeddings (OpenAI-compatible / Ollama / local / lexical fallback), retrieval, model-facing tools, and a browser management panel",
-  "version": "0.5.28-rc4.1",
+  "version": "0.5.28-rc4.2",
   "packageManager": "pnpm@11.7.0",
   "license": "AGPL-3.0",
   "repository": {
@@ -118,7 +118,7 @@
     "jszip": "^3.10.1",
     "mammoth": "^1.8.0",
     "mupdf": "^1.28.0",
-    "onnxruntime-node": "1.21.0",
+    "onnxruntime-node": "1.30.0",
     "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^4.10.38",
     "ppu-ocv": "^4.0.0",
