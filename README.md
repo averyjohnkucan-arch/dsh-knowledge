@@ -27,6 +27,8 @@ A **knowledge base system** as a standalone, open-source bundle plugin for [Deep
 
 Paste `https://github.com/averyjohnkucan-arch/dsh-knowledge` into DSH’s GitHub plugin installer. The default `plugin-release` branch includes compiled plugin files; `rebuild` contains the development source. No changes to DSH core or other plugins are required.
 
+On the first install, use the approval prompt in DSH to review the requested dependency builds and continue. In a fresh Linux RC4 profile, the installer requested ONNX Runtime, protobufjs and Tesseract.js. ONNX Runtime 1.30 can download its optional CUDA provider during this step.
+
 In Settings → Local Models, download the recommended local stack: Qwen3 Embedding 0.6B, BGE Reranker Base, PaddleOCR and optional PP-StructureV3 enrichment. Select the recommended models in base settings and save. Model weights are separate downloads, not bundled into Git. The plugin also offers its own optional OpenVINO CPU/NPU model installer and validates usable devices before enabling them.
 
 [Measured performance, fresh-install steps and hardware limits](docs/embedding-performance.md) · [Version 0.5.3](docs/releases/v0.5.3.md)
@@ -63,7 +65,7 @@ dsh-knowledge brings document ingestion, parsing, chunking, retrieval, evidence 
 - pnpm: `>=10`
 - An installed and initialized DeepSeek Harness profile
 
-Before installing the plugin, **merge** the following build permissions into the target profile's existing `allowBuilds` mapping in `pnpm-workspace.yaml`. Do not add a second `allowBuilds:` key: duplicate YAML keys make the file invalid. These dependencies require installation-time builds; when pnpm 10 blocks them, `dsh plugin add` exits before it can register the bundle.
+For a CLI install, merge the following build permissions into the target profile's existing `allowBuilds` mapping in `pnpm-workspace.yaml`. Keep one `allowBuilds` mapping in that file. The DSH Web installer can collect these approvals in its dialog.
 
 ```yaml
 allowBuilds:
