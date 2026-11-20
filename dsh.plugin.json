@@ -1,11 +1,6 @@
 {
   "name": "dsh-knowledge",
-  "description": "Cherry Studio-style knowledge base for DeepSeek Harness (DSH): bases, documents, chunking, embeddings, retrieval, model-facing tools, and a browser management panel.",
-  "version": "0.5.28-rc4.2",
-  "entry": {
-    "name": "dsh-knowledge/knowledge",
-    "inject": [
-      "webServer"
-    ]
-  }
+  "version": "1.0.0",
+  "description": "Import Markdown, text, scans and charts into a searchable local library.",
+  "entry": { "name": "dsh-knowledge", "inject": ["webServer", "tools", "connection"] }
 }

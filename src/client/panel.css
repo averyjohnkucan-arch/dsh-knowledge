@@ -1,0 +1,177 @@
+.kn-app {
+  --kn-rule: color-mix(in srgb, currentColor 18%, transparent);
+  --kn-muted: color-mix(in srgb, currentColor 76%, transparent);
+  font:
+    14px/1.5 system-ui,
+    sans-serif;
+  color: inherit;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 1.2rem;
+  text-align: left;
+}
+.kn-app h2 {
+  font-size: 1.55rem;
+  margin: 0 0 1rem;
+}
+.kn-app h3 {
+  font-size: 1.05rem;
+  margin: 0 0 0.5rem;
+}
+.kn-app p {
+  margin: 0.4rem 0 0.7rem;
+}
+.kn-app .kn-section {
+  padding: 1rem 0;
+  border-top: 1px solid var(--kn-rule);
+}
+.kn-app input,
+.kn-app select,
+.kn-app textarea,
+.kn-app button {
+  font: inherit;
+  color: inherit;
+}
+.kn-app input:not([hidden]),
+.kn-app select,
+.kn-app textarea {
+  background: transparent;
+  border: 1px solid var(--kn-rule);
+  border-radius: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.kn-app option {
+  color: CanvasText;
+  background: Canvas;
+}
+.kn-app button,
+.kn-close {
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--kn-rule, currentColor);
+  border-radius: 0.45rem;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+}
+.kn-app button:disabled {
+  opacity: 0.52;
+  cursor: default;
+}
+.kn-app .kn-primary {
+  background: #385bb4;
+  border-color: #385bb4;
+  color: white;
+  font-weight: 600;
+}
+.kn-app label {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+}
+.kn-app summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin: 0.55rem 0;
+}
+.kn-pair,
+.kn-search {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 0.8rem;
+}
+.kn-search {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.kn-steps {
+  padding-left: 1.6rem;
+}
+.kn-steps li {
+  margin: 0.25rem 0;
+}
+.kn-app small {
+  color: var(--kn-muted);
+  margin-left: 0.55rem;
+}
+.kn-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+.kn-actions span,
+.kn-app .kn-note {
+  color: var(--kn-muted);
+  font-size: 0.85rem;
+}
+.kn-docs {
+  padding: 0;
+  list-style: none;
+}
+.kn-docs li {
+  border-top: 1px solid var(--kn-rule);
+  padding: 0.65rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.kn-app strong,
+.kn-app p {
+  overflow-wrap: anywhere;
+}
+.kn-app a,
+.kn-app .kn-link {
+  text-decoration: underline;
+  color: inherit;
+}
+.kn-app .kn-link {
+  border: 0;
+  padding: 0.2rem 0;
+}
+.kn-app article {
+  border-left: 2px solid var(--kn-rule);
+  padding: 0.2rem 0.8rem;
+  margin-top: 0.75rem;
+}
+.kn-dialog {
+  background: Canvas;
+  color: CanvasText;
+  color-scheme: light dark;
+  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  border-radius: 0.9rem;
+  padding: 0;
+  width: min(50rem, 94vw);
+  max-height: 88vh;
+}
+.kn-dialog::backdrop {
+  background: rgb(0 0 0/0.55);
+}
+.kn-dialog .kn-close {
+  position: absolute;
+  top: 1.1rem;
+  right: 1.1rem;
+}
+@media (max-width: 600px) {
+  .kn-pair {
+    grid-template-columns: 1fr;
+  }
+  .kn-app {
+    padding: 0.85rem;
+  }
+}
+
+.kn-app .kn-steps {
+  max-width: 32rem;
+}
+.kn-steps li {
+  border-bottom: 1px solid var(--kn-rule);
+  padding: 0.22rem 0;
+}
+.kn-steps li small {
+  float: right;
+  font-variant-numeric: tabular-nums;
+}
