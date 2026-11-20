@@ -153,8 +153,9 @@ export class Engine {
     }
     signal.throwIfAborted();
     this.stage(6);
+    this.state.status = 'ready';
+    await this.onReady();
     this.update({ status: 'ready', backend: this.selected, device: label, progress: null });
-    this.onReady();
   }
   async candidates(devices) {
     const preference = this.store.settings().device;

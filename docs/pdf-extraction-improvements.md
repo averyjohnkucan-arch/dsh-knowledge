@@ -1,0 +1,7 @@
+# PDF extraction and OCR improvements
+
+The built-in PDF worker previously compared text-run baselines with exact floating-point equality. Slightly different y coordinates produced a newline between words, even in a usable existing text layer. The worker now uses a font-relative baseline tolerance, inserts spaces based on horizontal gaps, preserves producer reading order, and removes discretionary soft-hyphen wraps. Worker requests are serialized per lane while separate parser lanes remain concurrent.
+
+The accelerated OCR workers likewise assemble nearby recognized boxes into lines, preserving large column gaps and CJK adjacency. The raster stream now limits its in-flight window to 2–8 pages based on recognition concurrency, instead of always retaining 16. Original PDFs are never rewritten. The processor fingerprint was advanced so source synchronization does not reuse text produced by the old extraction policy.
+
+On the local test corpus, all 253 source files were rebuilt successfully with zero failures in about two minutes. SHA-256 checks confirmed that every original source file was unchanged. The Soyuz sample's nonempty extracted lines fell from 39,002 to 7,449; isolated native extraction took about 0.41 seconds both before and after. These measurements demonstrate reduced text fragmentation, not a measured OCR character-accuracy score. No claim is made that degraded scans, diagrams or tables become error-free.

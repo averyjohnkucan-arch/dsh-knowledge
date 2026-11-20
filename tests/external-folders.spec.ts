@@ -1,0 +1,86 @@
+import { describe, it, expect } from 'vitest'
+import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { knowledgeDomainSpec } from '../src/knowledge/domain.js'
+import { externalFile, ExternalFolders } from '../src/knowledge/external-folders.js'
+
+describe('external source boundary and recovery', () => {
+  it('rejects originals outside the root, including symlink escapes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kb-root-')), other = await mkdtemp(join(tmpdir(), 'kb-other-'))
+    try {
+      await writeFile(join(other, 'private.txt'), 'private')
+      await expect(externalFile(dir, join(other, 'private.txt'))).rejects.toThrow(/outside/)
+      if (process.platform !== 'win32') {
+        await symlink(join(other, 'private.txt'), join(dir, 'escape.txt'))
+        await expect(externalFile(dir, join(dir, 'escape.txt'))).rejects.toThrow(/outside/)
+      }
+    } finally { await rm(dir, { recursive: true, force: true }); await rm(other, { recursive: true, force: true }) }
+  })
+  it('reconciles again when a new coordinator is created over saved sources', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kb-restart-')); let calls = 0
+    const sources = [{ id: 'persistent', path: dir, intervalMs: 60000, enabled: true }]
+    try {
+      const first = new ExternalFolders(() => sources, async () => { calls++ })
+      await first.tick(); first.stop()
+      const reopened = new ExternalFolders(() => sources, async () => { calls++ })
+      await reopened.tick(); reopened.stop()
+      expect(calls).toBe(2)
+    } finally { await rm(dir, { recursive: true, force: true }) }
+  })
+})
+
+
+it('preserves external mode and sync settings through the durable schema boundary', () => {
+  const base = { id: 'b', name: 'external', description: '', createdAt: 1, updatedAt: 1,
+    storageMode: 'external' as const, externalPath: '/example/source', syncEnabled: false, syncIntervalSeconds: 30 }
+  expect(knowledgeDomainSpec.tables.bases.valueSchema.parse(JSON.parse(JSON.stringify(base)))).toEqual(base)
+})
+
+it('receives real filesystem notifications before the periodic scan is due', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kb-notify-')); let calls = 0
+  const coordinator = new ExternalFolders(() => [{ id: 'watch', path: root, intervalMs: 60000, enabled: true }], async () => { calls++ })
+  try {
+    await coordinator.tick()
+    await writeFile(join(root, 'new.txt'), 'new file event')
+    const deadline = Date.now() + 3000
+    while (calls < 2 && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 20)); await coordinator.tick() }
+    expect(calls).toBeGreaterThanOrEqual(2)
+  } finally { coordinator.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+
+it('reconciles once on demand while automatic synchronization is paused', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kb-manual-')); let calls = 0
+  const monitor = new ExternalFolders(() => [{ id: 'paused', path: root, intervalMs: 60000, enabled: false }], async () => { calls++ })
+  try {
+    await monitor.tick(); expect(calls).toBe(0)
+    monitor.request('paused', true); await monitor.tick()
+    expect(calls).toBe(1); expect(monitor.states.get('paused')?.state).toBe('paused')
+    await monitor.tick(); expect(calls).toBe(1)
+  } finally { monitor.stop(); await rm(root, { recursive: true, force: true }) }
+})
+
+it('services other folders while a large source is still indexing and never overlaps one source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kb-parallel-'))
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  const calls: string[] = []
+  const sources = [
+    { id: 'large', path: root, intervalMs: 60000, enabled: true },
+    { id: 'small', path: root, intervalMs: 60000, enabled: true },
+    { id: 'paused', path: root, intervalMs: 60000, enabled: false },
+  ]
+  const monitor = new ExternalFolders(() => sources, async id => { calls.push(id); if (id === 'large') await blocked })
+  const pending = monitor.tick()
+  try {
+    const deadline = Date.now() + 3000
+    while (calls.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5))
+    // Independent filesystem probes may finish in either order.
+    expect([...calls].sort()).toEqual(['large', 'small'])
+    expect(monitor.states.get('paused')?.state).toBe('paused')
+    monitor.request('large', true)
+    await monitor.tick()
+    expect(calls.filter(id => id === 'large')).toHaveLength(1)
+  } finally { release(); await pending; monitor.stop(); await rm(root, { recursive: true, force: true }) }
+})

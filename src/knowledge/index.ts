@@ -1,0 +1,5942 @@
+import { exportArchive, importArchive } from './base-archive.js'
+import type { IncomingMessage } from 'node:http'
+import * as localSearch from 'dsh-knowledge/local-search'
+import type { SearchPreferences } from '../shared/local-setup.js'
+import { embeddingDimensionTag, embeddingOutputDimensions } from './embedding-dimensions.js'
+import { RetrievalWarmup } from './retrieval-warmup.js'
+import { IdleEnrichment } from './idle-enrichment.js'
+import { createManagedCaption, isManagedCaptionCall } from './managed-caption.js'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { ImportCheckpoints } from './import-checkpoints.js'
+import { runImportStages, type ImportStageProgress } from './import-stages.js'
+import { knowledgeGpuAdmission, type BackgroundScheduler } from './background-gpu.js'
+import { disposePdfParsers } from './parse.js'
+import { availableParallelism, freemem } from 'node:os'
+import { passageHash, passageUrl } from './citation-source.js'
+import { MarkdownSnapshots, mapMarkdownPassages } from './markdown-snapshots.js'
+import { indexingSettingsFingerprint } from './indexing-settings.js'
+import { canMigrateQwenVectors } from './qwen-embedding-variants.js'
+import { orderedEmbeddingLanes } from './embedding-tuning.js'
+import { embeddingAcceleration, embeddingFp16Acceleration, FP16_EMBEDDING_MODEL } from './embedding-acceleration.js'
+/**
+ * The host knowledge service (`ctx.knowledge`): durable bases/documents/chunks
+ * over `ctx.storageDomain`, heading-aware chunking with context injection,
+ * batched embeddings, hybrid retrieval (BM25 + vector + MMR), deduplication,
+ * reindexing, URL import, and statistics — plus a JSON HTTP surface.
+ * @module dsh-knowledge/knowledge
+ */
+
+import { OcrAcceleration } from './ocr-acceleration.js'
+import { enterOcrPoolForeground, useOcrAcceleration } from './ocr-pool.js'
+import { ProcessingMeter } from './processing-meter.js'
+import { StructureV3Manager } from './structure-v3.js'
+import { Context, Service } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
+import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { isIP } from 'node:net'
+import { chunkText, createSemanticMerger, refineChunksByTokenLimit, splitSemanticSegments } from './chunk.js'
+import type { ChunkPiece } from './chunk.js'
+import { chunkParsedDocument } from './structured-chunk.js'
+import { ArtifactRepository } from './artifacts.js'
+import { processDocumentFile, extractDocumentContent, enrichDocumentContent, processorFingerprint, processorErrorCode, processorErrorMessage, type ProcessedFile } from './document-processing.js'
+import { probeMineruLocal } from './mineru-local.js'
+import { MineruDeployment } from './mineru-deployment.js'
+import type { DocumentEvidence, ProcessingProgress, ParsedDocument, ProcessingOutput } from './processing-types.js'
+import { composeDocumentEvidence } from './evidence.js'
+import { ExternalFolders, externalFile, readableRoot, pickFolder } from './external-folders.js'
+import { DocumentAdmission, ProcessingQueue } from './processing-queue.js'
+import { processingBudget } from './processor-transport.js'
+import { retryDocument, markAttemptsExhausted, attemptsExhausted } from './document-retry.js'
+import { composeContextWindow, estimateContextTokens, serializeContextWindow } from './context.js'
+import { snapSliceEnd, snapSliceStart } from './text-safety.js'
+import { Config, resolveConfig, resolveConfigFor } from './config.js'
+import type { ConfigOverrides } from './domain.js'
+import {
+  DEFAULT_LOCAL_MODEL,
+  disposeLocalModelWorker,
+  embedTexts,
+  loadLocalModel,
+  expandHomePath,
+  getLocalModelStatus,
+  hasActiveLocalModelDownload,
+  isLocalModelDownloaded,
+  localModelCacheDir,
+  markLocalModelError,
+  setHfEndpoint,
+  setLocalModelCacheDir,
+  setLocalWorkerIdleTimeoutMs,
+  setLocalEmbeddingTuning,
+} from './embed.js'
+import type { LocalModelStatus } from './embed.js'
+import { cancelLocalModelDownload, deleteLocalModel, downloadLocalModel, hasActiveLocalRerankDownload, listLocalModels, LOCAL_MODELS, registerCustomLocalReranker, selfTestLocalModel } from './localModels.js'
+import type { LocalModelSummary } from './localModels.js'
+import { disposeLocalRerankProcess, localRerankChildIsWarm, setLocalRerankIdleTimeoutMs } from './local-rerank.js'
+import { downloadOcrModels, disposeOcrWorker, getOcrModelStatus, removeOcrModels, type OcrModelStatus } from './ocr.js'
+import { httpFetch } from './net.js'
+import { knowledgeRoute } from './http.js'
+import { SUPPORTED_DOCUMENT_EXTENSIONS, extractHtmlDocument, extractFromHtml, extensionOf } from './parse.js'
+import { rank } from './retrieval.js'
+import { maximalMarginalRelevance, reciprocalRankFusion, RRF_K } from './retrieval.js'
+import type { RankedHit } from './retrieval.js'
+import { rerankCandidates, rerankErrorDetail, rerankTechnicalMessage } from './rerank.js'
+import { hashEmbeddingText, resolveChunkStorePath } from './chunkdb.js'
+import type { RetrievalDocumentFilter } from './chunkdb.js'
+import { openStore, StorageUnavailableError } from './store.js'
+import type { StorageDomainFacility, Store } from './store.js'
+import { isMetadataWriteFailure } from './metadata-write.js'
+import {
+  activeOllamaPulls as activeOllamaPullsHelper,
+  cancelOllamaPull as cancelOllamaPullHelper,
+  deleteOllamaModel as deleteOllamaModelHelper,
+  getOllamaPullStatus as getOllamaPullStatusHelper,
+  listOllamaModels as listOllamaModelsHelper,
+  pullOllamaModel as pullOllamaModelHelper,
+  type OllamaPullStatus,
+} from './ollama.js'
+import type {
+  AddFileDocumentRequest,
+  AddFilesRequest,
+  AddFilesResult,
+  AddTextDocumentRequest,
+  BaseConfig,
+  BaseSourceInfo,
+  BaseStats,
+  BaseSummary,
+  CreateBaseRequest,
+  ContextWindow,
+  DeleteImpact,
+  DocumentDetail,
+  DocumentSourceType,
+  DocumentSummary,
+  DirectoryImportResult,
+  DirectorySyncItem,
+  DirectorySyncResult,
+  EmbeddingProvider,
+  ImportDirectoryRequest,
+  ImportUrlRequest,
+  KnowledgeBase,
+  KnowledgeChunk,
+  KnowledgeConfig,
+  KnowledgeDocument,
+  SearchHit,
+  SearchMode,
+  SearchScoreKind,
+  SearchRequest,
+  SearchResult,
+  RetrievalStatus,
+  RerankErrorDetail,
+  RerankStatus,
+  PathImportResult,
+  ReindexDocumentResult,
+  ReindexDocumentsResult,
+  UpdateBaseRequest,
+} from './types.js'
+
+export type * from './types.js'
+export { Config } from './config.js'
+export { openStore, StorageUnavailableError } from './store.js'
+export { knowledgeDomainSpec } from './domain.js'
+export { chunkText } from './chunk.js'
+export { extractWithMineruLocal, probeMineruLocal } from './mineru-local.js'
+export { composeContextWindow, estimateContextTokens, serializeContextWindow } from './context.js'
+export { embedTexts, getLocalModelStatus, DEFAULT_LOCAL_MODEL } from './embed.js'
+export { tokenize, cosineSimilarity, rank } from './retrieval.js'
+
+/** Per-call execution controls that are deliberately kept out of the public
+ * search request/HTTP contract. Proactive retrieval uses these controls to
+ * obtain lexical candidates without accidentally invoking a configured
+ * reranker. */
+export interface SearchExecutionOptions {
+  readonly rerank?: 'configured' | 'skip'
+  readonly signal?: AbortSignal
+  /** Absolute deadline for synchronous retrieval lanes. Internal callers use
+   * this alongside signal so SQLite can interrupt itself while JS is blocked. */
+  readonly deadlineAt?: number
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    knowledge: KnowledgeService
+  }
+}
+
+/** User-facing message for a local-model embedding failure. Classifies the
+ *  model-cache reality (checked from disk) so a broken binding/runtime error
+ *  is NOT misrouted to "download the model" — the files may be intact and the
+ *  fault is a worker/binding reload (e.g. "Module did not self-register"). */
+export function localEmbeddingErrorText(onDisk: boolean, detail: string): string {
+  if (onDisk) {
+    return `local embedding model failed to load (${detail}); ` 
+      + 'the model files are present but the runtime could not start — '
+      + 'restart the service or retry later. If it persists, check the local model runtime install.'
+  }
+  return `local embedding model is unavailable (${detail}); `
+    + 'download it in Settings → Local Models, or switch the embedding provider'
+}
+
+/** Build the classified local-model failure error for the given config. */
+async function localEmbeddingError(config: KnowledgeConfig, error: unknown): Promise<Error> {
+  const detail = error instanceof Error ? error.message : String(error)
+  const modelId = config.embeddingModel.trim() || DEFAULT_LOCAL_MODEL
+  const onDisk = await isLocalModelDownloaded(modelId).catch(() => false)
+  return new Error(localEmbeddingErrorText(onDisk, detail))
+}
+
+/** Curated model-id suggestions for the settings comboboxes (DSH exposes chat models, not embedding models). */
+export const MODEL_SUGGESTIONS = {
+  embedding: [
+    'text-embedding-3-small',
+    'text-embedding-3-large',
+    'text-embedding-ada-002',
+    'bge-m3',
+    'bge-large-zh-v1.5',
+    'bge-small-zh-v1.5',
+    'nomic-embed-text',
+    'mxbai-embed-large',
+    'snowflake-arctic-embed2',
+  ],
+  // Local models mirror the shipped registry (localModels.ts) — every entry is
+  // a real, downloadable transformers.js ONNX repo with a known pooling rule.
+  local: LOCAL_MODELS.filter(model => model.kind === 'embedding').map(model => model.id),
+  rerank: [
+    'jina-reranker-v2-base-multilingual',
+    'BAAI/bge-reranker-v2-m3',
+    'bge-reranker-base',
+    'bce-reranker-base_v1',
+    // Local cross-encoder: download it in Settings → Local Models, then use
+    // the `local:` prefix (e.g. `local:Xenova/bge-reranker-base`).
+    'local:Xenova/bge-reranker-base',
+  ],
+  // Ollama registry recommendations (embedding + vision), mirroring the local
+  // model registry posture: real, downloadable model names for the Ollama API.
+  ollamaEmbedding: [
+    'nomic-embed-text',
+    'bge-m3',
+    'qwen3-embedding:0.6b',
+    'mxbai-embed-large',
+    'snowflake-arctic-embed',
+  ],
+  ollamaVision: [
+    'llava',
+    'qwen2.5vl:7b',
+    'llama3.2-vision:11b',
+    'minicpm-v:8b',
+  ],
+} as const
+
+/** Candidate-pool cap for SQL retrieval lanes, bounding FTS + brute-force vector scans. */
+const LANE_CANDIDATE_CAP = 200
+
+/** Max characters one deep-read slice returns (Cherry's CONCEPT_READ_MAX_CHARS). */
+const CONCEPT_READ_MAX_CHARS = 20_000
+/** Characters of context kept on each side of a grep match in its snippet (Cherry's pad). */
+const CONCEPT_GREP_SNIPPET_PAD = 60
+/** Max characters of any single line grep runs its pattern over (Cherry's catastrophic-backtracking guard). */
+const CONCEPT_GREP_MAX_LINE_CHARS = 2000
+/**
+ * Hard cap for a caller-supplied `rawTextLimit`. The limit exists to bound a
+ * document payload; without an upper bound a single request could ask for the
+ * whole (arbitrarily large) text, and without a lower bound a negative value
+ * slices from the end instead of capping. Clamping lives in the service so
+ * every caller (HTTP, tools, tests) shares the same contract.
+ */
+export const MAX_RAW_TEXT_LIMIT = 5_000_000
+/** How long a finished job's final progress stays visible (Cherry's linger TTL). */
+const PROGRESS_LINGER_TTL_MS = 60_000
+/** A terminal indexing FAILURE stays visible far longer than an in-progress
+ *  linger: the reported embedding failure expired after 60s, so a user who
+ *  looked a minute later saw the job simply vanish with no recorded error. */
+const FAILURE_LINGER_TTL_MS = 10 * 60_000
+/** Extra deadline granted to a COLD local rerank child so its model load is not
+ *  charged to the inference budget of the query that triggered it (issue #18). */
+const LOCAL_RERANK_LOAD_ALLOWANCE_MS = 120_000
+
+interface BackgroundJob {
+  readonly baseId: string
+  /** Human label for the unit of work (file name or document title). */
+  kind: 'directory' | 'reindex'
+  cancelled: boolean
+  imported: number
+  skipped: number
+  total: number
+  current: string
+  errors: Array<{ file: string; error: string }>
+  done: boolean
+}
+
+interface IndexingFailure {
+  readonly baseId: string
+  readonly title: string
+  readonly phase: 'parsing' | 'embedding'
+  readonly code: string
+  readonly message: string
+  readonly expireAt: number
+}
+
+interface StagedDirectoryJob {
+  id:string
+  fileName:string
+  relativePath:string
+  existing?:KnowledgeDocument
+  run:()=>Promise<void>
+  documentId:()=>string|undefined
+}
+
+/** Raised by same-name conflict detection (`conflict: 'detect'`); the HTTP
+ *  layer maps it to 409 Conflict so callers can re-submit with a strategy. */
+export class ConflictError extends Error {
+  readonly code = 'conflict'
+}
+
+/** Raised when a caller names a base that does not exist; the HTTP layer maps
+ *  it to 404 so a typo answers "not found" instead of a plausible empty
+ *  summary that hides the mistake. */
+export class NotFoundError extends Error {
+  readonly code = 'not_found'
+}
+
+/** A deterministic source-identity failure. Unlike a parse or provider
+ * failure, retrying without resolving the identified tree would be unsafe. */
+export class DirectorySourceError extends Error {
+  constructor(
+    readonly code: 'ambiguous_source' | 'source_path_conflict' | 'recursive_confirmation_required',
+    message: string,
+    readonly details?: Record<string, unknown>,
+  ) {
+    super(message)
+  }
+}
+
+export class KnowledgeService extends Service {
+  static inject = ['webServer']
+  static Config = Config
+
+  private readonly baseConfig: Config
+  private store: Store | undefined
+  /** Set when the durable backend exists but could not be opened, so every
+   *  store-backed call can report the real reason instead of an empty library. */
+  private storageError: Error | undefined
+  private readonly storeReady: Promise<void>
+  private resolveStore: () => void = () => {}
+  private readonly jobs = new Map<string, BackgroundJob>()
+  readonly ocrAcceleration = new OcrAcceleration()
+  private readonly processingMeter = new ProcessingMeter()
+  storageWriteDiagnostics() { return this.requireStore().writeDiagnostics?.() ?? null }
+  private readonly importStageProgress = new Map<string, ImportStageProgress & {baseId:string}>()
+  private readonly preparedImport = new AsyncLocalStorage<ProcessingOutput | null>()
+  processingSummary() {
+    return this.processingMeter.snapshots().map(run => {
+      const pipeline=this.importStageProgress.get(run.id)
+      if(!pipeline)return run
+      const resourcePolicy=this.foregroundReservations ? 'Foreground inference reserves accelerators; background work uses CPU.'
+        : pipeline.stage==='chunking' ? 'CPU publishes chunks while qualified GPU, iGPU and NPU lanes embed completed documents concurrently.'
+        : pipeline.stage==='ocr' ? 'CPU, NVIDIA GPU and iGPU run OCR when available. Full-page NPU OCR is excluded by the current model checks; NPU layout runs in parsing.'
+        : pipeline.stage==='parsing' ? ((this.getConfigFor(run.baseId).deferredChartEnrichment || this.getConfigFor(run.baseId).deferredPhotoCaptions) ? 'Photo captions and chart parsing are deferred until imports and vectorization finish and DSH is idle.' : this.getConfigFor(run.baseId).imageCaptionProvider === 'paddle' ? 'CPU and NVIDIA GPU interpret tables/charts; NPU and iGPU screen page layouts.' : 'Optional brief image descriptions use the selected vision provider; source text is already extracted.')
+        : !embeddingKey(this.getConfigFor(run.baseId)) ? 'No embedding model is selected; documents retain text and lexical chunks without vectors.'
+        : 'Embedding devices depend on the selected model. The accelerated FP16 model supports CPU, NVIDIA GPU, iGPU and NPU; Intel input-length limits and other model reservations still apply.'
+      const devices=pipeline.stage==='ocr'?this.ocrAcceleration.runtimeDevices():pipeline.stage==='parsing' && this.getConfigFor(run.baseId).imageCaptionProvider==='paddle' && !this.getConfigFor(run.baseId).deferredChartEnrichment?this.structureV3.runtimeDevices():(pipeline.stage==='vectorization'||pipeline.stage==='chunking') && this.getConfigFor(run.baseId).embeddingProvider==='local'?(this.getConfigFor(run.baseId).embeddingModel===FP16_EMBEDDING_MODEL?embeddingFp16Acceleration:embeddingAcceleration).runtimeDevices():undefined
+      return {...run,pipeline:{...pipeline,resourcePolicy,devices}}
+    })
+  }
+  private readonly indexing = new Map<string, { baseId: string; title: string; phase: 'parsing' | 'embedding'; total: number; progress: number; controller?: AbortController }>()
+  /**
+   * Progress values that linger after a job exits (Cherry's 60s TTL), so the
+   * list keeps showing the final percentage until the poll observes the
+   * terminal status instead of blanking mid-frame. Purely a display aid —
+   * every guard still consults {@link indexing}, never this map.
+   */
+  private readonly progressLinger = new Map<string, { baseId: string; title: string; phase: 'parsing' | 'embedding'; progress: number; expireAt: number }>()
+  private readonly indexingFailures = new Map<string, IndexingFailure>()
+  // Cherry Studio parity: per-base worker pool (Cherry's knowledge jobs run at
+  // defaultConcurrency 5 on a per-base queue). Rows are created up front and
+  // flip status as the queued parse+ingest tasks run in the background.
+  private readonly ingestQueues = new Map<string, { pending: Array<() => Promise<void | boolean>>; running: number }>()
+  // Per-base write chain guarding dedup-check + first persist (read-then-write),
+  // so two concurrent imports of identical content cannot both pass the check.
+  private readonly baseWriteChains = new Map<string, Promise<unknown>>()
+  /** Last rerank failure code per model; only state transitions are logged. */
+  private readonly rerankLogState = new Map<string, string>()
+  private markdownSnapshots = new MarkdownSnapshots()
+  private artifacts = new ArtifactRepository()
+  private externalFolders?: ExternalFolders
+  private syncingRoots = new Set<string>()
+  private foregroundReservations = 0
+  private applyEmbeddingCpuTuning(config: KnowledgeConfig): void {
+    setLocalEmbeddingTuning(this.foregroundReservations ? { ...config, localEmbeddingThreads: Math.min(8, config.localEmbeddingThreads || 8), localEmbeddingInstances: 1 } : config)
+  }
+  private shuttingDown = false
+  private readonly processingConcurrency = Math.max(2, Math.min(8, Math.floor(availableParallelism() / 3), Math.floor(freemem() / (2 * 1024 ** 3))))
+  private readonly processingQueue = new ProcessingQueue(this.processingConcurrency)
+  private readonly documentAdmission = new DocumentAdmission(this.processingConcurrency * 16, Math.min(4, this.processingConcurrency))
+  private readonly processingProgress = new Map<string, ProcessingProgress>()
+  private readonly processingControllers = new Map<string, AbortController>()
+
+  constructor(ctx: Context, config: Config) {
+    super(ctx, 'knowledge')
+    this.baseConfig = config
+    this.storeReady = new Promise<void>(resolve => { this.resolveStore = resolve })
+    ctx.effect(() => ctx.webServer.register(knowledgeRoute(this)), 'knowledge: /knowledge route')
+  }
+
+  protected async [Service.init](): Promise<void> {
+    useOcrAcceleration(this.ocrAcceleration)
+    this.ctx.effect(() => () => { this.ocrAcceleration.dispose(); useOcrAcceleration(undefined) }, 'knowledge: OCR accelerator workers')
+    setLocalModelCacheDir(this.baseConfig.localModelCacheDir)
+    setHfEndpoint(this.baseConfig.hfEndpoint)
+    const facility = this.ctx.get('storageDomain') as StorageDomainFacility | undefined
+    try {
+      this.store = await openStore(facility, { chunkStorePath: this.baseConfig.chunkStorePath })
+    } catch (error) {
+      // The durable backend exists but could not be opened or healed. Keep the
+      // plugin alive so the failure is visible and diagnosable, but never
+      // substitute an in-memory store: that would present an empty library
+      // while the data sits intact on disk, and discard every later write.
+      this.storageError = error instanceof Error ? error : new Error(String(error))
+      this.ctx.logger.error(`knowledge: ${this.storageError.message}`)
+    }
+    const store = this.store
+    // Teardown is registered unconditionally: without a store the plugin still
+    // answers status/model calls, so a local model worker it started must not
+    // outlive it.
+    this.ctx.effect(() => async () => { await store?.close() }, 'knowledge: close store')
+    // Terminate the local-model inference worker on teardown so a loaded
+    // ~600MB model can never outlive the plugin (Cherry: lifecycle-managed worker).
+    this.ctx.effect(() => () => { void disposeLocalModelWorker() }, 'knowledge: dispose local model worker')
+    this.ctx.effect(() => () => { void disposeLocalRerankProcess() }, 'knowledge: dispose local rerank process')
+    this.ctx.effect(() => async () => { await Promise.all([disposeOcrWorker(), disposePdfParsers()]) }, 'knowledge: dispose OCR and PDF workers')
+    this.ctx.effect(() => () => { embeddingAcceleration.dispose(); embeddingFp16Acceleration.dispose() }, 'knowledge: dispose embedding accelerators')
+    this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
+    this.ctx.inject(['modelScheduler'], scope => {
+      const scheduler = scope.get('modelScheduler') as BackgroundScheduler
+      scope.effect(() => knowledgeGpuAdmission.attach(scheduler, async () => {
+        await Promise.all([embeddingAcceleration.yieldMainGpu(), embeddingFp16Acceleration.yieldMainGpu(), this.ocrAcceleration.yieldMainGpu(), this.structureV3.yieldMainGpu()])
+      }))
+    })
+    this.ctx.effect(() => () => this.mineruDeployment.dispose(), 'knowledge: dispose MinerU deployment')
+    if (store === undefined) { this.resolveStore(); return }
+    this.markdownSnapshots = new MarkdownSnapshots(store.raw !== undefined ? join(dirname(resolveChunkStorePath(this.baseConfig.chunkStorePath)), 'knowledge-markdown') : undefined)
+    this.artifacts = new ArtifactRepository(store.raw !== undefined
+      ? join(dirname(resolveChunkStorePath(this.baseConfig.chunkStorePath)), 'knowledge-artifacts')
+      : undefined)
+    for (const base of store.listBases()) {
+      for (const doc of store.listDocuments(base.id, { includeRawText: false })) {
+        const staged = store.getStagedDocumentGeneration(doc.id)
+        const pinned = [doc.processing?.revision, staged?.document.processing?.revision].filter((value): value is string => value !== undefined)
+        await this.artifacts.collectDocument(base.id, doc.id, pinned).catch(() => {
+          this.ctx.logger.warn('knowledge: artifact cleanup deferred (artifact_io)')
+        })
+      }
+    }
+    this.resolveStore()
+    localSearch.resumeSetup(() => this.applyLocalSearch())
+    this.ctx.effect(() => () => localSearch.closeSearch(), 'knowledge: local search runtime')
+    this.ctx.effect(() => () => {
+      this.documentAdmission.close()
+      for (const controller of this.processingControllers.values()) controller.abort()
+      for (const active of this.indexing.values()) active.controller?.abort()
+    }, 'knowledge: cancel document processors')
+    // Reapply the RUNTIME overrides persisted in the domain (they survive
+    // restarts): without this, a saved localModelCacheDir / hfEndpoint was
+    // only live after the next explicit save — model downloads/checks and the
+    // mirror would silently use the deployment defaults until then.
+    const resolved = this.getConfig()
+    setHfEndpoint(resolved.hfEndpoint)
+    setLocalModelCacheDir(resolved.localModelCacheDir)
+    await this.ocrAcceleration.status()
+    setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    this.applyEmbeddingCpuTuning(resolved)
+    this.ocrAcceleration.configure(resolved)
+    embeddingAcceleration.configure(localModelCacheDir(), resolved)
+    embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
+    setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    this.ctx.effect(() => () => this.retrievalWarmup.dispose(), 'knowledge: retrieval warmup')
+    this.warmRetrievalModels()
+    void this.resumeStagedDirectoryImports().catch(error=>this.ctx.logger.warn(`knowledge: staged folder recovery failed: ${String(error)}`))
+    // Resume documents a previous process left mid-embedding: their chunks are
+    // partially persisted, so re-running the embed with hash reuse completes
+    // them without re-embedding the batches that already landed. (openStore
+    // already ran the removal half of the recovery; this second pass is
+    // idempotent and only harvests the resume list.) The `resumeInterruptedOnStartup`
+    // config gates the automatic re-spend: off marks them failed instead
+    // (Cherry's posture — a deliberate app quit must not re-spend the
+    // embedding API; the user reindexes manually).
+    const resume = store.recoverInterruptedImports(Date.now()).then(async ({ resume: resumeIds }) => {
+      // A recovering staged folder owns its descendants. Do not concurrently
+      // resume the same files through the old per-document processor path.
+      resumeIds=resumeIds.filter(id=>{
+        try {
+          let doc=store.getDocument(id);const seen=new Set<string>()
+          while(doc && !seen.has(doc.id)) {
+            if(this.stagedRecoveryRoots.has(doc.id))return false
+            seen.add(doc.id);doc=doc.parentDirectoryId?store.getDocument(doc.parentDirectoryId):undefined
+          }
+        } catch { /* The per-document recovery loop isolates unreadable metadata. */ }
+        return true
+      })
+      if (resumeIds.length === 0) return
+      if (!this.getConfig().resumeInterruptedOnStartup) {
+        const reason = 'import was interrupted by a shutdown; reindex to resume'
+        let marked = 0
+        for (const id of resumeIds) {
+          try {
+            const doc = store.getDocument(id)
+            if (doc !== undefined && store.getBase(doc.baseId)) {
+              // Clear the resumable marker only after the status is durable.
+              // A failed write retains the old row for a later recovery.
+              const { incomplete: _resumableMarker, ...rest } = doc
+              await store.putDocument({ ...rest, embeddingError: reason, errorCode: 'interrupted', updatedAt: Date.now() })
+              marked += 1
+            }
+          } catch (error) {
+            this.ctx.logger.warn(`knowledge: could not mark interrupted import ${id} failed; previous metadata retained: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+        this.ctx.logger.info(`knowledge: marked ${marked} interrupted import(s) failed (auto-resume disabled)`)
+        return
+      }
+      this.ctx.logger.info(`knowledge: resuming ${resumeIds.length} interrupted import(s)`)
+      await this.resumeInterruptedDocuments(resumeIds)
+    })
+    void resume.catch(error => this.ctx.logger.warn(`knowledge: interrupted-import recovery failed: ${error instanceof Error ? error.message : String(error)}`))
+    void Promise.resolve().then(async () => {
+      for (const base of store.listBases()) {
+        const config = this.getConfigFor(base.id), key = embeddingKey(config)
+        const legacyFormat = (key?.endsWith(':canonical-single-v1') === true || key?.endsWith(':full-context-v1') === true || key?.endsWith(':canonical-fp16-v1') === true)
+          && store.chunkStats([base.id]).embeddingModelCounts.some(entry => entry.model !== key)
+        if (legacyFormat && !base.embeddingBackfillPending) await store.putBase({ ...base, embeddingBackfillPending: true })
+        if ((base.embeddingBackfillPending || legacyFormat) && config.resumeInterruptedOnStartup) {
+          void this.backfillBaseEmbeddings(base.id).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${String(error)}`))
+        }
+      }
+    }).catch(error => this.ctx.logger.warn(`knowledge: embedding recovery failed: ${error instanceof Error ? error.message : String(error)}`))
+    this.armUrlRefreshTimer()
+    const enrichmentTimer = setInterval(() => { void this.idleEnrichment.tick() }, 1000)
+    enrichmentTimer.unref()
+    this.ctx.effect(() => () => { clearInterval(enrichmentTimer); this.idleEnrichment.stop() }, 'knowledge: idle enrichment')
+    this.externalFolders = new ExternalFolders(() => this.requireStore().listBases()
+      .filter(base => base.storageMode === 'external' && base.externalPath)
+      .map(base => ({ id: base.id, path: base.externalPath!, enabled: base.syncEnabled !== false,
+        intervalMs: (base.syncIntervalSeconds ?? 60) * 1000 })), async id => {
+      const base = this.requireStore().getBase(id)
+      if (!base?.externalPath || this.shuttingDown) return
+      const result = await this.importDirectoryTree(id, base.externalPath)
+      await readableRoot(base.externalPath)
+      if (result.sync && result.sync.failed > 0) throw new Error(`${result.sync.failed} source item(s) could not be indexed; previous indexed data was retained where available`)
+    })
+    this.ctx.effect(() => () => { this.shuttingDown = true; this.externalFolders?.stop() }, 'knowledge: external folder listeners')
+    this.externalFolders.start()
+  }
+
+  // ── scheduled URL refresh (Cherry's snapshot + manual refresh, automated) ──
+
+  private deferredChartDocumentId?: string
+  private readonly idleEnrichment = new IdleEnrichment(
+    () => this.shuttingDown || this.foregroundReservations > 0 || this.importStageProgress.size > 0
+      || this.embeddingBackfills.size > 0 || [...this.indexing.keys()].some(id => id !== this.deferredChartDocumentId)
+      || this.processingMeter.snapshots().some(run => run.active),
+    signal => this.enrichNextIdleChart(signal),
+  )
+
+  /** Keep the old searchable generation until chart text and its vectors are ready. */
+  private async enrichNextIdleChart(signal: AbortSignal): Promise<boolean> {
+    const store = this.requireStore()
+    let document: KnowledgeDocument | undefined
+    let kind: 'photo' | 'chart' = 'photo'
+    let marker: 'deferredPhotoCaptions' | 'deferredChartEnrichment' = 'deferredPhotoCaptions'
+    // Complete the brief photo pass across the library before expensive charts.
+    for (const phase of ['photo', 'chart'] as const) {
+      kind = phase
+      marker = phase === 'photo' ? 'deferredPhotoCaptions' : 'deferredChartEnrichment'
+      for (const base of store.listBases()) {
+        if (!this.getConfigFor(base.id)[marker] || base.embeddingBackfillPending) continue
+        document = store.listDocuments(base.id, {includeRawText: false}).find(doc =>
+          doc.sourceType === 'file' && /\.pdf$/i.test(doc.fileName ?? doc.title)
+          && doc.processing && !doc.incomplete && !doc.embeddingError
+          && doc[marker]?.revision !== doc.processing.revision)
+        if (document) break
+      }
+      if (document) break
+    }
+    if (!document?.processing) return false
+    const original = document
+    const revision = document.processing.revision
+    const unchanged = () => store.getDocument(original.id)?.processing?.revision === revision && !!store.getBase(original.baseId)
+    this.deferredChartDocumentId = document.id
+    this.indexing.set(document.id, {baseId: document.baseId, title: document.title, phase: 'parsing', total: 0, progress: 0})
+    this.processingProgress.set(document.id, {stage: 'enriching'})
+    this.ctx.logger.info(`knowledge: idle ${kind} enrichment started for ${document.id}`)
+    this.vectorPhaseDocuments.add(document.id)
+    try {
+      signal.throwIfAborted()
+      const bytes = document.sourcePath ? await readFile(document.sourcePath)
+        : document.rawFilePath ? await store.raw?.read(document.rawFilePath) : undefined
+      if (!bytes || createHash('sha256').update(bytes).digest('hex') !== document.processing.sourceHash) throw new Error('Chart source is missing or changed; reimport the document')
+      const parsed = await this.artifacts.load(document.baseId, document.id, document.processing)
+      const {captionPdfImages} = await import('./caption.js')
+      const captionConfig = this.getConfigFor(document.baseId)
+      if (kind === 'photo' && !captionConfig.deferredPhotoCaptionModel?.trim()) throw new Error('Select a managed vision model for idle photo captions')
+      const caption = await captionPdfImages(bytes, {provider: kind === 'photo' ? 'dsh' : 'paddle', model: kind === 'photo' ? captionConfig.deferredPhotoCaptionModel! : 'PP-Chart2Table', baseUrl: '', apiKey: '', embeddingBaseUrl: '', charts: true, structureV3: this.structureV3, managedCaption: this.managedCaption, strict: true, signal})
+      signal.throwIfAborted()
+      if (!unchanged()) return true
+      if (!caption.trim()) {
+        await store.putDocument({...store.getDocument(document.id)!, [marker]: {revision, status: 'completed'}, updatedAt: Date.now()})
+        return true
+      }
+      const assets = []
+      for (const asset of parsed.assets) {
+        const stored = await this.artifacts.readAsset(document.baseId, document.id, document.processing, asset.id)
+        if (!stored) throw new Error('Original document asset is missing')
+        assets.push({id: asset.id, bytes: stored.bytes})
+      }
+      const textStart = parsed.text.length + 2
+      const text = `${parsed.text}\n\n${caption}`
+      const enriched: ParsedDocument = {...parsed, text,
+        blocks: [...parsed.blocks, {id: `deferred-${kind}-caption`, index: parsed.blocks.length, type: 'caption', text: caption, textStart, textEnd: text.length}],
+        warnings: [...parsed.warnings, {code: `generated_${kind}`, message: 'Model-generated image or chart information was added by idle enrichment; verify against the original.'}],
+      }
+      const processing = await this.artifacts.save(document.baseId, document.id, {document: enriched, assets})
+      const config = this.getConfigFor(document.baseId)
+      const processed = {text, parsed: enriched, processing}
+      const built = await this.buildChunks(document.baseId, document.id, document.title, text, config, this.processingChunks(processed, config), undefined, signal, processing.revision)
+      if (built.embeddingError) throw new Error('Chart embedding failed; original searchable generation retained')
+      signal.throwIfAborted()
+      if (!unchanged() || !this.getConfigFor(document.baseId)[marker]) return true
+      const next: KnowledgeDocument = {...store.getDocument(document.id)!, rawText: text, processing,
+        contentHash: sha256(text), charCount: text.length, tokenCount: estimateTokens(text), chunkCount: built.chunks.length,
+        // Carry the other pass marker forward: merging photos must not restart charts, or vice versa.
+        ...(original.deferredPhotoCaptions?.revision === revision ? {deferredPhotoCaptions: {...original.deferredPhotoCaptions, revision: processing.revision}} : {}),
+        ...(original.deferredChartEnrichment?.revision === revision ? {deferredChartEnrichment: {...original.deferredChartEnrichment, revision: processing.revision}} : {}),
+        [marker]: {revision: processing.revision, status: 'completed'}, updatedAt: Date.now()}
+      await this.commitIndexedGeneration(next, built.chunks, text, config, signal)
+      await this.touchBase(document.baseId)
+    } catch (error) {
+      if (!signal.aborted && unchanged()) {
+        await store.putDocument({...store.getDocument(document.id)!, [marker]: {revision, status: 'failed'}, updatedAt: Date.now()})
+        this.ctx.logger.warn(`knowledge: optional ${kind} enrichment failed for ${document.id}; searchable text retained`)
+      }
+    } finally {
+      this.indexing.delete(document.id)
+      this.vectorPhaseDocuments.delete(document.id)
+      this.processingProgress.delete(document.id)
+      this.deferredChartDocumentId = undefined
+    }
+    return true
+  }
+
+  private urlRefreshTimer: ReturnType<typeof setInterval> | null = null
+  private urlRefreshing = false
+
+  /** Arm the hourly sweep that refreshes URL documents older than `urlRefreshHours`. */
+  private armUrlRefreshTimer(): void {
+    const hours = this.getConfigFor(undefined).urlRefreshHours
+    if (hours <= 0) return
+    const run = (): void => {
+      if (this.urlRefreshing) return
+      this.urlRefreshing = true
+      void this.refreshStaleUrls(hours).catch(error => {
+        this.ctx.logger.warn(`knowledge: URL refresh sweep failed: ${error instanceof Error ? error.message : String(error)}`)
+      }).finally(() => { this.urlRefreshing = false })
+    }
+    // First sweep shortly after startup (imports settle first), then hourly.
+    const first = setTimeout(run, 5 * 60_000)
+    first.unref?.()
+    this.urlRefreshTimer = setInterval(run, 60 * 60_000)
+    this.urlRefreshTimer.unref?.()
+    this.ctx.effect(() => () => {
+      clearTimeout(first)
+      if (this.urlRefreshTimer !== null) clearInterval(this.urlRefreshTimer)
+    }, 'knowledge: URL refresh timer')
+  }
+
+  /** Re-fetch every URL document whose last update predates `hours`; failures are logged, never thrown. */
+  private async refreshStaleUrls(hours: number): Promise<void> {
+    const store = this.requireStore()
+    const cutoff = Date.now() - hours * 3600_000
+    const stale: string[] = []
+    for (const base of store.listBases()) {
+      for (const doc of store.listDocuments(base.id, { includeRawText: false })) {
+        if (doc.sourceType === 'url' && doc.url !== undefined && (doc.updatedAt ?? 0) < cutoff) stale.push(doc.id)
+      }
+    }
+    for (const id of stale) {
+      try {
+        const result = await this.refreshUrlDocument(id)
+        if (result.changed) this.ctx.logger.info(`knowledge: URL auto-refreshed: ${result.title}`)
+      } catch (error) {
+        this.ctx.logger.warn(`knowledge: URL auto-refresh failed for ${id}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
+  /**
+   * Re-index documents a crash left mid-import. Each document holds rawText
+   * and/or a persisted raw source file; hash reuse (decision A4) makes the
+   * re-embed re-embed only missing batches. A placeholder that only has the
+   * raw file (crash before/during parse) is re-parsed from source. Runs in
+   * the background so startup is not blocked.
+   */
+  private async resumeInterruptedDocuments(ids: readonly string[]): Promise<void> {
+    const store = this.requireStore()
+    // Register the whole raw-source recovery backlog before any asynchronous
+    // reads. Otherwise vector backfill can take the GPU between resumed files.
+    const parsing = ids.filter(id => {
+      try {
+        const doc = store.getDocument(id)
+        return doc !== undefined && store.getBase(doc.baseId) !== undefined && doc.sourceType !== 'directory'
+          && doc.rawFilePath !== undefined && doc.rawText === undefined
+      } catch { return false }
+    })
+    parsing.forEach(id => this.recoveryParsing.add(id))
+    try {
+    for (const id of ids) {
+      if (this.shuttingDown) return
+      try {
+        const store = this.requireStore()
+        const doc = store.getDocument(id)
+        if (doc === undefined || !store.getBase(doc.baseId) || doc.sourceType === 'directory') continue
+        if (doc.rawFilePath !== undefined && doc.rawText === undefined) {
+          this.indexing.set(id, { baseId: doc.baseId, title: doc.title, phase: 'parsing', total: 0, progress: 0 })
+          // Crash before the text was persisted: rebuild from the raw copy.
+          const bytes = await store.raw?.read(doc.rawFilePath)
+          if (bytes === null || bytes === undefined || bytes.byteLength === 0) {
+            this.ctx.logger.warn(`knowledge: raw source missing for interrupted import "${doc.title}", dropping it`)
+            await store.deleteDocument(id)
+            continue
+          }
+          // Same processor chain as the import: a crash during a MinerU import
+          // is resumed through MinerU instead of failing on a local parser that
+          // cannot read the scanned source.
+          const processed = await this.extractDocumentText({
+            baseId: doc.baseId,
+            documentId: doc.id,
+            fileName: doc.fileName ?? doc.title,
+            ...(doc.mimeType !== undefined ? { mimeType: doc.mimeType } : {}),
+            bytes,
+            resume: true,
+          })
+          const { text } = processed
+          if (text.trim().length === 0) throw new Error('parsed document is empty')
+          await this.ingestDocument({
+            baseId: doc.baseId,
+            title: doc.title,
+            sourceType: 'file',
+            ...(doc.fileName !== undefined ? { fileName: doc.fileName } : {}),
+            ...(doc.mimeType !== undefined ? { mimeType: doc.mimeType } : {}),
+            ...(doc.parentDirectoryId !== undefined ? { parentDirectoryId: doc.parentDirectoryId } : {}),
+            placeholderId: doc.id,
+            ...(doc.sourcePath !== undefined ? { sourcePath: doc.sourcePath } : {}),
+            rawFilePath: doc.rawFilePath,
+            text,
+            processed,
+          })
+        } else {
+          const staged = store.getStagedDocumentGeneration(id)
+          if (staged?.document.processing !== undefined) {
+            const parsed = await this.artifacts.load(doc.baseId, id, staged.document.processing)
+            await this.finishRecoveredGeneration(doc, staged.document, { text: parsed.text, parsed, processing: staged.document.processing })
+          } else {
+            await this.reindexDocument(id, { mode: doc.processing === undefined ? undefined : 'rechunk' })
+          }
+        }
+      } catch (error) {
+        // A storage failure says nothing about parsing/embedding. Preserve the
+        // resumable row and any published-generation journal for the next boot.
+        if (isMetadataWriteFailure(error) || (error as { published?: boolean } | null)?.published === true) {
+          this.ctx.logger.warn(`knowledge: interrupted import recovery deferred for ${id}; previous metadata retained: ${error instanceof Error ? error.message : String(error)}`)
+          continue
+        }
+        this.ctx.logger.warn(`knowledge: interrupted import recovery failed (${processorErrorCode(error)})`)
+        // A settled recovery failure must not be selected again on every boot.
+        // Keep raw sources/chunks for a manual rebuild, but leave the row failed.
+        // Best-effort: the marker writes the same metadata unit that may have
+        // caused the recovery failure. Guard both lookup and write so another
+        // failure cannot escape the per-document recovery loop.
+        try {
+          const store = this.requireStore()
+          const current = store.getDocument(id)
+          if (current !== undefined && !this.shuttingDown && store.getBase(current.baseId)) {
+            await store.putDocument({ ...current, incomplete: false, embeddingError: processorErrorMessage(error),
+              errorCode: current.rawText === undefined ? 'parse_failed' : 'embedding_provider', updatedAt: Date.now() })
+          }
+        } catch (writeError) {
+          this.ctx.logger.warn(`knowledge: could not record failed recovery for ${id}; previous metadata retained: ${writeError instanceof Error ? writeError.message : String(writeError)}`)
+        }
+      } finally {
+        if (parsing.includes(id)) {
+          this.recoveryParsing.delete(id); this.indexing.delete(id); this.processingProgress.delete(id)
+        }
+      }
+    }
+    } finally { parsing.forEach(id => this.recoveryParsing.delete(id)) }
+  }
+
+  /** Resume the persisted candidate without paying for a second parse. */
+  private async finishRecoveredGeneration(previous: KnowledgeDocument, candidate: KnowledgeDocument, processed: ProcessedFile): Promise<void> {
+    const store = this.requireStore()
+    const controller = new AbortController()
+    this.indexing.set(previous.id, { baseId: previous.baseId, title: previous.title, phase: 'embedding', total: 0, progress: 0, controller })
+    try {
+      const config = this.getConfigFor(previous.baseId)
+      const result = await this.buildChunks(previous.baseId, previous.id, candidate.title, processed.text, config,
+        this.processingChunks(processed, config), batch => store.stageDocumentGeneration(candidate, batch), controller.signal, processed.processing.revision)
+      controller.signal.throwIfAborted()
+      if (result.embeddingError !== undefined && previous.chunkCount > 0) throw new Error('embedding recovery failed; previous generation preserved')
+      const { incomplete: _incomplete, embeddingError: _error, errorCode: _code, ...rest } = candidate
+      await this.commitIndexedGeneration({ ...rest, processing: processed.processing, rawText: processed.text,
+        contentHash: sha256(processed.text), charCount: processed.text.length, tokenCount: estimateTokens(processed.text),
+        chunkCount: result.chunks.length, updatedAt: Date.now(),
+        ...(result.embeddingError !== undefined ? { embeddingError: result.embeddingError, errorCode: result.embeddingErrorCode } : {}),
+      }, result.chunks, processed.text, config, controller.signal)
+    } finally { this.indexing.delete(previous.id); this.processingProgress.delete(previous.id) }
+  }
+
+  /** Wait until the durable store is ready; the HTTP route awaits this. */
+  async whenReady(): Promise<void> {
+    await this.storeReady
+  }
+
+  // ── configuration ─────────────────────────────────────────────────────────
+
+  getConfig(): KnowledgeConfig {
+    return resolveConfig(this.baseConfig, this.requireStore().getConfigOverrides())
+  }
+
+  archiveRejection(req: IncomingMessage) {
+    const connection = this.ctx.get('connection') as { requestRejection?(req: IncomingMessage): number | undefined } | undefined
+    return connection?.requestRejection?.(req)
+  }
+  exportBase(id: string) {
+    const store = this.requireStore(), base = store.getBase(id)
+    if (!base) throw new NotFoundError('Knowledge base not found')
+    const headers = store.listDocuments(id, { includeRawText:false })
+    const stream = exportArchive({name:base.name, description:base.description, group:base.group}, headers, async docId => {
+      const doc = store.getDocument(docId)
+      if (!doc || doc.baseId !== id) throw new Error('The base changed during export. Export it again.')
+      const text = doc.rawText ?? reconstructFromChunks(store.listChunksByDoc(docId))
+      const raw = doc.sourceType === 'file' ? await this.getRawFile(docId) : undefined
+      return {text, ...(raw ? { original:Buffer.from(raw.bytes).toString('base64') } : {})}
+    })
+    return {name:base.name, stream}
+  }
+  importBase(req: IncomingMessage) {
+    const store = this.requireStore()
+    return importArchive(req, {
+      create: async metadata => (await this.createBase(metadata)).id,
+      discard: id => this.deleteBase(id),
+      add: async (baseId, item, parentDirectoryId) => {
+        if (item.sourceType === 'directory') return (await this.createDirectory(baseId, item.title, parentDirectoryId)).id
+        const documentId = crypto.randomUUID()
+        const rawFilePath = item.original === undefined ? undefined :
+          await store.raw?.write(baseId, documentId, safeRawExtension(item.fileName ?? item.title), Buffer.from(item.original, 'base64'))
+        const doc = await this.ingestDocument({ baseId, documentId, title:item.title, sourceType:item.sourceType,
+          fileName:item.fileName, mimeType:item.mimeType, url:item.url, parentDirectoryId, rawFilePath, keepSeparate:true, text:item.text ?? '' })
+        return doc.id
+      },
+    })
+  }
+  localSetup() { return localSearch.setupState() }
+  setupVisionModels() { return localSearch.visionCatalog(this.ctx) }
+  startLocalSetup() { return localSearch.startSetup(() => this.applyLocalSearch()) }
+  configureLocalSetup(prefs: Partial<SearchPreferences>) {
+    return localSearch.configure(this.ctx, prefs, () => this.applyLocalSearch())
+  }
+
+  // The original service remains the owner of bases, documents, chunks and citations.
+  private async applyLocalSearch(): Promise<void> {
+    const store = this.requireStore()
+    const before = this.getConfig()
+    if (before.embeddingProvider !== 'none' && before.embeddingModel !== localSearch.embeddingId) {
+      for (const base of store.listBases()) {
+        if (base.config?.embeddingProvider || !store.listDocuments(base.id, { includeRawText: false }).length) continue
+        await store.putBase({ ...base, config: { embeddingProvider: before.embeddingProvider, embeddingModel: before.embeddingModel,
+          embeddingDimensions: before.embeddingDimensions, ...base.config } })
+      }
+    }
+    await this.setConfig({ embeddingProvider: 'local', embeddingModel: localSearch.embeddingId, embeddingDimensions: 0,
+      rerankModel: 'local:' + localSearch.rerankerId, rerankBaseUrl: '', rerankApiKey: '', keepInternalMarkdown: true })
+    for (const base of store.listBases()) {
+      if (this.getConfigFor(base.id).embeddingModel === localSearch.embeddingId && store.listDocuments(base.id, { includeRawText: false }).length) {
+        void this.backfillBaseEmbeddings(base.id).catch(error => this.warn(String(error)))
+      }
+    }
+  }
+
+  /** Static model-id suggestions for the settings comboboxes. */
+  modelSuggestions(): typeof MODEL_SUGGESTIONS {
+    return MODEL_SUGGESTIONS
+  }
+
+  /** Resolve one base's effective config (global + that base's overrides). */
+  getConfigFor(baseId?: string): KnowledgeConfig {
+    const store = this.requireStore()
+    if (baseId !== undefined) {
+      const base = store.getBase(baseId)
+      if (base !== undefined) {
+        return resolveConfigFor(this.baseConfig, store.getConfigOverrides(), base.config)
+      }
+    }
+    return this.getConfig()
+  }
+
+  /** Emit a structured warning on behalf of model-facing retrieval helpers. */
+  warn(message: string): void {
+    this.ctx.logger.warn(`knowledge: ${message}`)
+  }
+
+  /**
+   * Detach a background task so its rejection can never surface as an
+   * unhandledRejection — the host treats one as a fatal load failure and the
+   * desktop app exits with it. Metadata persistence goes through an atomic
+   * `tmp + rename` unit, which can fail transiently on Windows (`EPERM` while
+   * another handle holds the file); such a failure must degrade to a warning.
+   */
+  private runBackground(label: string, task: Promise<unknown>): void {
+    void task.catch(error => {
+      this.ctx.logger.warn(`knowledge: ${label} failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  /**
+   * Rerank settings for proactive (cross-base) retrieval, which has no single
+   * base config: the global rerank model wins; otherwise the first enabled
+   * base that configured one. Returns undefined when none is set.
+   */
+  rerankSettings(): { model: string; baseUrl: string; apiKey: string } | undefined {
+    const global = this.getConfig()
+    if (global.rerankModel.trim() !== '') {
+      return { model: global.rerankModel, baseUrl: global.rerankBaseUrl, apiKey: global.rerankApiKey }
+    }
+    for (const base of this.enabledBases()) {
+      const config = this.getConfigFor(base.id)
+      if (!config.autoRetrieve || config.autoRetrieveWeight === 0) continue
+      if (config.rerankModel.trim() !== '') {
+        return { model: config.rerankModel, baseUrl: config.rerankBaseUrl, apiKey: config.rerankApiKey }
+      }
+    }
+    return undefined
+  }
+
+  private readonly retrievalWarmup = new RetrievalWarmup(message => this.warn(message))
+
+  private warmRetrievalModels(): void {
+    if (this.shuttingDown || !this.store) return
+    void this.retrievalWarmup.warm([this.getConfig(), ...this.enabledBases().map(base => this.getConfigFor(base.id))])
+  }
+
+  async setConfig(overrides: ConfigOverrides): Promise<KnowledgeConfig> {
+    const store = this.requireStore()
+    const previous = new Map(store.listBases().map(base => [base.id, embeddingDimensionTag(this.getConfigFor(base.id))]))
+    const merged = { ...store.getConfigOverrides(), ...overrides }
+    embeddingOutputDimensions(resolveConfigFor(this.baseConfig, merged))
+    for (const base of store.listBases()) embeddingOutputDimensions(resolveConfigFor(this.baseConfig, merged, base.config))
+    await store.setConfigOverrides(overrides)
+    for (const base of store.listBases()) {
+      if (previous.get(base.id) !== embeddingDimensionTag(this.getConfigFor(base.id))) {
+        void this.backfillBaseEmbeddings(base.id).catch(error => this.ctx.logger.warn(`knowledge: dimension backfill failed: ${String(error)}`))
+      }
+    }
+    const resolved = this.getConfig()
+    // Reapply the mirror switch, model cache dir, and worker idle timeout
+    // live, so the panel can change them without a restart.
+    setHfEndpoint(resolved.hfEndpoint)
+    setLocalModelCacheDir(resolved.localModelCacheDir)
+    setLocalWorkerIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    this.applyEmbeddingCpuTuning(resolved)
+    this.ocrAcceleration.configure(resolved)
+    embeddingAcceleration.configure(localModelCacheDir(), resolved)
+    embeddingFp16Acceleration.configure(localModelCacheDir(), resolved)
+    setLocalRerankIdleTimeoutMs(resolved.localWorkerIdleTimeoutMs)
+    this.warmRetrievalModels()
+    return resolved
+  }
+
+  // ── invocation toggle ─────────────────────────────────────────────────────
+
+  isEnabled(): boolean {
+    return this.requireStore().getEnabled()
+  }
+
+  async setEnabled(enabled: boolean): Promise<void> {
+    await this.requireStore().setEnabled(enabled)
+  }
+
+  getEnabledBaseIds(): string[] {
+    return this.requireStore().getEnabledBaseIds()
+  }
+
+  async setEnabledBaseIds(ids: readonly string[]): Promise<void> {
+    await this.requireStore().setEnabledBaseIds([...new Set(ids)])
+    this.warmRetrievalModels()
+  }
+
+  /**
+   * Resolve the effective search scope for a model call. `undefined` means no
+   * ids were configured (every base); an empty array means a non-empty saved
+   * selection has gone entirely stale and must fail closed.
+   */
+  enabledScope(): string[] | undefined {
+    const store = this.requireStore()
+    const ids = store.getEnabledBaseIds()
+    if (ids.length === 0) return undefined
+    const existing = new Set(store.listBases().map(base => base.id))
+    const valid = ids.filter(id => existing.has(id))
+    return valid
+  }
+
+  /** Existing bases inside the strict model-invocation scope. */
+  enabledBases(): BaseSummary[] {
+    const bases = this.listBases()
+    const scope = this.enabledScope()
+    if (scope === undefined) return bases
+    const allowed = new Set(scope)
+    return bases.filter(base => allowed.has(base.id))
+  }
+
+  // ── bases ─────────────────────────────────────────────────────────────────
+
+  assertInternalImport(baseId: string): void {
+    if (this.requireStore().getBase(baseId)?.storageMode === 'external') throw new Error('External knowledge mirrors its selected folder. Add or remove files in that folder instead.')
+  }
+
+  async pickSourceFolder(): Promise<{ path: string | null }> { return { path: await pickFolder() } }
+
+  async updateExternalSource(id: string, request: UpdateBaseRequest & { reconcileNow?: boolean }): Promise<KnowledgeBase> {
+    const store = this.requireStore(), base = store.getBase(id)
+    if (!base || base.storageMode !== 'external') throw new Error('External knowledge base not found')
+    if (request.externalPath !== undefined && request.externalPath !== base.externalPath) throw new Error('Create a new external base to select a different source folder')
+    const seconds = request.syncIntervalSeconds ?? base.syncIntervalSeconds ?? 60
+    if (!Number.isInteger(seconds) || seconds < 5 || seconds > 86400) throw new Error('Sync interval must be 5–86400 seconds')
+    const next = { ...base, syncEnabled: request.syncEnabled ?? base.syncEnabled ?? true, syncIntervalSeconds: seconds, updatedAt: Date.now() }
+    await store.putBase(next); this.externalFolders?.request(id, request.reconcileNow === true); return next
+  }
+
+  async createBase(request: CreateBaseRequest): Promise<KnowledgeBase> {
+    const mode = request.storageMode ?? 'internal'
+    if (!['internal', 'external'].includes(mode)) throw new Error('Invalid storage mode')
+    const externalPath = mode === 'external' ? await this.canonicalDirectoryPath(request.externalPath ?? '') : undefined
+    const interval = request.syncIntervalSeconds ?? 60
+    if (!Number.isInteger(interval) || interval < 5 || interval > 86400) throw new Error('Sync interval must be 5–86400 seconds')
+    const name = request.name.trim()
+    if (name.length === 0) throw new Error('base name is required')
+    const now = Date.now()
+    const store = this.requireStore()
+    const group = request.group?.trim()
+    if (group !== undefined && group.length > 0 && !store.getGroups().includes(group)) {
+      await store.setGroups([...store.getGroups(), group])
+    }
+    const base: KnowledgeBase = {
+      id: crypto.randomUUID(),
+      name,
+      description: request.description?.trim() ?? '',
+      storageMode: mode, ...(externalPath ? { externalPath, syncEnabled: request.syncEnabled ?? true, syncIntervalSeconds: interval } : {}),
+      ...(group !== undefined && group.length > 0 ? { group } : {}),
+      ...(request.config !== undefined ? { config: compactBaseConfig(request.config) } : {}),
+      createdAt: now,
+      updatedAt: now,
+    }
+    embeddingOutputDimensions(resolveConfigFor(this.baseConfig, store.getConfigOverrides(), base.config))
+    await store.putBase(base)
+    if (mode === 'external') this.externalFolders?.request(base.id)
+    return base
+  }
+
+  /** Cherry-style restore: re-embed every source document into a fresh base
+   *  (with the source's current config), returning the new base. Raw source
+   *  files are copied across so the restored base keeps the rebuild source. */
+  async restoreBase(sourceBaseId: string, name: string, config?: BaseConfig): Promise<KnowledgeBase> {
+    const store = this.requireStore()
+    const source = store.getBase(sourceBaseId)
+    if (source === undefined) throw new Error(`knowledge base not found: ${sourceBaseId}`)
+    // Cherry's restore flow rebuilds with a (possibly different) embedding
+    // model: an explicit config overrides the source's (used when the user
+    // switches models), otherwise the source config carries over.
+    const base = await this.createBase({
+      name: name.trim() || `${source.name} (restored)`,
+      description: source.description,
+      group: source.group,
+      config: config ?? source.config,
+    })
+    for (const header of store.listDocuments(sourceBaseId, { includeRawText: false })) {
+      const doc = store.getDocument(header.id)
+      if (!doc) continue
+      if (doc.sourceType === 'directory') continue
+      const text = doc.rawText ?? reconstructFromChunks(store.listChunksByDoc(doc.id))
+      if (text.trim().length === 0) continue
+      // Copy the original bytes into the restored base so reindex stays
+      // rebuildable from source there too (Cherry's restore carries raw/).
+      let rawFilePath: string | undefined
+      if (store.raw !== undefined && doc.rawFilePath !== undefined) {
+        const raw = await store.raw.read(doc.rawFilePath)
+        if (raw !== null) {
+          const ext = rawExtensionOf(doc.rawFilePath)
+          rawFilePath = await store.raw.write(base.id, crypto.randomUUID(), ext, raw)
+        }
+      }
+      await this.ingestDocument({
+        baseId: base.id,
+        title: doc.title,
+        sourceType: doc.sourceType,
+        ...(doc.fileName !== undefined ? { fileName: doc.fileName } : {}),
+        ...(doc.mimeType !== undefined ? { mimeType: doc.mimeType } : {}),
+        ...(doc.url !== undefined ? { url: doc.url } : {}),
+        ...(rawFilePath !== undefined ? { rawFilePath } : {}),
+        text,
+      })
+    }
+    return base
+  }
+
+  async deleteBase(id: string): Promise<void> {
+    const store = this.requireStore()
+    if (store.getBase(id) === undefined) throw new Error(`knowledge base not found: ${id}`)
+    for (const doc of store.listDocuments(id, { includeRawText: false })) {
+      this.processingControllers.get(doc.id)?.abort()
+      this.processingProgress.delete(doc.id)
+    }
+    // Cancel in-flight imports/reindexes under the deleted base (Cherry cancels
+    // active jobs before purging): their finishing writes must not recreate
+    // rows or chunks under the removed base, and their paid requests abort.
+    for (const [docId, active] of [...this.indexing]) {
+      if (active.baseId === id) {
+        active.controller?.abort()
+        this.indexing.delete(docId)
+      }
+    }
+    for (const job of this.jobs.values()) if (job.baseId === id && !job.done) job.cancelled = true
+    // Remove the durable base first: pending writers fail closed immediately.
+    // Child metadata remains unreachable; DomainKV has no supported bulk
+    // delete API, and per-document deletes rewrite its whole backing unit.
+    await store.deleteBase(id)
+    await Promise.all([
+      store.deleteChunksByBase(id),
+      store.raw?.deleteBase(id),
+      this.artifacts.deleteBase(id),
+      this.markdownSnapshots.removeBase(id),
+    ])
+    // Do not scan other KBs or VACUUM the shared SQLite database in this
+    // request. Its reusable free pages are reclaimed by normal maintenance.
+    // Keep a selected id as a stale marker. If it was the last selected base,
+    // enabledScope() must resolve to [] (fail closed), never broaden to all.
+  }
+
+  async renameBase(id: string, request: UpdateBaseRequest): Promise<KnowledgeBase> {
+    const store = this.requireStore()
+    const existing = store.getBase(id)
+    if (existing === undefined) throw new Error(`knowledge base not found: ${id}`)
+    const next: KnowledgeBase = {
+      ...existing,
+      name: request.name?.trim() || existing.name,
+      description: request.description?.trim() ?? existing.description,
+      ...(request.group !== undefined && request.group !== null
+        ? { group: request.group.trim().length > 0 ? request.group.trim() : undefined }
+        : {}),
+      ...(request.config !== undefined
+        ? { config: mergeBaseConfig(existing.config, request.config) }
+        : {}),
+      updatedAt: Date.now(),
+    }
+    // A base moved into a new group must register that group (createBase does;
+    // renaming must not leave a group that owns bases but is absent from the
+    // sidebar's group list).
+    const nextGroup = next.group
+    if (nextGroup !== undefined && !store.getGroups().includes(nextGroup)) {
+      await store.setGroups([...store.getGroups(), nextGroup])
+    }
+    // Cherry's embedding-model change routes (resolveEmbeddingModelChangeRoute):
+    // an empty base saves directly; a BM25-only base gaining a model backfills
+    // vectors in place; switching an already-configured model invalidates every
+    // stored vector and must go through rebuild (restore) — refuse the direct
+    // change with that guidance instead of silently breaking retrieval.
+    const patch = request.config
+    if (patch !== undefined) {
+      const oldConfig = this.getConfigFor(id)
+      const newConfig = resolveConfigFor(this.baseConfig, store.getConfigOverrides(), next.config)
+      embeddingOutputDimensions(newConfig)
+      const dimensionsChanged = embeddingDimensionTag(newConfig) !== embeddingDimensionTag(oldConfig)
+      const modelChanged = newConfig.embeddingProvider !== oldConfig.embeddingProvider
+        || newConfig.embeddingModel !== oldConfig.embeddingModel
+      if ((modelChanged || dimensionsChanged) && store.listDocuments(id, { includeRawText: false }).length > 0) {
+        const hadModel = oldConfig.embeddingProvider !== 'none' && oldConfig.embeddingModel.trim() !== ''
+        if (hadModel && modelChanged && !canMigrateQwenVectors(oldConfig, newConfig)) {
+          throw new Error('Changing the embedding model invalidates existing vectors. Use Rebuild knowledge base to generate vectors with the new model')
+        }
+        // BM25-only → enable-in-place: commit the model, then backfill vectors
+        // in the background (Cherry's enableEmbeddingModel). Cherry gates the
+        // commit on the base being backfill-able: an in-flight import/reindex
+        // would race the backfill, and a source-less document would leave a
+        // model committed with nothing to back it — refuse both up front.
+        const sourceLess = store.hasDocumentsWithoutSource(id)
+        if (sourceLess) {
+          throw new Error('Some documents have no saved source text, so their embeddings cannot be generated. Re-add the affected documents from their originals')
+        }
+        await store.putBase(next)
+        this.warmRetrievalModels()
+        if (!dimensionsChanged) this.externalFolders?.request(id, true)
+        const baseId = id
+        void this.backfillBaseEmbeddings(baseId).catch((error: unknown) => {
+          this.ctx.logger.warn(`knowledge: in-place embedding backfill failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+        return next
+      }
+    }
+    await store.putBase(next)
+    if (patch !== undefined) this.warmRetrievalModels()
+    if (patch !== undefined) this.externalFolders?.request(id, true)
+    if (patch !== undefined && ('embeddingProvider' in patch || 'embeddingModel' in patch || 'embeddingDimensions' in patch)) {
+      const effective = this.getConfigFor(id)
+      if (effective.embeddingProvider !== 'none' && effective.embeddingModel.trim() !== '') {
+        void this.backfillBaseEmbeddings(id).catch(error => this.ctx.logger.warn(`knowledge: embedding backfill failed: ${error instanceof Error ? error.message : String(error)}`))
+      }
+    }
+    return next
+  }
+
+  private readonly recoveryParsing = new Set<string>()
+  private readonly syncClaims = new Set<string>()
+  private readonly vectorPhaseDocuments = new Set<string>()
+  private readonly parseEpochs = new Map<string, number>()
+  private readonly deferredVectorDocuments = new Map<string, boolean>()
+  private hasParsingWork(): boolean {
+    return [...this.importStageProgress.values()].some(run => run.stage !== 'vectorization') || this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+      || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id) && !this.folderOcrSources.has(id))
+  }
+  private readonly folderOcrSources = new Map<string, Set<string> | null>()
+  private hasOcrWork(): boolean {
+    // Unexamined source jobs may still need OCR. Completed extraction can
+    // overlap CPU normalization/chunking with accelerator embedding.
+    return [...this.importStageProgress.values()].some(run => run.stage === 'ocr' || run.stage === 'parsing') || this.recoveryParsing.size > 0 || [...this.ingestQueues.values()].some(queue => queue.running > 0 || queue.pending.length > 0)
+      || [...this.folderOcrSources.values()].some(paths => paths === null || paths.size > 0)
+      || [...this.indexing].some(([id, task]) => task.phase === 'parsing' && !this.vectorPhaseDocuments.has(id)
+        && !this.folderOcrSources.has(id)
+        && !/\.(?:md|markdown|mdx|txt|csv|json|log|html?|xml)$/i.test(task.title)
+        && !['normalizing', 'indexing', 'completed'].includes(this.processingProgress.get(id)?.stage ?? 'queued'))
+  }
+  private async yieldEmbeddingWork(signal?: AbortSignal): Promise<void> {
+    do {
+      signal?.throwIfAborted()
+      if (this.shuttingDown) throw new Error('Knowledge plugin stopped')
+      if (!this.hasOcrWork()) break
+      await new Promise<void>(resolve => setTimeout(resolve, 50))
+    } while (true)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    signal?.throwIfAborted()
+  }
+
+  private readonly embeddingBackfills = new Set<string>()
+
+  /** Explicit full vector pass, separate from sync, parsing and chunking. */
+  revectorizeBase(baseId: string): { queued: true } {
+    const base = this.requireStore().getBase(baseId)
+    if (!base) throw new NotFoundError('knowledge base not found')
+    if (!embeddingKey(this.getConfigFor(baseId))) throw new Error('Select an embedding model before re-vectorizing')
+    if (this.embeddingBackfills.has(baseId)) throw new Error('Vectorization is already running for this base')
+    void this.backfillBaseEmbeddings(baseId, crypto.randomUUID()).catch(error => {
+      this.ctx.logger.warn(`knowledge: re-vectorization paused: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    return { queued: true }
+  }
+
+  /** Enable vectors from saved canonical text; unchanged external files must not be skipped. */
+  private async backfillBaseEmbeddings(baseId: string, forceRevision?: string): Promise<void> {
+    if (this.embeddingBackfills.has(baseId)) return
+    this.embeddingBackfills.add(baseId)
+    try {
+      const store = this.requireStore(), base = store.getBase(baseId)
+      if (base) await store.putBase({ ...base, embeddingBackfillPending: true, ...(forceRevision ? { embeddingBackfillRevision: forceRevision } : {}) })
+      // A precision/export change can arrive during an existing backfill.
+      // Restart its inventory under the new key; old vectors remain excluded.
+      while (!this.shuttingDown && store.getBase(baseId)) {
+        const key = embeddingKey(this.getConfigFor(baseId))
+        const epoch = this.parseEpochs.get(baseId)
+        try { await this.runEmbeddingBackfill(baseId) }
+        catch (error) { if (key === embeddingKey(this.getConfigFor(baseId))) throw error }
+        if (key === embeddingKey(this.getConfigFor(baseId)) && epoch === this.parseEpochs.get(baseId)) break
+      }
+    } finally { this.embeddingBackfills.delete(baseId) }
+  }
+
+  private async runEmbeddingBackfill(baseId: string): Promise<void> {
+    // Return the config save before inventorying or starting model inference.
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const store = this.requireStore()
+    if (this.shuttingDown || !store.getBase(baseId)) return
+    const passKey = embeddingKey(this.getConfigFor(baseId))
+    const meterId = `embedding:${baseId}`
+    const forceRevision = store.getBase(baseId)?.embeddingBackfillRevision
+    const missing = forceRevision ? undefined : store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding
+    const documents = store.listDocuments(baseId, { includeRawText: false })
+      .filter(doc => !doc.incomplete && !this.indexing.has(doc.id) && doc.sourceType !== 'directory' && (doc.semanticChunkingPending || (forceRevision ? doc.vectorizationRevision !== forceRevision : missing!.has(doc.id))))
+    this.processingMeter.start(meterId, baseId)
+    this.processingMeter.add(meterId, documents.length)
+    this.directoryWriteBatches.set(baseId, (this.directoryWriteBatches.get(baseId) ?? 0) + 1)
+    let completed = false
+    try {
+      await orderedEmbeddingLanes(documents, this.getConfigFor(baseId).embeddingProvider === 'local' ? 8 : 1, async doc => {
+        if (this.shuttingDown || !store.getBase(baseId)) throw new Error('Embedding backfill stopped')
+        if (passKey !== embeddingKey(this.getConfigFor(baseId))) throw new Error('Embedding model changed; restarting vector inventory')
+        await new Promise<void>(resolve => setImmediate(resolve))
+        await this.yieldEmbeddingWork()
+        this.processingMeter.begin(meterId)
+        while (this.syncClaims.has(doc.id)) {
+          if (this.shuttingDown) throw new Error('Embedding backfill stopped')
+          await new Promise<void>(resolve => setTimeout(resolve, 50))
+        }
+        if (this.indexing.has(doc.id)) { this.processingMeter.settle(meterId, 'skipped'); return }
+        try {
+          await this.embedExistingDocument(doc.id, forceRevision)
+          this.processingMeter.settle(meterId, 'processed')
+        } catch (error) {
+          this.processingMeter.settle(meterId, 'failed', { documentId: doc.id, title: doc.title, code: 'embedding_provider', message: error instanceof Error ? error.message : String(error) })
+          if (this.shuttingDown || passKey !== embeddingKey(this.getConfigFor(baseId))) throw error
+          const message = error instanceof Error ? error.message : String(error)
+          const current = store.getDocument(doc.id)
+          if (current) await store.putDocument({ ...current, embeddingError: message, errorCode: 'embedding_provider', updatedAt: Date.now() })
+          // One exhausted document must not stop millions of independent
+          // candidates. Keep its old generation intact and the durable base
+          // marker pending, so a retry can fill only the missing vectors.
+          this.ctx.logger.warn(`knowledge: embedding failed for document ${doc.id} (${doc.title}); continuing the queue: ${message}`)
+        }
+      })
+      completed = true
+    } finally {
+      this.processingMeter.finish(meterId)
+      if (completed && passKey === embeddingKey(this.getConfigFor(baseId)) && !this.shuttingDown && store.getBase(baseId) && store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId))).missingEmbedding.size === 0) {
+        await store.putBase({ ...store.getBase(baseId)!, embeddingBackfillPending: false, embeddingBackfillRevision: undefined })
+      }
+      const remaining = (this.directoryWriteBatches.get(baseId) ?? 1) - 1
+      if (remaining > 0) this.directoryWriteBatches.set(baseId, remaining)
+      else { this.directoryWriteBatches.delete(baseId); if (store.getBase(baseId)) await this.touchBase(baseId) }
+    }
+  }
+
+  /** Fill vectors without applying newly saved parsing/chunking settings. */
+  private async embedExistingDocument(id: string, forceRevision?: string): Promise<void> {
+    const store = this.requireStore(), document = store.getDocument(id)
+    if (!document || document.sourceType === 'directory') return
+    if (this.indexing.has(id)) throw new Error('Document is already being indexed')
+    const config = this.getConfigFor(document.baseId), key = embeddingKey(config)
+    if (!key) throw new Error('No embedding model configured')
+    if (document.semanticChunkingPending) {
+      this.vectorPhaseDocuments.add(id)
+      try {
+        // Reuse saved parsing artifacts/raw text: this never invokes OCR again.
+        await this.reindexDocument(id, { mode: 'rechunk' })
+        const current = store.getDocument(id)
+        if (current?.embeddingError) throw new Error(current.embeddingError)
+        if (current) await store.putDocument({ ...current, semanticChunkingPending: false, ...(forceRevision ? { vectorizationRevision: forceRevision } : {}) })
+        return
+      } finally { this.vectorPhaseDocuments.delete(id) }
+    }
+    const chunks = store.listChunksByDoc(id).map(chunk => ({ ...chunk }))
+    if (!chunks.length) return
+    const controller = new AbortController()
+    this.indexing.set(id, { baseId: document.baseId, title: document.title, phase: 'embedding', total: chunks.length, progress: 0, controller })
+    try {
+      // The base's durable pending marker owns crash recovery. Leave the live
+      // document/chunks intact until the entire replacement can commit.
+      const hashes = chunks.map(chunk => hashEmbeddingText(chunkSearchText(chunk)))
+      // Include durable candidate batches from an interrupted embedding pass
+      // before replacing its stage; a restart must not repeat completed work.
+      const cached = forceRevision ? new Map<string, number[]>() : store.listEmbeddingVectorsByHashes(hashes, key)
+      await store.discardStagedDocumentGeneration(id)
+      await store.stageDocumentGeneration(document, [])
+      const missing: number[] = []
+      for (let i = 0; i < chunks.length; i++) {
+        if (!forceRevision && chunks[i].embeddingModel === key && chunks[i].embedding !== undefined) continue
+        const vector = cached.get(hashes[i])
+        if (vector) chunks[i] = { ...chunks[i], embedding: vector, embeddingModel: key }
+        else missing.push(i)
+      }
+      const batchSize = Math.max(1, config.embeddingProvider === 'local' ? Math.min(config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8, config.embeddingBatchSize) : config.embeddingBatchSize)
+      for (let i = 0; i < missing.length; i += batchSize) {
+        await this.yieldEmbeddingWork(controller.signal)
+        controller.signal.throwIfAborted()
+        this.assertIndexTargetAlive(id, document.baseId)
+        const indices = missing.slice(i, i + batchSize)
+        const vectors = await this.embedWithRetry(config, indices.map(index => chunkSearchText(chunks[index])), controller.signal)
+        if (vectors.length !== indices.length || vectors.some(vector => !vector.length || vector.some(value => !Number.isFinite(value)))
+          || new Set(vectors.map(vector => vector.length)).size !== 1) throw new Error('Invalid embedding vectors')
+        const width = vectors[0].length
+        if (chunks.some(chunk => chunk.embeddingModel === key && chunk.embedding && chunk.embedding.length !== width)) throw new Error('Embedding dimension mismatch')
+        indices.forEach((index, j) => { chunks[index] = { ...chunks[index], embedding: vectors[j], embeddingModel: key } })
+        await store.stageDocumentGeneration(document, indices.map(index => chunks[index]))
+        this.indexing.set(id, { baseId: document.baseId, title: document.title, phase: 'embedding', total: missing.length,
+          progress: Math.round(100 * Math.min(i + batchSize, missing.length) / missing.length), controller })
+      }
+      controller.signal.throwIfAborted()
+      this.assertIndexTargetAlive(id, document.baseId)
+      const { embeddingError: _error, errorCode: _code, incomplete: _incomplete, ...rest } = document
+      await store.commitDocumentGeneration({ ...rest, ...(forceRevision ? { vectorizationRevision: forceRevision } : {}), updatedAt: Date.now() }, chunks)
+    } catch (error) {
+      if ((error as { published?: boolean }).published !== true) await store.discardStagedDocumentGeneration(id)
+      throw error
+    } finally { this.indexing.delete(id) }
+  }
+
+  listBases(): BaseSummary[] {
+    const store = this.requireStore()
+    return store.listBases().map(base => {
+      const documents = store.listDocuments(base.id, { includeRawText: false })
+      const chunkCount = documents.reduce((sum, doc) => sum + doc.chunkCount, 0)
+      const charCount = documents.reduce((sum, doc) => sum + doc.charCount, 0)
+      const tokenCount = documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
+      const storedDocCount = documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined || doc.processing !== undefined ? 1 : 0), 0)
+      const sourceInfo = baseSourceLines(documents)
+      return {
+        id: base.id,
+        name: base.name,
+        description: base.description,
+        storageMode: base.storageMode ?? 'internal', externalPath: base.externalPath,
+        syncEnabled: base.syncEnabled, syncIntervalSeconds: base.syncIntervalSeconds,
+        syncStatus: this.externalFolders?.states.get(base.id),
+        ...(base.group !== undefined ? { group: base.group } : {}),
+        documentCount: documents.length,
+        storedDocCount,
+        chunkCount,
+        charCount,
+        tokenCount,
+        ...(base.config !== undefined ? { config: base.config } : {}),
+        ...(sourceInfo.length > 0 ? { sourceInfo } : {}),
+        createdAt: base.createdAt,
+        updatedAt: base.updatedAt,
+      }
+    })
+  }
+
+  // ── groups ────────────────────────────────────────────────────────────────
+
+  listGroups(): string[] {
+    return [...this.requireStore().getGroups()].sort((a, b) => a.localeCompare(b))
+  }
+
+  async createGroup(name: string): Promise<string[]> {
+    const store = this.requireStore()
+    const trimmed = name.trim()
+    if (trimmed.length === 0) throw new Error('group name is required')
+    const groups = new Set(store.getGroups())
+    if (groups.has(trimmed)) throw new Error(`group "${trimmed}" already exists`)
+    groups.add(trimmed)
+    await store.setGroups([...groups])
+    return [...groups].sort((a, b) => a.localeCompare(b))
+  }
+
+  async renameGroup(from: string, to: string): Promise<string[]> {
+    const store = this.requireStore()
+    const trimmed = to.trim()
+    if (trimmed.length === 0) throw new Error('group name is required')
+    const groups = new Set(store.getGroups())
+    if (!groups.has(from)) throw new Error(`group "${from}" does not exist`)
+    if (groups.has(trimmed) && from !== trimmed) throw new Error(`group "${trimmed}" already exists`)
+    groups.delete(from)
+    groups.add(trimmed)
+    for (const base of store.listBases()) {
+      if (base.group === from) await store.putBase({ ...base, group: trimmed, updatedAt: Date.now() })
+    }
+    await store.setGroups([...groups])
+    return [...groups].sort((a, b) => a.localeCompare(b))
+  }
+
+  async deleteGroup(name: string): Promise<void> {
+    const store = this.requireStore()
+    const groups = store.getGroups().filter(group => group !== name)
+    await store.setGroups(groups)
+    for (const base of store.listBases()) {
+      if (base.group === name) await store.putBase({ ...base, group: undefined, updatedAt: Date.now() })
+    }
+  }
+
+  // ── documents ─────────────────────────────────────────────────────────────
+
+  async addTextDocument(request: AddTextDocumentRequest): Promise<KnowledgeDocument> {
+    this.assertInternalImport(request.baseId)
+    const store = this.requireStore()
+    if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
+    if (request.content.trim().length === 0) throw new Error('document content is empty')
+    return this.ingestDocument({
+      baseId: request.baseId,
+      title: request.title.trim(),
+      sourceType: 'text',
+      ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
+      text: this.getConfigFor(request.baseId).embeddingModel === localSearch.embeddingId ? localSearch.markdownTitle(request.title, request.content) : request.content,
+    })
+  }
+
+  async addFileDocument(request: AddFileDocumentRequest): Promise<KnowledgeDocument & { skipped?: boolean }> {
+    this.assertInternalImport(request.baseId)
+    const store = this.requireStore()
+    if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
+    validateImageHeader(request.fileName, request.contentBase64)
+    // Reject unsupported formats before the row is created (Cherry's
+    // `assertSupportedKnowledgeFilePath`): a binary/image/archive must not be
+    // decoded into garbage text and imported as a real document.
+    if (!SUPPORTED_DOCUMENT_EXTENSION_SET.has(extensionOf(request.fileName))) {
+      throw new Error(`Unsupported knowledge file type: ${request.fileName}`)
+    }
+    // Cherry Studio parity: publish the row FIRST (with "parsing" status) and
+    // return immediately; the parse+embed runs on a per-base worker pool
+    // (concurrency 5) and the row flips processing → completed/failed as it
+    // goes, exactly like Cherry's create-then-index jobs.
+    //
+    // Conflict resolution, rename suffixing and the placeholder persist all
+    // run under the per-base write lock: two concurrent imports of the same
+    // file name must not both pass the "taken" check and end up with the same
+    // fileName (the rename strategy would silently degrade to keep).
+    let fileName = request.fileName
+    let title = request.title?.trim() || request.fileName
+    const lockResult = await this.withBaseWriteLock(request.baseId, async () => {
+      // Re-run the conflict check against the freshest document list (a
+      // concurrent add may have landed since the first pass above).
+      const conflictStrategyNow = request.conflict ?? this.getConfigFor(request.baseId).conflictStrategy
+      if (conflictStrategyNow === 'keep') {
+        // Cherry's "keep both" auto-renames; dsh's keep keeps the EXISTING
+        // item and skips the incoming duplicate, reporting it via `skipped`
+        // so the UI can tell the user instead of silently dropping the file.
+        const existing = store.listDocuments(request.baseId, { includeRawText: false }).find(doc => doc.fileName === request.fileName)
+        if (existing !== undefined) {
+          return { skippedDoc: existing }
+        }
+      } else {
+        const existing = store.listDocuments(request.baseId, { includeRawText: false }).find(doc => doc.fileName === request.fileName)
+        if (existing !== undefined) {
+          if (conflictStrategyNow === 'replace') {
+            await store.deleteChunks(existing.id, request.baseId)
+            if (existing.rawFilePath !== undefined) await store.raw?.delete(existing.rawFilePath)
+            await store.deleteDocument(existing.id)
+          } else if (conflictStrategyNow === 'detect') {
+            throw new ConflictError(`same-name document exists: ${request.fileName} (id ${existing.id}) — re-upload with conflict=replace or conflict=rename`)
+          }
+        }
+      }
+      let resolvedFileName = request.fileName
+      let resolvedTitle = request.title?.trim() || request.fileName
+      if (conflictStrategyNow === 'rename') {
+        const taken = new Set(store.listDocuments(request.baseId, { includeRawText: false }).map(doc => doc.fileName))
+        let candidate = resolvedFileName
+        let counter = 1
+        while (taken.has(candidate)) {
+          const dot = resolvedFileName.lastIndexOf('.')
+          const base = dot > 0 ? resolvedFileName.slice(0, dot) : resolvedFileName
+          const ext = dot > 0 ? resolvedFileName.slice(dot) : ''
+          candidate = `${base}_${counter}${ext}`
+          counter += 1
+        }
+        if (candidate !== resolvedFileName) {
+          resolvedFileName = candidate
+          resolvedTitle = request.title !== undefined ? `${request.title.trim()}_${counter - 1}` : candidate
+        }
+      }
+      const newDocId = crypto.randomUUID()
+      const placeholder: KnowledgeDocument = {
+        id: newDocId,
+        baseId: request.baseId,
+        title: resolvedTitle,
+        sourceType: 'file',
+        fileName: resolvedFileName,
+        ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
+        ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
+        charCount: 0,
+        chunkCount: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }
+      // Persist the original bytes FIRST (Cherry's "import means copy"): the
+      // base keeps its own stable source copy, reindex can re-read and re-parse
+      // it, and a crash before/during parse is recoverable from the file
+      // instead of being a lost upload.
+      const newRawFilePath = store.raw !== undefined
+        ? await store.raw.write(request.baseId, newDocId, safeRawExtension(resolvedFileName), decodeBase64(request.contentBase64))
+        : undefined
+      const storedDoc = { ...placeholder, ...(newRawFilePath !== undefined ? { rawFilePath: newRawFilePath } : {}) }
+      await store.putDocument(storedDoc)
+      return { fileName: resolvedFileName, title: resolvedTitle, docId: newDocId, rawFilePath: newRawFilePath, stored: storedDoc }
+    })
+    // keep-strategy skip: the duplicate already exists — report it instead of
+    // creating a row (the caller surfaces it as "skipped", not as a failure).
+    if ('skippedDoc' in (lockResult as { skippedDoc?: KnowledgeDocument })) {
+      const skipped = (lockResult as { skippedDoc: KnowledgeDocument }).skippedDoc
+      return { ...skipped, skipped: true }
+    }
+    const { fileName: resolvedFileName, title: resolvedTitle, docId, rawFilePath, stored } = lockResult as {
+      fileName: string
+      title: string
+      docId: string
+      rawFilePath?: string
+      stored: KnowledgeDocument
+    }
+    fileName = resolvedFileName
+    title = resolvedTitle
+    // The task's abort controller: a delete of the row or base aborts the
+    // in-flight MinerU batch and embedding requests (Cherry's job cancel).
+    const taskController = new AbortController()
+    this.indexingFailures.delete(docId)
+    this.indexing.set(docId, { baseId: request.baseId, title, phase: 'parsing', total: 0, progress: 0, controller: taskController })
+    // Queue the background parse+ingest. The task re-reads the persisted raw
+    // copy instead of holding the payload in memory, so a large batch never
+    // accumulates file contents in the queue; only a deployment without a raw
+    // backend (e.g. in-memory test stores) keeps the payload for the task. A
+    // failed import KEEPS its row (marked failed with the reason — Cherry
+    // shows failed rows in the list, reindexable from the raw copy) instead of
+    // vanishing from the list.
+    const fallbackPayload = rawFilePath !== undefined ? undefined : request.contentBase64
+    this.enqueueIngest(request.baseId, async () => {
+      try {
+        return await this.documentAdmission.run(fileName, () => retryDocument(async () => {
+          taskController.signal.throwIfAborted()
+          if (!store.getDocument(docId) || !store.getBase(request.baseId)) throw new DOMException('Import canceled', 'AbortError')
+          // Prefer re-reading the persisted raw copy (the queue never holds file
+          // contents in memory); fall back to the request payload only when the
+          // deployment has no raw backend (e.g. in-memory test stores).
+          let bytes: Uint8Array | null = rawFilePath !== undefined ? (await store.raw?.read(rawFilePath)) ?? null : null
+          if (bytes === null && fallbackPayload !== undefined) bytes = decodeBase64(fallbackPayload)
+          if (bytes === null) throw new Error('raw copy is missing — cannot parse the file')
+          // Cherry's fileProcessorId posture: when the MinerU remote processor
+          // is configured, PDFs go through the API first (scanned/complex
+          // layouts get true layout-aware Markdown); any failure falls back to
+          // the local pipeline. A double failure reports BOTH reasons, so the
+          // row shows why the remote processor rejected the file (log-only
+          // before) instead of just the local parser's complaint.
+          const extracted = await this.extractDocumentText({
+            baseId: request.baseId,
+            documentId: docId,
+            fileName,
+            ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
+            bytes,
+            signal: taskController.signal,
+          })
+          const text = extracted.text
+          if (text.trim().length === 0) {
+            throw new Error('parsed document is empty')
+          }
+          await this.ingestDocument({
+            baseId: request.baseId,
+            title,
+            sourceType: 'file',
+            fileName,
+            ...(request.mimeType !== undefined ? { mimeType: request.mimeType } : {}),
+            ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
+            placeholderId: docId,
+            rawFilePath,
+            text,
+            processed: extracted,
+          }, taskController.signal)
+          if (store.getDocument(docId)?.embeddingError) return false
+        }, { signal: taskController.signal }), taskController.signal)
+      } catch (error) {
+        this.indexing.delete(docId)
+        taskController.abort()
+        if (isMetadataWriteFailure(error)) {
+          this.ctx.logger.warn(`knowledge: import metadata write deferred for ${docId}; saved sources retained: ${error instanceof Error ? error.message : String(error)}`)
+          return
+        }
+        if ((error as { published?: boolean }).published === true) return
+        const message = processorErrorMessage(error)
+        // The row may have been deleted (or its base removed) while the task
+        // was queued or running — never resurrect it (Cherry's deleting-guard).
+        const current = store.getDocument(docId)
+        if (current === undefined || store.getBase(request.baseId) === undefined) return
+        this.indexingFailures.set(docId, {
+          baseId: request.baseId,
+          title,
+          phase: 'parsing',
+          code: 'parse_failed',
+          message: safeIndexingErrorMessage(message),
+          expireAt: Date.now() + FAILURE_LINGER_TTL_MS,
+        })
+        try {
+          await store.putDocument({ ...current, embeddingError: message, errorCode: 'parse_failed', updatedAt: Date.now() })
+        } catch {
+          // best-effort: the row already exists; the status flip is cosmetic
+        }
+        return false
+      } finally {
+        this.processingProgress.delete(docId)
+        this.indexing.delete(docId)
+      }
+    })
+    return stored
+  }
+
+  /**
+   * Batch file add with Cherry's server-authoritative conflict detection:
+   * `conflict: 'detect'` reports every same-name collision (against existing
+   * documents AND within the batch) without adding anything; `rename`/`replace`
+   * add the whole batch under that strategy. The detect round may omit file
+   * contents (names alone suffice); a clean detect returns `clean` so the
+   * caller re-submits with contents under the rename strategy.
+   */
+  async addFiles(request: AddFilesRequest): Promise<AddFilesResult> {
+    this.assertInternalImport(request.baseId)
+    const store = this.requireStore()
+    if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
+    for (const file of request.files) {
+      if (file.contentBase64 !== undefined) validateImageHeader(file.fileName, file.contentBase64)
+      if (!SUPPORTED_DOCUMENT_EXTENSION_SET.has(extensionOf(file.fileName))) {
+        throw new Error(`Unsupported knowledge file type: ${file.fileName}`)
+      }
+    }
+    const existingNames = new Set(
+      store.listDocuments(request.baseId, { includeRawText: false })
+        .filter(doc => doc.sourceType === 'file')
+        .map(doc => doc.fileName),
+    )
+    const seen = new Set<string>()
+    const conflicts: string[] = []
+    for (const file of request.files) {
+      const name = file.fileName
+      if (existingNames.has(name) || seen.has(name)) conflicts.push(name)
+      seen.add(name)
+    }
+    const uniqueConflicts = [...new Set(conflicts)]
+    if (request.conflict === 'detect') {
+      if (uniqueConflicts.length > 0) return { status: 'conflicts', conflicts: uniqueConflicts }
+      // No contents in the detect round → nothing to add yet.
+      if (request.files.some(file => file.contentBase64 === undefined)) return { status: 'clean' }
+    }
+    const strategy = request.conflict === 'detect' ? 'rename' : request.conflict
+    const accepted: Array<{ id: string; title: string; fileName: string; skipped?: boolean }> = []
+    for (const file of request.files) {
+      const doc = await this.addFileDocument({
+        baseId: request.baseId,
+        fileName: file.fileName,
+        ...(file.mimeType !== undefined ? { mimeType: file.mimeType } : {}),
+        ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
+        contentBase64: file.contentBase64 ?? '',
+        ...(strategy !== undefined ? { conflict: strategy } : {}),
+      })
+      accepted.push({
+        id: doc.id,
+        title: doc.title,
+        fileName: doc.fileName ?? doc.title,
+        ...(doc.skipped === true ? { skipped: true } : {}),
+      })
+    }
+    return { status: 'added', accepted }
+  }
+
+  /** Start importing a local directory as a cancellable background job. */
+  async importDirectory(request: ImportDirectoryRequest): Promise<{ jobId: string; total: number }> {
+    this.assertInternalImport(request.baseId)
+    const store = this.requireStore()
+    if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
+    const files = await scanDirectory(request.path)
+    const jobId = crypto.randomUUID()
+    this.pruneJobs()
+    this.jobs.set(jobId, {
+      baseId: request.baseId,
+      kind: 'directory',
+      cancelled: false,
+      imported: 0,
+      skipped: 0,
+      total: files.length,
+      current: '',
+      errors: [],
+      done: false,
+    })
+    this.runBackground('directory import job', this.runDirectoryImport(jobId, files))
+    return { jobId, total: files.length }
+  }
+
+  /** Progress snapshot of an active (or just-finished) directory import. */
+  directoryImportStatus(jobId: string): BackgroundJob | undefined {
+    return this.jobs.get(jobId)
+  }
+
+  cancelDirectoryImport(jobId: string): void {
+    const job = this.jobs.get(jobId)
+    if (job !== undefined && !job.done) job.cancelled = true
+  }
+
+  private async runDirectoryImport(jobId: string, files: readonly string[]): Promise<void> {
+    const job = this.jobs.get(jobId)
+    if (job === undefined) return
+    for (const file of files) {
+      if (job.cancelled) break
+      job.current = file
+      try {
+        await this.ingestPathFile(job.baseId, file, basename(file))
+        job.imported += 1
+      } catch (error) {
+        job.errors.push({ file, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    job.done = true
+    job.current = ''
+  }
+
+  private pruneJobs(): void {
+    if (this.jobs.size < 50) return
+    for (const [id, job] of this.jobs) {
+      if (job.done) this.jobs.delete(id)
+    }
+  }
+
+  /** Create a directory container item (no chunks) under an optional parent. */
+  async createDirectory(baseId: string, title: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
+    const document: KnowledgeDocument = {
+      id: crypto.randomUUID(),
+      baseId,
+      title: title.trim() || 'directory',
+      sourceType: 'directory',
+      ...(parentDirectoryId !== undefined ? { parentDirectoryId } : {}),
+      charCount: 0,
+      chunkCount: 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    await store.putDocument(document)
+    await this.touchBase(baseId)
+    return document
+  }
+
+  /** Import a local directory as a nested tree of directory containers + file items. */
+  async importDirectoryTree(
+    baseId: string,
+    path: string,
+    parentDirectoryId?: string,
+  ): Promise<DirectoryImportResult> {
+    const prepared = await this.prepareDirectoryImport(baseId, path, parentDirectoryId)
+    const sync = await this.syncDirectorySource(prepared.root, prepared.sourcePath, prepared.mode)
+    const errors = sync.items
+      .filter(item => item.action === 'failed' && item.error !== undefined)
+      .map(item => ({ file: item.relativePath, error: item.error!.message }))
+    return {
+      // `imported`/`directories` keep their pre-4.0 meaning of "items this call
+      // wrote", i.e. created PLUS updated. Counting only `created` made a
+      // re-sync that re-parsed and re-embedded every changed file report
+      // `imported: 0` — success-shaped zeros for real work. The split lives in
+      // `sync` for callers that need it.
+      imported: sync.items.filter(item => item.kind === 'file' && (item.action === 'created' || item.action === 'updated')).length,
+      directories: sync.items.filter(item => item.kind === 'directory' && (item.action === 'created' || item.action === 'updated')).length,
+      errors,
+      sourceId: prepared.root.id,
+      mode: prepared.mode,
+      sync,
+    }
+  }
+
+  /** Resolve a directory to its real filesystem identity. The stored display
+   * path remains usable for reads, while comparisons use {@link sourcePathKey}
+   * so Windows casing and separators cannot create a second source root. */
+  private async canonicalDirectoryPath(path: string): Promise<string> {
+    const trimmed = path.trim()
+    if (trimmed.length === 0) throw new Error('path is required')
+    if (!isAbsolute(trimmed)) throw new Error(`path must be absolute: ${trimmed}`)
+    let canonical: string
+    try {
+      canonical = await realpath(resolve(trimmed))
+    } catch {
+      throw new Error(`path not found: ${trimmed}`)
+    }
+    let sourceStat
+    try {
+      sourceStat = await stat(canonical)
+    } catch {
+      throw new Error(`path not found: ${trimmed}`)
+    }
+    if (!sourceStat.isDirectory()) throw new Error(`not a directory: ${trimmed}`)
+    return canonical
+  }
+
+  /** Canonical identity for any one local source path. Two spellings of the
+   * same real file — macOS `/var` versus `/private/var`, a symlink, or a
+   * Windows junction — must never become two sources, so every stored local
+   * path is written in its resolved form rather than the spelling the caller
+   * happened to use. A path that cannot be resolved falls back to its
+   * normalized form (validation has already proven it exists). */
+  private async canonicalSourcePath(path: string): Promise<string> {
+    try {
+      return await realpath(path)
+    } catch {
+      return resolve(path)
+    }
+  }
+
+  /** Stable comparison key for paths that are already validated as local
+   * sources. `resolve` normalizes separators; Windows uses case-insensitive
+   * identity even when the physical volume preserves the original case. */
+  private sourcePathKey(path: string): string {
+    const normalized = resolve(path).replace(/\\/g, '/')
+    return process.platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized
+  }
+
+  private sameSourcePath(left: string, right: string): boolean {
+    return this.sourcePathKey(left) === this.sourcePathKey(right)
+  }
+
+  private relativeSourcePath(root: string, target: string): string {
+    const value = relative(root, target).replace(/\\/g, '/')
+    return value === '' ? '.' : value
+  }
+
+  /** Create or reuse exactly one source-root container. A duplicate path never
+   * silently creates a second tree, and a legacy ambiguous tree is never
+   * guessed or merged. */
+  private async prepareDirectoryImport(
+    baseId: string,
+    path: string,
+    parentDirectoryId?: string,
+  ): Promise<{ root: KnowledgeDocument; sourcePath: string; mode: 'created' | 'synced' }> {
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
+    const sourcePath = await this.canonicalDirectoryPath(path)
+    const base = store.getBase(baseId)
+    if (base?.storageMode === 'external' && (base.externalPath !== sourcePath || parentDirectoryId !== undefined)) throw new Error('External bases can only synchronize their selected top-level source folder')
+    if (parentDirectoryId !== undefined) {
+      const parent = store.getDocument(parentDirectoryId)
+      if (parent === undefined || parent.baseId !== baseId || parent.sourceType !== 'directory') {
+        throw new Error('parentDirectoryId must identify a directory in the target knowledge base')
+      }
+    }
+    const candidates = store.listDocuments(baseId, { includeRawText: false }).filter(document =>
+      document.sourceType === 'directory'
+      && document.sourcePath !== undefined
+      && this.sameSourcePath(document.sourcePath, sourcePath),
+    )
+    if (candidates.length > 1) {
+      throw new DirectorySourceError(
+        'ambiguous_source',
+        'more than one directory tree is already bound to this source path; inspect and delete the redundant tree manually',
+        { sourcePath, candidateIds: candidates.map(candidate => candidate.id) },
+      )
+    }
+    const existing = candidates[0]
+    if (existing !== undefined) {
+      if (existing.parentDirectoryId !== parentDirectoryId) {
+        throw new DirectorySourceError(
+          'source_path_conflict',
+          'this directory source is already imported under a different parent and cannot be copied or moved automatically',
+          { sourcePath, sourceId: existing.id, parentDirectoryId: existing.parentDirectoryId },
+        )
+      }
+      return { root: existing, sourcePath, mode: 'synced' }
+    }
+    const root = await this.createDirectory(baseId, basename(sourcePath), parentDirectoryId)
+    return { root, sourcePath, mode: 'created' }
+  }
+
+  /** Import a single local file by its absolute path (server-side). */
+  async importFileFromPath(baseId: string, filePath: string): Promise<{ imported: boolean; title: string }> {
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
+    // The user-facing name keeps the spelling they chose; the stored source
+    // identity is the resolved real path, so the same file reached twice
+    // through different spellings is still one source.
+    const name = basename(filePath)
+    const sourcePath = await this.canonicalSourcePath(filePath)
+    if (!SUPPORTED_DOCUMENT_EXTENSION_SET.has(extensionOf(name))) {
+      throw new Error(`Unsupported knowledge file type: ${name}`)
+    }
+    await this.ingestPathFile(baseId, sourcePath, name)
+    return { imported: true, title: name }
+  }
+
+  /**
+   * Import a local path (directory tree or single file) by its absolute path,
+   * validating that it exists first. Directories reuse the tree import, which
+   * records `sourcePath` on every container so reindex rescans the disk.
+   */
+  async importFromPath(baseId: string, path: string): Promise<PathImportResult> {
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
+    const trimmed = path.trim()
+    if (trimmed.length === 0) throw new Error('path is required')
+    if (!isAbsolute(trimmed)) throw new Error(`path must be absolute: ${trimmed}`)
+    let st
+    try {
+      st = await stat(trimmed)
+    } catch {
+      throw new Error(`path not found: ${trimmed}`)
+    }
+    if (st.isDirectory()) {
+      const result = await this.importDirectoryTree(baseId, trimmed)
+      return {
+        kind: 'directory',
+        imported: result.imported,
+        errors: result.errors,
+        directories: result.directories,
+        sourceId: result.sourceId,
+        mode: result.mode,
+        sync: result.sync,
+      }
+    }
+    if (st.isFile()) {
+      await this.importFileFromPath(baseId, trimmed)
+      return { kind: 'file', imported: 1, errors: [] }
+    }
+    throw new Error(`not a file or directory: ${trimmed}`)
+  }
+
+  /**
+   * Repoint exactly one top-level file or directory source. Source identity is
+   * explicit: a base may contain several independent roots of the same kind,
+   * and editing one must never redirect its siblings.
+   */
+  async setBaseSourcePath(baseId: string, sourceId: string, path: string): Promise<{ set: number }> {
+    this.assertInternalImport(baseId)
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
+    const source = store.getDocument(sourceId)
+    if (source === undefined) throw new Error(`source document not found: ${sourceId}`)
+    if (source.baseId !== baseId) throw new Error(`source ${sourceId} does not belong to knowledge base ${baseId}`)
+    if (source.parentDirectoryId !== undefined) throw new Error('source path can only be changed for a top-level source')
+    if (source.sourceType !== 'file' && source.sourceType !== 'directory') {
+      throw new Error('source path can only be changed for a file or directory source')
+    }
+    const trimmed = path.trim()
+    if (trimmed.length === 0) throw new Error('path is required')
+    if (!isAbsolute(trimmed)) throw new Error(`path must be absolute: ${trimmed}`)
+    let st
+    try {
+      st = await stat(trimmed)
+    } catch {
+      throw new Error(`path not found: ${trimmed}`)
+    }
+    if (source.sourceType === 'directory') {
+      if (!st.isDirectory()) throw new Error('a directory source must be repointed to a directory')
+      const canonical = await this.canonicalSourcePath(trimmed)
+      // Repointing must respect the same one-source-one-path invariant that
+      // prepareDirectoryImport enforces. Without this check a repoint onto a path
+      // another root already owns left TWO trees bound to one directory: the next
+      // import then fails closed with `ambiguous_source` for both, and a rescan of
+      // the repointed root matches no child by path, so every file is re-created
+      // and rejected as a duplicate — a `partial` sync whose items are all failed.
+      const conflict = store.listDocuments(baseId, { includeRawText: false }).find(document =>
+        document.id !== source.id
+        && document.sourceType === 'directory'
+        && document.sourcePath !== undefined
+        && this.sameSourcePath(document.sourcePath, canonical),
+      )
+      if (conflict !== undefined) {
+        throw new DirectorySourceError(
+          'source_path_conflict',
+          'another directory source in this knowledge base is already bound to that path',
+          { sourcePath: canonical, sourceId: conflict.id },
+        )
+      }
+      await store.putDocument({ ...source, sourcePath: canonical, updatedAt: Date.now() })
+    } else {
+      if (!st.isFile()) throw new Error('a file source must be repointed to a file')
+      const nextFileName = basename(trimmed)
+      if (!SUPPORTED_DOCUMENT_EXTENSION_SET.has(extensionOf(nextFileName))) {
+        throw new Error(`Unsupported knowledge file type: ${nextFileName}`)
+      }
+      // Drop stale MIME metadata so parser dispatch follows the new source's
+      // extension. Preserve the user-facing title, which may have been renamed.
+      const { mimeType: _staleMimeType, ...withoutMimeType } = source
+      await store.putDocument({
+        ...withoutMimeType,
+        sourcePath: await this.canonicalSourcePath(trimmed),
+        fileName: nextFileName,
+        updatedAt: Date.now(),
+      })
+    }
+    await this.touchBase(baseId)
+    return { set: 1 }
+  }
+
+  async addUrlDocument(request: ImportUrlRequest): Promise<KnowledgeDocument> {
+    this.assertInternalImport(request.baseId)
+    const store = this.requireStore()
+    if (store.getBase(request.baseId) === undefined) throw new Error(`knowledge base not found: ${request.baseId}`)
+    const html = await fetchHtml(request.url)
+    const extracted = await extractHtmlDocument(html)
+    if (extracted.text.trim().length === 0) throw new Error('URL returned no extractable text')
+    // Persist the fetched text as the URL's snapshot (Cherry's snapshot model:
+    // the base owns a stable copy; refresh re-fetches and overwrites it).
+    const docId = crypto.randomUUID()
+    const title = request.title?.trim() || extracted.title || request.url
+    let rawFilePath: string | undefined
+    if (store.raw !== undefined) {
+      rawFilePath = await store.raw.write(request.baseId, docId, '.md', encodeUtf8(extracted.text))
+    }
+    return this.ingestDocument({
+      baseId: request.baseId,
+      title,
+      sourceType: 'url',
+      url: request.url,
+      ...(request.parentDirectoryId !== undefined ? { parentDirectoryId: request.parentDirectoryId } : {}),
+      rawFilePath,
+      text: extracted.text,
+    })
+  }
+
+  /**
+   * Cherry-style URL refresh: re-fetch the page, and when its text changed,
+   * overwrite the snapshot and re-index the document (hash reuse re-embeds
+   * only the chunks that changed). A failed fetch or an unchanged page leaves
+   * the current snapshot and index untouched — refresh never degrades.
+   */
+  async refreshUrlDocument(id: string): Promise<{ changed: boolean; title: string; chunkCount: number }> {
+    const store = this.requireStore()
+    const document = store.getDocument(id)
+    if (document === undefined) throw new Error(`document not found: ${id}`)
+    if (document.sourceType !== 'url' || document.url === undefined) {
+      throw new Error(`document "${document.title}" is not a URL document`)
+    }
+    const html = await fetchHtml(document.url)
+    const extracted = await extractHtmlDocument(html)
+    if (extracted.text.trim().length === 0) throw new Error('URL returned no extractable text')
+    const title = extracted.title.trim().length > 0 ? extracted.title.trim() : document.title
+    if (extracted.text === document.rawText && title === document.title) {
+      return { changed: false, title: document.title, chunkCount: document.chunkCount }
+    }
+    // Overwrite the snapshot (or persist a new one for pre-snapshot docs).
+    let rawFilePath = document.rawFilePath
+    if (store.raw !== undefined) {
+      const ext = rawFilePath !== undefined ? rawExtensionOf(rawFilePath) : '.md'
+      rawFilePath = await store.raw.write(document.baseId, document.id, ext, encodeUtf8(extracted.text))
+    }
+    const refreshed = await this.ingestDocument({
+      baseId: document.baseId,
+      title,
+      sourceType: 'url',
+      url: document.url,
+      rawFilePath,
+      text: extracted.text,
+      placeholderId: document.id,
+    })
+    return { changed: true, title: refreshed.title, chunkCount: refreshed.chunkCount }
+  }
+
+  /** Preview the exact tree and durable raw snapshots affected by a delete.
+   * This is read-only and is safe to call before showing a destructive UI. */
+  getDeleteImpact(id: string): DeleteImpact {
+    const store = this.requireStore()
+    const root = store.getDocument(id)
+    if (root === undefined) throw new Error(`document not found: ${id}`)
+    const childrenByParent = new Map<string, KnowledgeDocument[]>()
+    for (const document of store.listDocuments(root.baseId, { includeRawText: false })) {
+      if (document.parentDirectoryId === undefined) continue
+      const children = childrenByParent.get(document.parentDirectoryId) ?? []
+      children.push(document)
+      childrenByParent.set(document.parentDirectoryId, children)
+    }
+    const nodes: KnowledgeDocument[] = []
+    const visit = (document: KnowledgeDocument): void => {
+      nodes.push(document)
+      for (const child of childrenByParent.get(document.id) ?? []) visit(child)
+    }
+    visit(root)
+    const descendants = nodes.length - 1
+    return {
+      documentId: root.id,
+      baseId: root.baseId,
+      directories: nodes.filter(document => document.sourceType === 'directory').length,
+      files: nodes.filter(document => document.sourceType !== 'directory').length,
+      chunks: nodes.reduce((sum, document) => sum + document.chunkCount, 0),
+      rawSnapshots: new Set(nodes.flatMap(document => document.rawFilePath === undefined ? [] : [document.rawFilePath])).size,
+      requiresRecursive: root.sourceType === 'directory' && descendants > 0,
+    }
+  }
+
+  private assertDeleteImpacts(ids: readonly string[], recursive: boolean): string[] {
+    const store = this.requireStore()
+    const roots = this.outermostSelectedIds(ids).filter(id => store.getDocument(id) !== undefined)
+    const impacts = roots.map(id => this.getDeleteImpact(id))
+    const recursiveImpacts = impacts.filter(impact => impact.requiresRecursive)
+    if (recursiveImpacts.length > 0 && !recursive) {
+      throw new DirectorySourceError(
+        'recursive_confirmation_required',
+        'deleting a non-empty directory requires explicit recursive confirmation',
+        { impacts: recursiveImpacts },
+      )
+    }
+    return roots
+  }
+
+  async deleteDocument(id: string, options?: { recursive?: boolean }): Promise<void> {
+    const store = this.requireStore()
+    const existing = store.getDocument(id)
+    if (existing === undefined) throw new Error(`document not found: ${id}`)
+    this.assertDeleteImpacts([id], options?.recursive === true)
+    await this.deleteDocumentRecursive(id)
+    // One updatedAt write per delete, not per descendant.
+    await this.touchBase(existing.baseId)
+    await this.reconcileAfterDelete()
+  }
+
+  /** Post-delete cleanup: drop chunk rows whose document is already gone (a
+   *  batch that landed after the row was deleted keeps matching the retrieval
+   *  lanes, which scope by base rather than by document existence), then
+   *  reclaim space. */
+  private async reconcileAfterDelete(): Promise<void> {
+    const store = this.requireStore()
+    try {
+      const removed = await store.reconcileOrphanChunks()
+      if (removed > 0) this.ctx.logger.warn(`knowledge: removed chunks left by ${removed} deleted document(s)`)
+    } catch (error) {
+      this.ctx.logger.warn(`knowledge: orphan chunk reconciliation failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    this.reclaimAfterDelete()
+  }
+
+  /** Threshold-gated space reclamation after a delete (Cherry's reclaimSpace). */
+  private reclaimAfterDelete(): void {
+    const store = this.requireStore()
+    const outcome = store.reclaimSpace?.()
+    if (outcome !== undefined && outcome.vacuumed) {
+      this.ctx.logger.info(`knowledge: reclaimed ${outcome.reclaimedBytes} bytes after delete`)
+    }
+  }
+
+  /** Delete one document (recursing into directory containers), one write per item. */
+  private async deleteDocumentRecursive(id: string): Promise<void> {
+    const store = this.requireStore()
+    const existing = store.getDocument(id)
+    if (existing === undefined) return
+    // Invalidate any in-flight indexing for this document (Cherry cancels a
+    // subtree's jobs before a delete): its finishing writes must not
+    // resurrect the row or write chunks under the deleted item, and its
+    // paid embedding/MinerU requests must be aborted.
+    const active = this.indexing.get(id)
+    this.processingControllers.get(id)?.abort()
+    this.processingProgress.delete(id)
+    active?.controller?.abort()
+    this.indexing.delete(id)
+    // Deleting a directory container also removes its descendants.
+    if (existing.sourceType === 'directory') {
+      for (const child of store.listDocuments(existing.baseId, { includeRawText: false })) {
+        if (child.parentDirectoryId === id) await this.deleteDocumentRecursive(child.id)
+      }
+    }
+    if (existing.rawFilePath !== undefined) await store.raw?.delete(existing.rawFilePath)
+    await this.markdownSnapshots.removeDocument(existing.baseId, id)
+    await store.deleteChunks(id, existing.baseId)
+    await store.deleteDocument(id)
+    await this.artifacts.deleteDocument(existing.baseId, id)
+  }
+
+  /**
+   * Throw when the document (or its base) vanished while indexing was in
+   * flight — Cherry's deleting-guard: a delete that lands mid-import or
+   * mid-reindex must never be resurrected by the finishing writes, and chunks
+   * must never land under a deleted base.
+   */
+  private assertIndexTargetAlive(docId: string, baseId: string): void {
+    const store = this.requireStore()
+    if (store.getDocument(docId) === undefined || store.getBase(baseId) === undefined) {
+      throw new Error('indexing target no longer exists (deleted while indexing)')
+    }
+  }
+
+  async renameDocument(id: string, title: string): Promise<KnowledgeDocument> {
+    const store = this.requireStore()
+    const existing = store.getDocument(id)
+    if (existing === undefined) throw new Error(`document not found: ${id}`)
+    const next = { ...existing, title: title.trim() || existing.title, updatedAt: Date.now() }
+    await store.putDocument(next)
+    return next
+  }
+
+  private readonly directoryReindexes = new Map<string, { mode: string; task: Promise<ReindexDocumentResult> }>()
+  async reindexDocument(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
+    if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
+    // Refreshing/resubmitting the same folder operation joins its live pass.
+    const header = this.requireStore().getDocument(id)
+    if (header?.sourceType === 'directory') {
+      const mode = `${options.mode ?? 'sync'}:${options.strictSource === true}`
+      const existing = this.directoryReindexes.get(id)
+      if (existing) {
+        if (existing.mode !== mode) throw new Error('This folder is already being reindexed with different options')
+        return existing.task
+      }
+      const task = this.reindexDocumentAttempt(id, options)
+      this.directoryReindexes.set(id, { mode, task })
+      try { return await task }
+      finally { if (this.directoryReindexes.get(id)?.task === task) this.directoryReindexes.delete(id) }
+    }
+    const rebuild = () => retryDocument(() => this.reindexDocumentAttempt(id, options))
+    return options.mode === 'rechunk'
+      ? this.documentAdmission.runReady(rebuild)
+      : this.documentAdmission.run(header?.fileName ?? header?.title ?? '', rebuild)
+  }
+
+  private async reindexDocumentAttempt(id: string, options: { mode?: 'reparse' | 'rechunk'; strictSource?: boolean } = {}): Promise<ReindexDocumentResult> {
+    if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
+    const store = this.requireStore()
+    const document = store.getDocument(id)
+    if (document === undefined) throw new Error(`document not found: ${id}`)
+    // A directory container has no content of its own: reindexing it means
+    // reindexing its whole subtree (Cherry's reindex-subtree semantics).
+    // In-flight leaves are skipped (Cherry's REINDEX_ALLOWED_STATUSES), not
+    // failed, so reindexing a busy directory never aborts mid-subtree.
+    if (document.sourceType === 'directory') {
+      // Cherry's reindex-subtree semantics. A container with a remembered
+      // source path RESCANS the disk: files added since the import are
+      // ingested, files removed from disk are deleted from the base, and
+      // everything else is re-chunked/re-embedded. Legacy containers without
+      // a source path fall back to re-indexing the existing children only.
+      if (document.sourcePath !== undefined && options.mode === undefined) {
+        return await this.rescanDirectory(document)
+      }
+      // One bad leaf must not abort the rest of the subtree (Cherry's
+      // reindex-subtree job keeps going; failing leaves are surfaced, not
+      // fatal). Failures are collected and reported as a summary after the
+      // sweep, so the user sees "N failed" instead of a silent partial run.
+      const children = new Map<string, KnowledgeDocument[]>()
+      for (const child of store.listDocuments(document.baseId, { includeRawText: false })) {
+        if (!child.parentDirectoryId) continue
+        const siblings = children.get(child.parentDirectoryId) ?? []
+        siblings.push(child)
+        children.set(child.parentDirectoryId, siblings)
+      }
+      const leaves: KnowledgeDocument[] = []
+      const pending = [document.id]
+      const visited = new Set<string>()
+      while (pending.length) {
+        const parent = pending.pop()!
+        if (visited.has(parent)) continue
+        visited.add(parent)
+        for (const child of children.get(parent) ?? []) {
+          if (child.sourceType === 'directory') pending.push(child.id)
+          else leaves.push(child)
+        }
+      }
+      const meterId = `${options.mode ?? 'reindex'}:${document.id}`
+      this.processingMeter.start(meterId, document.baseId)
+      this.processingMeter.add(meterId, leaves.length)
+      let failed = 0
+      let firstError = ''
+      let cursor = 0
+      const worker = async (): Promise<void> => {
+        while (cursor < leaves.length) {
+          if (this.shuttingDown) throw new DOMException('Knowledge plugin stopped', 'AbortError')
+          const child = leaves[cursor++]
+          this.processingMeter.begin(meterId)
+          if (this.indexing.has(child.id)) {
+            this.processingMeter.settle(meterId, 'skipped')
+            continue
+          }
+          try {
+            await this.reindexDocument(child.id, options)
+            this.processingMeter.settle(meterId, 'processed')
+          } catch (error) {
+            failed += 1
+            const message = error instanceof Error ? error.message : String(error)
+            if (firstError === '') firstError = message
+            this.processingMeter.settle(meterId, 'failed', { documentId: child.id, title: child.title, message })
+          }
+        }
+      }
+      try {
+        // Bounded producers let completed documents share the RAM publication
+        // buffer. SQLite still has exactly one serialized writer.
+        const results = await Promise.allSettled(Array.from({ length: Math.min(4, this.processingConcurrency, leaves.length) }, worker))
+        const rejected = results.find(result => result.status === 'rejected')
+        if (rejected?.status === 'rejected') throw rejected.reason
+        for (const directoryId of visited) {
+          if (directoryId === document.id) continue
+          const current = store.getDocument(directoryId)
+          if (current) await store.putDocument({ ...current, updatedAt: Date.now() })
+        }
+      } finally {
+        this.processingMeter.finish(meterId)
+      }
+      if (failed > 0) {
+        throw new Error(`directory reindex finished with ${failed} failed item(s): ${firstError}`)
+      }
+      // Refresh the container row's timestamp too (Cherry's updatedAt moves
+      // with every status flip of the item).
+      await store.putDocument({ ...document, updatedAt: Date.now() })
+      return document
+    }
+    if (this.indexing.has(id)) {
+      throw new Error(`"${document.title}" is still being indexed — try again when it finishes`)
+    }
+    // Re-read and re-parse the original source when it was persisted (Cherry's
+    // `canKnowledgeItemRebuildSource`): a reindex after a parser upgrade gets
+    // the better extraction, and the raw copy is the stable rebuild source.
+    // Fall back to the persisted text (then to reconstructed chunks) when the
+    // file is gone or unreadable — a reindex must never wipe vectors for a
+    // source that cannot be rebuilt.
+    const controller = new AbortController()
+    this.indexing.set(id, { baseId: document.baseId, title: document.title, phase: 'parsing', total: 0, progress: 0, controller })
+    let rebuilt: Awaited<ReturnType<KnowledgeService['sourceTextOf']>>
+    try {
+      if (options.mode === 'rechunk') {
+        this.processingProgress.set(id, { stage: 'normalizing' })
+        let parsed: ParsedDocument | undefined
+        if (document.processing !== undefined) {
+          try { parsed = await this.artifacts.load(document.baseId, document.id, document.processing) }
+          catch (error) {
+            // Saved text is an explicit re-chunk fallback. A missing sidecar
+            // must not repeatedly fail/retry a document whose text survives.
+            // Corrupt or mismatched evidence is still an error, never ignored.
+            const missing = (error as { code?: string }).code === 'ENOENT'
+              || error instanceof Error && error.message === 'processing artifact is missing; reparse the source'
+            if (!missing) throw error
+          }
+        }
+        rebuilt = { text: parsed?.text ?? document.rawText ?? reconstructFromChunks(store.listChunksByDoc(id)),
+          ...(parsed !== undefined && document.processing !== undefined ? { processed: { text: parsed.text, parsed, processing: { ...document.processing, reused: true } } } : {}),
+        }
+      } else {
+        rebuilt = await this.sourceTextOf(document, controller.signal, options.strictSource)
+      }
+      controller.signal.throwIfAborted()
+      if (!rebuilt.text.trim()) throw new Error('parsed document is empty')
+    } catch (error) {
+      this.indexing.delete(id)
+      throw error
+    }
+    const discardCandidate = async (): Promise<void> => {
+      if (rebuilt.candidateRawFilePath === undefined) return
+      try {
+        await store.raw?.delete(rebuilt.candidateRawFilePath)
+      } catch (error) {
+        this.ctx.logger.warn(`knowledge: failed to discard uncommitted raw source ${rebuilt.candidateRawFilePath}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    let candidateCommitted = false
+    try {
+      const config = this.getConfigFor(document.baseId)
+      // Mark the document incomplete so a crash mid-reindex is resumed on the
+      // next start (buildChunks persists each embedded batch; hash reuse makes
+      // the resume re-embed only what never landed). The document continues to
+      // reference the previous raw copy until the complete replacement commits.
+      await store.putDocument({ ...document, incomplete: true, updatedAt: Date.now() })
+      const candidate: KnowledgeDocument = { ...document, rawText: rebuilt.text,
+        ...(rebuilt.rawFilePath !== undefined ? { rawFilePath: rebuilt.rawFilePath } : {}),
+        processing: rebuilt.processed?.processing,
+      }
+      const pieces = this.processingChunks(rebuilt.processed, config)
+      // The incomplete marker already makes this rebuild resumable. Persist
+      // staging only when actual embedding batches arrive, not an empty copy
+      // of the entire source text before every lexical-only rebuild.
+      const { chunks, embeddingError, embeddingErrorCode } = await this.buildChunks(document.baseId, document.id, document.title, rebuilt.text, config, pieces, batch => store.stageDocumentGeneration(candidate, batch), controller.signal, candidate.processing?.revision)
+      controller.signal.throwIfAborted()
+      if (embeddingError !== undefined && document.chunkCount > 0) throw markAttemptsExhausted(Object.assign(new Error('embedding failed; the previous document generation was preserved'), { code: embeddingErrorCode }))
+      const { embeddingError: _staleError, errorCode: _staleCode, incomplete: _staleIncomplete, contentHash: _staleHash, ...rest } = candidate
+      const next: KnowledgeDocument = {
+        ...rest,
+        ...(rebuilt.rawFilePath !== undefined ? { rawFilePath: rebuilt.rawFilePath } : {}),
+        rawText: rebuilt.text,
+        contentHash: sha256(rebuilt.text),
+        charCount: rebuilt.text.length,
+        tokenCount: estimateTokens(rebuilt.text),
+        chunkCount: chunks.length,
+        ...(embeddingError !== undefined
+          ? { embeddingError, ...(embeddingErrorCode !== undefined ? { errorCode: embeddingErrorCode } : {}) }
+          : {}),
+        updatedAt: Date.now(),
+      }
+      // putChunks overwrites the doc's chunk bundle in one write (legacy
+      // per-chunk rows, if any, stay hidden because a bundle record is
+      // authoritative). A delete that landed mid-reindex must not resurrect
+      // rows, chunks, or the candidate raw source.
+      if (store.getDocument(document.id) === undefined || store.getBase(document.baseId) === undefined) {
+        await discardCandidate()
+        return document
+      }
+      await this.commitIndexedGeneration(next, chunks, rebuilt.text, config, controller.signal)
+      candidateCommitted = true
+
+      if (rebuilt.previousRawFilePath !== undefined && rebuilt.previousRawFilePath !== rebuilt.rawFilePath) {
+        try {
+          await store.raw?.delete(rebuilt.previousRawFilePath)
+        } catch (error) {
+          // The new document already points at the committed candidate. Leave
+          // an undeleted predecessor for startup orphan reconciliation.
+          this.ctx.logger.warn(`knowledge: failed to remove superseded raw source ${rebuilt.previousRawFilePath}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      await this.touchBase(document.baseId)
+      return next
+    } catch (error) {
+      if (isMetadataWriteFailure(error)) throw error
+      if (!candidateCommitted && (error as { published?: boolean }).published !== true) {
+        await store.discardStagedDocumentGeneration(id)
+        await discardCandidate()
+        if (store.getDocument(id) !== undefined) await store.putDocument(document)
+      }
+      throw error
+    } finally {
+      this.indexing.delete(id)
+      this.processingProgress.delete(id)
+    }
+  }
+
+  /**
+   * Extract a file's text through the base's configured processor chain: the
+   * remote MinerU API first when this base selects it for a PDF, then the local
+   * parsers. Returns the text plus the remote failure reason when one occurred.
+   *
+   * Import and every later rebuild (reindex, startup resume) go through here,
+   * so a document imported with MinerU is rebuilt with MinerU too — a scanned
+   * PDF whose remote extraction failed is recoverable by reindexing instead of
+   * being stuck on a local parser that cannot read it. Throws only when the
+   * remote processor was tried AND the local parsers also failed, with both
+   * reasons in the message (the import row then shows why the remote failed,
+   * which used to be log-only). An aborted extraction (the document was
+   * deleted) is rethrown as-is: it must not fall back to a local parse that can
+   * hold the worker for minutes.
+   */
+  private async extractDocumentText(input: {
+    baseId: string
+    documentId: string
+    fileName: string
+    mimeType?: string
+    bytes: Uint8Array
+    signal?: AbortSignal
+    resume?: boolean
+  }): Promise<ProcessedFile> {
+    const controller = new AbortController()
+    this.processingControllers.set(input.documentId, controller)
+    const signal = input.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, input.signal])
+    const config = this.getConfigFor(input.baseId)
+    const budget = processingBudget(config.documentProcessingTimeoutMs ?? 1_800_000, signal)
+    this.processingProgress.set(input.documentId, { stage: 'queued' })
+    try {
+      const prepared = this.preparedImport.getStore()
+      if (prepared === null) throw Object.assign(new Error('Source changed after staged import inventory'), {code:'prepared_source_changed'})
+      return await processDocumentFile({ ...input, visionHost: this.ctx, ...(prepared ? {prepared} : {}), structureV3: this.structureV3, managedCaption: this.managedCaption, config, artifacts: this.artifacts, signal: budget.signal,
+        runParsing: async task => {
+          const result = await this.processingQueue.run(task, budget.signal)
+          this.documentAdmission.parsed()
+          return result
+        },
+        onProgress: progress => { this.processingProgress.set(input.documentId, progress) },
+      })
+    } catch (error) {
+      this.ctx.logger.warn(`knowledge: document processor ${processorErrorCode(error)}`)
+      throw error
+    } finally {
+      budget.dispose()
+      if (this.processingControllers.get(input.documentId) === controller) this.processingControllers.delete(input.documentId)
+    }
+  }
+
+  /** Rebuild source text of a document. A path-imported single file (sourcePath)
+   *  is re-read from disk first so EDITS and a repointed source (setBaseSourcePath)
+   *  are picked up, refreshing the persisted raw copy; otherwise the raw copy
+   *  (parsed through the base's configured processor: MinerU first when set),
+   *  then persisted text, then reconstructed chunks are used. Returns the rebuilt
+   *  text and, when the raw copy was refreshed, its new base-relative path. */
+  private async sourceTextOf(document: KnowledgeDocument, signal?: AbortSignal, strictSource = false): Promise<{
+    text: string
+    processed?: ProcessedFile
+    rawFilePath?: string
+    candidateRawFilePath?: string
+    previousRawFilePath?: string
+  }> {
+    const store = this.requireStore()
+    const sourceFailures: string[] = []
+    const sourceErrors: unknown[] = []
+    let failedLiveSourceBytes: Uint8Array | undefined
+    let failedLiveSourceWasPdf = false
+    // A single-file path import tracks its live source on disk. Reindex re-reads
+    // that path so edits and a repointed source (setBaseSourcePath) are actually
+    // applied — the old behavior rebuilt only from the persisted raw copy and
+    // ignored sourcePath. An unreadable path falls through to the stored copy.
+    if (document.sourceType === 'file' && document.sourcePath !== undefined) {
+      try {
+        const buffer = await readFile(document.sourcePath)
+        if (buffer.byteLength > 0) {
+          const fileName = basename(document.sourcePath)
+          // A repointed source may use a different extension. Dispatch from
+          // the live source identity rather than stale fileName/MIME metadata.
+          let text: string
+          let processed: ProcessedFile
+          try {
+            const extracted = await this.extractDocumentText({
+              baseId: document.baseId,
+              documentId: document.id,
+              fileName,
+              bytes: buffer,
+              signal,
+            })
+            processed = extracted
+            text = extracted.text
+            if (text.trim().length === 0) throw new Error('parsed document is empty')
+          } catch (error) {
+            failedLiveSourceBytes = buffer
+            failedLiveSourceWasPdf = extensionOf(fileName) === 'pdf'
+            throw error
+          }
+          if (store.raw !== undefined && store.getBase(document.baseId)?.storageMode !== 'external') {
+            // Always stage to a fresh path. The caller switches the document
+            // reference only after chunks and metadata commit successfully.
+            const nextRaw = await store.raw.write(document.baseId, crypto.randomUUID(), safeRawExtension(fileName), buffer)
+            return {
+              text,
+              processed,
+              rawFilePath: nextRaw,
+              candidateRawFilePath: nextRaw,
+              ...(document.rawFilePath !== undefined ? { previousRawFilePath: document.rawFilePath } : {}),
+            }
+          }
+          return { text, processed }
+        }
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (strictSource) throw error
+        if (['submission_unknown', 'job_lost'].includes(processorErrorCode(error))) throw error
+        sourceErrors.push(error)
+        const reason = error instanceof Error ? error.message : String(error)
+        sourceFailures.push(`source path: ${reason}`)
+        this.ctx.logger.warn(`knowledge: re-reading source path failed, falling back to stored copy: ${reason}`)
+      }
+    }
+    if (document.rawFilePath !== undefined) {
+      const raw = await store.raw?.read(document.rawFilePath)
+      if (raw !== null && raw !== undefined && raw.byteLength > 0) {
+        if (failedLiveSourceWasPdf && extensionOf(document.fileName ?? document.title) === 'pdf'
+          && failedLiveSourceBytes !== undefined && Buffer.compare(raw, failedLiveSourceBytes) === 0) {
+          // The live path already failed on these exact bytes. A second MinerU
+          // request in the same reindex cannot help and may incur another cost.
+          this.ctx.logger.warn('knowledge: stored raw source matches the failed live source; skipping duplicate parse')
+        } else {
+          try {
+            // A distinct cached source is still a valid recovery candidate.
+            const processed = await this.extractDocumentText({
+              baseId: document.baseId,
+              documentId: document.id,
+              fileName: document.fileName ?? document.title,
+              ...(document.mimeType !== undefined ? { mimeType: document.mimeType } : {}),
+              bytes: raw,
+              signal,
+            })
+            const { text } = processed
+            if (text.trim().length > 0) return { text, processed }
+            throw new Error('parsed document is empty')
+          } catch (error) {
+            signal?.throwIfAborted()
+            if (['submission_unknown', 'job_lost'].includes(processorErrorCode(error))) throw error
+            sourceErrors.push(error)
+            const reason = error instanceof Error ? error.message : String(error)
+            sourceFailures.push(`stored raw source: ${reason}`)
+            this.ctx.logger.warn(`knowledge: re-parsing raw source failed, falling back to stored text: ${reason}`)
+          }
+        }
+      } else {
+        this.ctx.logger.warn(`knowledge: raw source file missing for "${document.title}", falling back to stored text`)
+      }
+    }
+    const text = document.rawText?.trim()
+      ? document.rawText
+      : reconstructFromChunks(this.requireStore().listChunksByDoc(document.id))
+    if (text.trim().length === 0) {
+      const detail = sourceFailures.length > 0
+        ? sourceFailures.join('; ')
+        : 'its source could not be parsed — check the document processor settings, or re-import the file'
+      const error = new Error(`document "${document.title}" has no source text to reindex (${detail})`)
+      throw sourceErrors.some(attemptsExhausted) ? markAttemptsExhausted(error) : error
+    }
+    if (document.processing !== undefined) {
+      try {
+        const parsed = await this.artifacts.load(document.baseId, document.id, document.processing)
+        if (parsed.text === text) return { text, processed: { text, parsed, processing: {
+          ...document.processing, reused: true,
+          warnings: [...document.processing.warnings.filter(warning => warning.code !== 'source_unavailable'),
+            { code: 'source_unavailable', message: 'Could not reparse the source; previous evidence was retained.' }],
+        } } }
+      } catch { /* Legacy text remains readable even when an artifact is lost. */ }
+    }
+    return { text }
+  }
+
+  /** Reindexing a tracked directory is the same operation as re-importing its
+   * source: one source identity, one diff engine, and one truthful result. */
+  private async rescanDirectory(document: KnowledgeDocument): Promise<ReindexDocumentResult> {
+    const sync = await this.syncDirectorySource(document, document.sourcePath!, 'synced')
+    const current = this.requireStore().getDocument(document.id) ?? document
+    return { ...current, sync }
+  }
+
+  private readonly folderSyncAgain = new Set<string>()
+  private folderSyncJobs=new Map<string,{jobId:string;sourceId:string;baseId:string;state:'running'|'complete'|'failed';result?:DirectorySyncResult;error?:string}>()
+  startFolderSync(sourceId:string):{jobId:string}{
+    const store=this.requireStore(),document=store.getDocument(sourceId)
+    if(!document||!store.getBase(document.baseId))throw new NotFoundError('folder not found')
+    if(document.sourceType!=='directory'||!document.sourcePath)throw new DirectorySourceError('source_path_conflict','Sync requires a folder with a source path')
+    const existing=[...this.folderSyncJobs.values()].find(job=>job.sourceId===sourceId&&job.state==='running')
+    if(existing){this.folderSyncAgain.add(sourceId);return {jobId:existing.jobId}}
+    for(const [key,job] of this.folderSyncJobs)if(this.folderSyncJobs.size>=64&&job.state!=='running')this.folderSyncJobs.delete(key)
+    if(this.folderSyncJobs.size>=64)throw new DirectorySourceError('source_path_conflict','Too many active folder sync jobs; wait for one to finish')
+    for(const activeId of this.syncingRoots){
+      if(activeId===sourceId)continue
+      const active=store.getDocument(activeId)
+      if(active?.baseId!==document.baseId||!active.sourcePath)continue
+      const inside=(parent:string,child:string)=>{const path=relative(parent,child);return path===''||!isAbsolute(path)&&!/^\.\.(?:[\\/]|$)/.test(path)}
+      if(inside(active.sourcePath,document.sourcePath)||inside(document.sourcePath,active.sourcePath))throw new DirectorySourceError('source_path_conflict','An overlapping source folder is already synchronizing')
+    }
+    const jobId=crypto.randomUUID(),job:{jobId:string;sourceId:string;baseId:string;state:'running'|'complete'|'failed';result?:DirectorySyncResult;error?:string}={jobId,sourceId,baseId:document.baseId,state:'running'}
+    this.folderSyncJobs.set(jobId,job)
+    void (async () => {
+      // Join an automatic/current import instead of canceling or duplicating it.
+      while (this.syncingRoots.has(sourceId)) {
+        if(this.shuttingDown || !store.getBase(document.baseId))throw new Error('Folder synchronization stopped')
+        await new Promise(resolve=>setTimeout(resolve,100))
+      }
+      do {
+        this.folderSyncAgain.delete(sourceId)
+        if(this.shuttingDown || !store.getBase(document.baseId))throw new Error('Folder synchronization stopped')
+        const result=await this.syncDirectorySource(document,document.sourcePath!,'synced',true)
+        job.result={...result,items:result.items.filter(item=>item.action==='failed').slice(0,1000)}
+      } while(this.folderSyncAgain.has(sourceId))
+      job.state='complete'
+    })().catch(error=>{job.error=error instanceof Error?error.message:String(error);job.state='failed'})
+      .finally(()=>this.folderSyncAgain.delete(sourceId))
+    return {jobId}
+  }
+  folderSyncStatus(jobId:string){
+    const job=this.folderSyncJobs.get(jobId)
+    if(!job||!this.requireStore().getBase(job.baseId))throw new NotFoundError('folder sync job not found')
+    return structuredClone(job)
+  }
+
+  private readonly directoryWriteBatches = new Map<string, number>()
+
+  /** Synchronize a single source-root against disk. Root validation happens
+   * before any write; child failures are preserved as itemized `partial`
+   * outcomes instead of being rethrown after useful work succeeds. */
+  private readonly stagedRecoveryRoots = new Set<string>()
+  private async resumeStagedDirectoryImports(): Promise<void> {
+    const store=this.requireStore()
+    const roots=store.listBases().flatMap(base=>store.listDocuments(base.id,{includeRawText:false}))
+      .filter(doc=>doc.sourceType==='directory'&&doc.sourcePath&&doc.stagedImport)
+    // Register the entire recovery inventory before any asynchronous read so
+    // embedding recovery cannot overtake files that have not been extracted.
+    roots.forEach(root=>{
+      this.recoveryParsing.add(root.id)
+      if(this.getConfig().resumeInterruptedOnStartup && root.stagedImport!.startupAttempts<3)this.stagedRecoveryRoots.add(root.id)
+    })
+    await Promise.allSettled(roots.map(async root=>{
+      try {
+        if(!this.getConfig().resumeInterruptedOnStartup || root.stagedImport!.startupAttempts>=3) {
+          const {stagedImport:_pending,...rest}=root
+          await store.putDocument({...rest,embeddingError:'Folder import was interrupted; synchronize it manually to resume.',errorCode:'interrupted'})
+          return
+        }
+        const resumed={...root,stagedImport:{startupAttempts:root.stagedImport!.startupAttempts+1}}
+        await store.putDocument(resumed)
+        await this.syncDirectorySource(resumed,root.sourcePath!,'synced')
+      } catch(error) {this.ctx.logger.warn(`knowledge: staged folder recovery pending: ${String(error)}`)}
+      finally {this.recoveryParsing.delete(root.id)}
+    }))
+  }
+
+  private async syncDirectorySource(
+    root: KnowledgeDocument,
+    sourcePath: string,
+    mode: 'created' | 'synced',
+    checkLegacySettings = false,
+  ): Promise<DirectorySyncResult> {
+    if (this.syncingRoots.has(root.id)) throw new Error('Source folder is already synchronizing')
+    this.syncingRoots.add(root.id)
+    this.directoryWriteBatches.set(root.baseId, (this.directoryWriteBatches.get(root.baseId) ?? 0) + 1)
+    try {
+      const stagedRoot={...root,stagedImport:{startupAttempts:this.recoveryParsing.has(root.id)?root.stagedImport?.startupAttempts??0:0}}
+      await this.requireStore().putDocument(stagedRoot)
+      const result=await this.performDirectorySync(stagedRoot, sourcePath, mode, checkLegacySettings)
+      const current=this.requireStore().getDocument(root.id)
+      if(current) {
+        const {stagedImport:_pending,...settled}=current
+        if(settled.errorCode==='interrupted') {const {embeddingError:_error,errorCode:_code,...clean}=settled;await this.requireStore().putDocument(clean)}
+        else await this.requireStore().putDocument(settled)
+      }
+      return result
+    }
+    finally {
+      this.syncingRoots.delete(root.id)
+      const remaining = (this.directoryWriteBatches.get(root.baseId) ?? 1) - 1
+      if (remaining > 0) this.directoryWriteBatches.set(root.baseId, remaining)
+      else { this.directoryWriteBatches.delete(root.baseId); await this.touchBase(root.baseId) }
+    }
+  }
+
+  private async performDirectorySync(root: KnowledgeDocument, sourcePath: string, mode: 'created' | 'synced', checkLegacySettings = false): Promise<DirectorySyncResult> {
+    const store = this.requireStore()
+    if (root.sourceType !== 'directory') throw new Error('directory sync requires a directory source')
+    const canonicalSource = await this.canonicalDirectoryPath(sourcePath)
+    try {
+      await readdir(canonicalSource, { withFileTypes: true })
+    } catch (error) {
+      throw new Error(`source directory is unreadable: ${error instanceof Error ? error.message : String(error)}`)
+    }
+
+    const allDocuments = store.listDocuments(root.baseId, { includeRawText: false })
+    const childrenByParent = new Map<string, KnowledgeDocument[]>()
+    for (const document of allDocuments) {
+      if (document.parentDirectoryId === undefined) continue
+      const children = childrenByParent.get(document.parentDirectoryId) ?? []
+      children.push(document)
+      childrenByParent.set(document.parentDirectoryId, children)
+    }
+    const items: DirectorySyncItem[] = []
+    const stagedJobs: StagedDirectoryJob[] = []
+    this.processingMeter.start(root.id, root.baseId, true)
+    this.indexing.set(root.id, { baseId: root.baseId, title: root.title, phase: 'parsing', total: 0, progress: 0 })
+    try {
+      this.folderOcrSources.set(root.id, null)
+      const ocrSources = new Set<string>()
+      // Inventory supported files before parsing so the denominator includes queued work.
+      const countFiles = async (path: string, depth: number): Promise<void> => {
+        if (this.shuttingDown || !store.getBase(root.baseId)) throw new Error('Folder synchronization stopped')
+        if (depth > DIRECTORY_MAX_DEPTH) return
+        let entries
+        try { entries = await readdir(path, { withFileTypes: true }) } catch { return }
+        for (const entry of entries) {
+          if (entry.isDirectory()) await countFiles(join(path, entry.name), depth + 1)
+          else if (entry.isFile() && DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+            this.processingMeter.add(root.id)
+            if (!/\.(?:md|markdown|mdx|txt|csv|json|log|html?|xml)$/i.test(entry.name)) ocrSources.add(join(path, entry.name))
+          }
+        }
+      }
+      await countFiles(canonicalSource, 0)
+      this.folderOcrSources.set(root.id, ocrSources)
+      this.processingMeter.discovered(root.id)
+      const boundRoot = await this.bindDocumentSourcePath(root, canonicalSource)
+      items.push({
+        relativePath: '.',
+        kind: 'directory',
+        documentId: boundRoot.id,
+        action: mode === 'created' ? 'created' : boundRoot === root ? 'unchanged' : 'updated',
+      })
+      await this.syncDirectoryNode({
+        meterId: root.id,
+        checkLegacySettings,
+        rootPath: canonicalSource,
+        diskPath: canonicalSource,
+        directory: boundRoot,
+        depth: 0,
+        childrenByParent,
+        items,
+        stagedJobs,
+      })
+      await this.runDirectoryStages(root, stagedJobs, items)
+      const current = store.getDocument(root.id)
+      if (current !== undefined) await store.putDocument({ ...current, updatedAt: Date.now() })
+      await this.touchBase(root.baseId)
+    } finally {
+      this.folderOcrSources.delete(root.id)
+      this.indexing.delete(root.id)
+      this.processingMeter.finish(root.id)
+    }
+    const count = (action: DirectorySyncItem['action']): number => items.filter(item => item.action === action).length
+    const failed = count('failed')
+    const changed = count('created') + count('updated') + count('deleted')
+    return {
+      sourceId: root.id,
+      status: failed > 0 ? 'partial' : changed === 0 ? 'unchanged' : 'synced',
+      created: count('created'),
+      updated: count('updated'),
+      unchanged: count('unchanged'),
+      deleted: count('deleted'),
+      failed,
+      items,
+    }
+  }
+
+  private async runDirectoryStages(root: KnowledgeDocument, jobs: StagedDirectoryJob[], items: DirectorySyncItem[]): Promise<void> {
+    const checkpoints = await ImportCheckpoints.create()
+    const controller = new AbortController()
+    this.processingControllers.set(root.id,controller)
+    const config = this.getConfigFor(root.baseId)
+    const skipped = new Set<string>()
+    const sourceSizes = new Map<string, number>()
+    const lightweightImport = jobs.every(job => /\.(?:md|markdown|mdx|txt|csv|json|html?|xml)$/i.test(job.fileName))
+    const largeTextChunks = new ProcessingQueue(this.processingConcurrency)
+    let missingVectors: ReadonlySet<string> = new Set()
+    const check = () => {
+      controller.signal.throwIfAborted()
+      if (this.shuttingDown || !this.requireStore().getBase(root.baseId) || !this.requireStore().getDocument(root.id))
+        controller.abort(new Error('Folder synchronization stopped'))
+      controller.signal.throwIfAborted()
+    }
+    const bytes = async (job:StagedDirectoryJob) => {
+      check()
+      const base=this.requireStore().getBase(root.baseId)
+      if(base?.storageMode==='external' && base.externalPath)await externalFile(base.externalPath,job.id)
+      return readFile(job.id)
+    }
+    try {
+      await runImportStages({items:jobs,signal:controller.signal,
+        concurrency:stage=>stage==='ocr'?this.processingConcurrency:stage==='parsing'?Math.max(2,this.processingConcurrency):stage==='chunking'?(lightweightImport?128:this.processingConcurrency*4):8,
+        progress:progress=>{this.importStageProgress.set(root.id,{...progress,baseId:root.baseId})},
+        enterStage:async stage=>{
+          check()
+          if(stage==='chunking') {
+            // Extraction is complete. Let the bounded background vector lanes
+            // consume committed documents while CPU workers publish more chunks.
+            this.importStageProgress.set(root.id,{stage,total:jobs.length,completed:0,running:0,failed:0,baseId:root.baseId})
+            this.recoveryParsing.delete(root.id)
+            this.folderOcrSources.set(root.id,new Set())
+            return
+          }
+          if(stage!=='vectorization')return
+          // Drain the overlapping pass and catch publications made after its
+          // inventory before allowing optional idle enrichment to start.
+          this.importStageProgress.set(root.id,{stage,total:jobs.length,completed:0,running:0,failed:0,baseId:root.baseId})
+          this.recoveryParsing.delete(root.id)
+          this.folderOcrSources.set(root.id,new Set())
+          this.indexing.delete(root.id)
+          if(!embeddingKey(this.getConfigFor(root.baseId)))return
+          await this.backfillBaseEmbeddings(root.baseId)
+          while(this.embeddingBackfills.has(root.baseId)) {check();await new Promise(resolve=>setTimeout(resolve,50))}
+          // A pre-existing pass may have inventoried before this import. Its
+          // missing-vector pass is idempotent and reuses completed vectors.
+          await this.backfillBaseEmbeddings(root.baseId)
+          missingVectors=this.requireStore().docChunkStatus(root.baseId,embeddingKey(this.getConfigFor(root.baseId))).missingEmbedding
+        },
+        execute:async(stage,job,signal)=>{
+          check()
+          if(stage==='ocr') {
+            const fileStat=await stat(job.id),old=job.existing
+            sourceSizes.set(job.id,fileStat.size)
+            const signature=`${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+            if(old && !old.incomplete && !old.embeddingError && old.sourceSignature===signature && old.indexingSettingsFingerprint===indexingSettingsFingerprint(config)) {skipped.add(job.id);return}
+            const source=await bytes(job)
+            if(old?.processing?.sourceHash===createHash('sha256').update(source).digest('hex') && old.processing.optionsFingerprint===processorFingerprint(config)) {
+              try {await this.artifacts.load(old.baseId,old.id,old.processing);skipped.add(job.id);return} catch { /* Missing artifacts need fresh extraction. */ }
+            }
+            const output=await retryDocument(()=>extractDocumentContent({visionHost:this.ctx,bytes:source,fileName:job.fileName,config,signal}),{signal})
+            await checkpoints.save(job.id,'ocr',output)
+          } else if(stage==='parsing') {
+            if(skipped.has(job.id))return
+            const output=await checkpoints.load(job.id,'ocr'),source=await bytes(job)
+            if(createHash('sha256').update(source).digest('hex')!==output.document.sourceHash)throw new Error('Source changed between OCR and parsing')
+            const enriched=await enrichDocumentContent({bytes:source,fileName:job.fileName,config,signal,structureV3:this.structureV3,managedCaption:this.managedCaption},output)
+            await checkpoints.save(job.id,'parsing',enriched)
+            await checkpoints.remove(job.id,'ocr')
+          } else if(stage==='chunking') {
+            const publish = async () => {
+              const output=skipped.has(job.id)?null:await checkpoints.load(job.id,'parsing')
+              await this.preparedImport.run(output,job.run)
+              if(output)await checkpoints.remove(job.id,'parsing')
+            }
+            // Fill the 128-document writer batch for small text files without
+            // allowing equally many large texts to retain chunks and artifacts.
+            if(lightweightImport && (sourceSizes.get(job.id) ?? Infinity)>256*1024) await largeTextChunks.run(publish,signal)
+            else await publish()
+          } else {
+            const documentId=job.documentId(),document=documentId?this.requireStore().getDocument(documentId):undefined
+            if(!document || document.incomplete)throw new Error('Document did not complete publication')
+            if(document.embeddingError)throw new Error(document.embeddingError)
+            if(embeddingKey(this.getConfigFor(root.baseId)) && missingVectors.has(document.id))throw new Error('Document has missing embeddings')
+          }
+        },
+        failure:failure=>{
+          const job=jobs.find(job=>job.id===failure.id)!
+          if(failure.stage==='chunking' && items.some(item=>item.relativePath===job.relativePath && item.action==='failed'))return
+          const detail=this.directoryItemError(failure.error)
+          items.push({relativePath:job.relativePath,kind:'file',documentId:job.documentId(),action:'failed',error:detail})
+          if(failure.stage!=='vectorization') {
+            this.processingMeter.begin(root.id)
+            this.processingMeter.settle(root.id,'failed',{documentId:job.documentId(),title:job.relativePath,code:detail.code,message:detail.message})
+          }
+        },
+      })
+    } finally {
+      this.importStageProgress.delete(root.id)
+      if(this.processingControllers.get(root.id)===controller)this.processingControllers.delete(root.id)
+      await checkpoints.close()
+    }
+  }
+
+  private async bindDocumentSourcePath(document: KnowledgeDocument, sourcePath: string): Promise<KnowledgeDocument> {
+    if (document.sourcePath === sourcePath) return document
+    const current = this.requireStore().getDocument(document.id)
+    if (!current) throw new Error('Document was deleted while binding its source')
+    const next = { ...current, sourcePath, updatedAt: Date.now() }
+    await this.requireStore().putDocument(next)
+    return next
+  }
+
+  private directoryItemError(error: unknown): { code: string; message: string } {
+    if (error instanceof DirectorySourceError) return { code: error.code, message: error.message }
+    return {
+      code: 'sync_failed',
+      message: error instanceof Error ? error.message : String(error),
+    }
+  }
+
+  /** Resolve a direct child by its physical source path. A legacy child can be
+   * adopted only when its name and kind are unique; two candidates are an
+   * explicit ambiguity, never a first-match guess. */
+  private directoryChildKey(child: KnowledgeDocument): string {
+    return child.sourcePath !== undefined
+      ? `${child.sourceType}:path:${this.sourcePathKey(child.sourcePath)}`
+      : `${child.sourceType}:name:${child.sourceType === 'directory' ? child.title : child.fileName ?? child.title}`
+  }
+
+  private resolveDirectoryChild(
+    children: ReadonlyMap<string, readonly KnowledgeDocument[]>,
+    kind: 'file' | 'directory', diskPath: string, name: string,
+  ): { document?: KnowledgeDocument; ambiguous?: readonly KnowledgeDocument[] } {
+    const exact = children.get(`${kind}:path:${this.sourcePathKey(join(diskPath, name))}`) ?? []
+    if (exact.length > 1) return { ambiguous: exact }
+    if (exact.length === 1) return { document: exact[0] }
+    const legacy = children.get(`${kind}:name:${name}`) ?? []
+    if (legacy.length > 1) return { ambiguous: legacy }
+    return legacy.length === 1 ? { document: legacy[0] } : {}
+  }
+
+  private async syncDirectoryNode(args: {
+    checkLegacySettings?: boolean
+    meterId: string
+    rootPath: string
+    diskPath: string
+    directory: KnowledgeDocument
+    depth: number
+    childrenByParent: Map<string, KnowledgeDocument[]>
+    items: DirectorySyncItem[]
+    stagedJobs: StagedDirectoryJob[]
+  }): Promise<void> {
+    const { meterId, rootPath, diskPath, directory, depth, childrenByParent, items, checkLegacySettings, stagedJobs } = args
+    const store = this.requireStore()
+    if (this.shuttingDown || !store.getBase(directory.baseId)) throw new Error('Folder synchronization stopped')
+    if (store.getBase(directory.baseId)?.storageMode === 'external') await readableRoot(rootPath)
+    if (depth > DIRECTORY_MAX_DEPTH) {
+      items.push({
+        relativePath: this.relativeSourcePath(rootPath, diskPath),
+        kind: 'directory',
+        documentId: directory.id,
+        action: 'failed',
+        error: { code: 'max_depth', message: `directory depth exceeds the ${DIRECTORY_MAX_DEPTH} level limit` },
+      })
+      return
+    }
+    let entries
+    try {
+      entries = await readdir(diskPath, { withFileTypes: true })
+    } catch (error) {
+      items.push({
+        relativePath: this.relativeSourcePath(rootPath, diskPath),
+        kind: 'directory',
+        documentId: directory.id,
+        action: 'failed',
+        error: this.directoryItemError(error),
+      })
+      return
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name))
+    const entriesByName = new Map(entries.map(entry => [entry.name, entry]))
+    let children = [...(childrenByParent.get(directory.id) ?? [])]
+
+    // Remove only direct, path-bound children whose source really disappeared
+    // or changed kind. User-created/legacy children with no source path are
+    // retained until a unique disk match lets the sync adopt them safely.
+    for (const child of [...children]) {
+      if (child.sourcePath === undefined || this.sourcePathKey(dirname(child.sourcePath)) !== this.sourcePathKey(diskPath)) continue
+      const entry = entriesByName.get(basename(child.sourcePath))
+      const actualKind = entry?.isDirectory() === true ? 'directory' : entry?.isFile() === true ? 'file' : undefined
+      const expectedKind = child.sourceType === 'directory' ? 'directory' : child.sourceType === 'file' ? 'file' : undefined
+      if (expectedKind === undefined || (actualKind === expectedKind) || actualKind === undefined && entry !== undefined) continue
+      try {
+        // Root loss is a disconnection, never evidence of mass deletion.
+        await readableRoot(rootPath)
+        await this.deleteTrackedSyncSubtree(child, rootPath, items)
+        children = children.filter(candidate => candidate.id !== child.id)
+        childrenByParent.set(directory.id, children)
+      } catch (error) {
+        items.push({
+          relativePath: this.relativeSourcePath(rootPath, child.sourcePath),
+          kind: expectedKind,
+          documentId: child.id,
+          action: 'failed',
+          error: this.directoryItemError(error),
+        })
+      }
+    }
+
+    // Index sibling identities once; scanning every sibling for every file is
+    // quadratic for flat libraries. Keep only headers in the retained tree.
+    const childPositions = new Map(children.map((child, index) => [child.id, index]))
+    const childLookup = new Map<string, KnowledgeDocument[]>()
+    const remember = (document: KnowledgeDocument): void => {
+      const { rawText: _rawText, ...header } = document
+      const key = this.directoryChildKey(header)
+      const matches = childLookup.get(key) ?? []
+      if (!matches.some(child => child.id === header.id)) matches.push(header)
+      childLookup.set(key, matches)
+    }
+    children.forEach(remember)
+    // One rolling window spans the whole source tree, including sibling folders.
+    for (const entry of entries) {
+      if (this.shuttingDown || store.getBase(directory.baseId) === undefined || store.getDocument(directory.id) === undefined) {
+        throw new Error('directory sync canceled: source or knowledge base was deleted')
+      }
+      const fullPath = join(diskPath, entry.name)
+      const relativePath = this.relativeSourcePath(rootPath, fullPath)
+      if (entry.isDirectory()) {
+        const resolved = this.resolveDirectoryChild(childLookup, 'directory', diskPath, entry.name)
+        if (resolved.ambiguous !== undefined) {
+          items.push({
+            relativePath,
+            kind: 'directory',
+            action: 'failed',
+            error: {
+              code: 'ambiguous_source',
+              message: `multiple stored directory items match ${relativePath}`,
+            },
+          })
+          continue
+        }
+        try {
+          let child = resolved.document
+          let action: DirectorySyncItem['action'] = 'unchanged'
+          if (child === undefined) {
+            child = await this.createDirectory(directory.baseId, entry.name, directory.id)
+            action = 'created'
+            childPositions.set(child.id, children.length)
+            children.push(child)
+            childrenByParent.set(directory.id, children)
+          }
+          const bound = await this.bindDocumentSourcePath(child, fullPath)
+          remember(bound)
+          if (bound !== child && action === 'unchanged') action = 'updated'
+          const childIndex = childPositions.get(child.id)
+          if (childIndex !== undefined) children[childIndex] = bound
+          items.push({ relativePath, kind: 'directory', documentId: bound.id, action })
+          await this.syncDirectoryNode({ meterId, checkLegacySettings, rootPath, diskPath: fullPath, directory: bound, depth: depth + 1, childrenByParent, items, stagedJobs })
+        } catch (error) {
+          items.push({ relativePath, kind: 'directory', action: 'failed', error: this.directoryItemError(error) })
+        }
+        continue
+      }
+      if (!entry.isFile() || !DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
+      const resolved = this.resolveDirectoryChild(childLookup, 'file', diskPath, entry.name)
+      if (resolved.ambiguous !== undefined) {
+        items.push({
+          relativePath,
+          kind: 'file',
+          action: 'failed',
+          error: { code: 'ambiguous_source', message: `multiple stored file items match ${relativePath}` },
+        })
+        continue
+      }
+      const lightFormat = /\.(?:md|markdown|txt|csv|json|html?|xml)$/i.test(entry.name)
+      const lightweight = lightFormat && (await stat(fullPath).catch(() => ({ size: Infinity }))).size <= 1024 ** 2
+      // More lightweight producers can fill RAM write batches while the shared
+      // parser gate retains its existing CPU/OCR limit. Heavy files stay capped.
+      let publishedId = resolved.document?.id
+      const runFile = () => this.documentAdmission.run(entry.name, async () => {
+        this.processingMeter.begin(meterId)
+        let outcome: 'processed' | 'skipped' | 'failed' = 'failed'
+        try {
+          await retryDocument(async () => {
+            const before = await stat(fullPath)
+            const beforeSignature = `${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`
+            let document = resolved.document
+            let action: DirectorySyncItem['action']
+            if (document === undefined) {
+              document = await this.ingestDirectoryFile(directory.baseId, directory.id, fullPath, entry.name)
+              action = 'created'
+              const { rawText: _rawText, ...header } = document
+              childPositions.set(header.id, children.length)
+              children.push(header)
+              remember(header)
+              childrenByParent.set(directory.id, children)
+            } else {
+              action = await this.syncDirectoryFile(document, fullPath, entry.name, checkLegacySettings)
+              const refreshed = this.requireStore().getDocument(document.id)
+              if (refreshed !== undefined) {
+                const documentIndex = childPositions.get(document.id)
+                const { rawText: _rawText, ...header } = refreshed
+                if (documentIndex !== undefined) children[documentIndex] = header
+                document = refreshed
+              }
+            }
+            if (store.getBase(directory.baseId)?.storageMode === 'external' && !document.incomplete && !document.embeddingError) {
+              const fileStat = await stat(fullPath)
+              const sourceSignature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+              const fresh = store.getDocument(document.id)
+              if (fresh && sourceSignature === beforeSignature && fresh.sourceSignature !== sourceSignature) await store.putDocument({ ...fresh, sourceSignature })
+            }
+            outcome = document.incomplete || document.embeddingError ? 'failed' : action === 'unchanged' ? 'skipped' : 'processed'
+            if (document.embeddingError) throw markAttemptsExhausted(new Error(document.embeddingError))
+            if (document.incomplete) throw new Error('Document processing did not finish')
+            publishedId = document.id
+            items.push({ relativePath, kind: 'file', documentId: document.id, action })
+          })
+        } catch (error) {
+          const detail = this.directoryItemError(error)
+          items.push({ relativePath, kind: 'file', documentId: resolved.document?.id, action: 'failed', error: detail })
+          this.processingMeter.settle(meterId, 'failed', { documentId: resolved.document?.id, title: relativePath, code: detail.code, message: detail.message })
+          throw error
+        }
+        this.processingMeter.settle(meterId, outcome)
+      }, undefined, !lightweight)
+      stagedJobs.push({id:fullPath,fileName:entry.name,relativePath,existing:resolved.document,run:runFile,documentId:()=>publishedId})
+    }
+  }
+
+  private async ingestDirectoryFile(baseId: string, parentDirectoryId: string, sourcePath: string, fileName: string): Promise<KnowledgeDocument> {
+    return this.ingestPathFile(baseId, sourcePath, fileName, parentDirectoryId)
+  }
+
+  /** Persist source/placeholder before parsing, so path imports recover just
+   * like uploads if the host stops during a long-running processor call. */
+  private async ingestPathFile(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
+    return this.documentAdmission.run(fileName, () => retryDocument(() => this.ingestPathFileAttempt(baseId, sourcePath, fileName, parentDirectoryId)))
+  }
+
+  private async ingestPathFileAttempt(baseId: string, sourcePath: string, fileName: string, parentDirectoryId?: string): Promise<KnowledgeDocument> {
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
+    const externalRoot = store.getBase(baseId)?.storageMode === 'external' ? store.getBase(baseId)?.externalPath : undefined
+    if (externalRoot) await externalFile(externalRoot, sourcePath)
+    const buffer = await readFile(sourcePath)
+    if (store.getBase(baseId) === undefined) throw new Error('knowledge base no longer exists')
+    const documentId = crypto.randomUUID()
+    const isExternal = store.getBase(baseId)?.storageMode === 'external'
+    const rawFilePath = isExternal ? undefined : await store.raw?.write(baseId, documentId, safeRawExtension(fileName), buffer)
+    const controller = new AbortController()
+    try {
+      if (store.getBase(baseId) === undefined) throw new NotFoundError('knowledge base no longer exists')
+      await store.putDocument({ id: documentId, baseId, title: fileName, fileName, sourceType: 'file',
+        sourcePath, rawFilePath, parentDirectoryId, charCount: 0, chunkCount: 0, createdAt: Date.now(), incomplete: true })
+      this.indexing.set(documentId, { baseId, title: fileName, phase: 'parsing', total: 0, progress: 0, controller })
+      const processed = await this.extractDocumentText({ baseId, documentId, bytes: buffer, fileName, signal: controller.signal })
+      return await this.ingestDocument({
+        baseId,
+        title: fileName,
+        sourceType: 'file',
+        fileName,
+        parentDirectoryId,
+        placeholderId: documentId,
+        processed,
+        rawFilePath,
+        sourcePath,
+        text: processed.text,
+      }, controller.signal)
+    } catch (error) {
+      // A published SQLite generation is authoritative even if DomainKV needs
+      // startup reconciliation. Never delete its referenced raw source.
+      if (!isMetadataWriteFailure(error) && (error as { published?: boolean }).published !== true) {
+        if (store.getDocument(documentId) !== undefined) await this.deleteDocumentRecursive(documentId)
+        else if (rawFilePath !== undefined) await store.raw?.delete(rawFilePath)
+      }
+      throw error
+    } finally { this.indexing.delete(documentId); this.processingProgress.delete(documentId) }
+  }
+
+  /** Returns unchanged only when the live bytes exactly match the stored raw
+   * snapshot. A changed source is parsed once up front so an invalid on-disk
+   * replacement cannot be silently treated as a successful old-snapshot
+   * rebuild. */
+  private async syncDirectoryFile(document: KnowledgeDocument, sourcePath: string, fileName: string, checkLegacySettings = false): Promise<'updated' | 'unchanged'> {
+    this.syncClaims.add(document.id)
+    try { return await this.syncDirectoryFileClaimed(document, sourcePath, fileName, checkLegacySettings) }
+    finally { this.syncClaims.delete(document.id) }
+  }
+
+  private async syncDirectoryFileClaimed(document: KnowledgeDocument, sourcePath: string, fileName: string, checkLegacySettings: boolean): Promise<'updated' | 'unchanged'> {
+    // Text reconciliation can overlap vectorization; serialize this file and
+    // re-read its committed generation instead of reporting a false failure.
+    if (/\.(?:md|markdown|mdx|txt|csv|json|log|html?|xml)$/i.test(fileName)) {
+      while (this.indexing.has(document.id)) {
+        if (this.shuttingDown) throw new Error('Folder synchronization stopped')
+        await new Promise<void>(resolve => setTimeout(resolve, 50))
+      }
+      document = this.requireStore().getDocument(document.id) ?? document
+    }
+    if (this.indexing.has(document.id)) throw new Error(`"${document.title}" is still being indexed — try again when it finishes`)
+    const store = this.requireStore()
+    const fileStat = await stat(sourcePath)
+    const signature = `${fileStat.dev}:${fileStat.ino}:${fileStat.size}:${fileStat.mtimeMs}:${fileStat.ctimeMs}`
+    const isExternal = store.getBase(document.baseId)?.storageMode === 'external'
+    const config=this.getConfigFor(document.baseId)
+    const fingerprint=indexingSettingsFingerprint(config)
+    // Turning retention off needs metadata/file cleanup, not new parsing or vectors.
+    let settingsMatch=document.indexingSettingsFingerprint!==undefined ? document.indexingSettingsFingerprint===fingerprint||(!config.keepInternalMarkdown&&document.indexingSettingsFingerprint===indexingSettingsFingerprint({...config,keepInternalMarkdown:true})) : !checkLegacySettings&&!(config.keepInternalMarkdown&&!document.markdownRevision)
+    const finish=async(result:'updated'|'unchanged'):Promise<'updated'|'unchanged'>=>{
+      if(config.keepInternalMarkdown)return result
+      // Always purge: older revisions can exist after the current pointer was
+      // cleared by an earlier reindex. A failed purge remains retryable by Sync.
+      const removed=await this.markdownSnapshots.clearDocument(document.baseId,document.id)
+      const current=store.getDocument(document.id)
+      if(!current||!store.getBase(document.baseId))throw new NotFoundError('document no longer exists')
+      if(current.markdownRevision||current.indexingSettingsFingerprint!==fingerprint){
+        const {markdownRevision:_removed,...rest}=current
+        await store.putDocument({...rest,indexingSettingsFingerprint:fingerprint})
+        return 'updated'
+      }
+      return removed?'updated':result
+    }
+    if(settingsMatch&&config.keepInternalMarkdown&&(!document.markdownRevision||!await this.markdownSnapshots.has(document.baseId,document.id,document.markdownRevision)))settingsMatch=false
+    if (settingsMatch && isExternal && document.sourceSignature === signature && !document.incomplete && !document.embeddingError) return finish('unchanged')
+    const buffer = await readFile(sourcePath)
+    const bound = await this.bindDocumentSourcePath(document, sourcePath)
+    const stored = bound.rawFilePath !== undefined ? await store.raw?.read(bound.rawFilePath) : undefined
+    const unchanged = stored !== undefined && stored !== null && stored.byteLength > 0 ? Buffer.from(stored).equals(buffer) : bound.processing?.sourceHash === createHash('sha256').update(buffer).digest('hex')
+    if (settingsMatch && unchanged && !bound.incomplete && !bound.embeddingError) return finish(bound === document ? 'unchanged' : 'updated')
+    if (unchanged && bound.processing?.optionsFingerprint === processorFingerprint(config)) {
+      // A settings-only reconciliation reuses validated parser/OCR evidence.
+      // Chunking and vectors are rebuilt under the current settings below.
+      await this.reindexDocument(bound.id, { mode: 'rechunk' })
+      return finish('updated')
+    }
+    // The unified source reader validates and parses once. A changed live
+    // source must not silently fall back to the previous snapshot.
+    await this.reindexDocument(bound.id, { mode: 'reparse', strictSource: true })
+    return finish('updated')
+  }
+
+  private async deleteTrackedSyncSubtree(document: KnowledgeDocument, rootPath: string, items: DirectorySyncItem[]): Promise<void> {
+    const store = this.requireStore()
+    const byParent = new Map<string, KnowledgeDocument[]>()
+    for (const candidate of store.listDocuments(document.baseId, { includeRawText: false })) {
+      if (candidate.parentDirectoryId === undefined) continue
+      const children = byParent.get(candidate.parentDirectoryId) ?? []
+      children.push(candidate)
+      byParent.set(candidate.parentDirectoryId, children)
+    }
+    const nodes: KnowledgeDocument[] = []
+    const collect = (node: KnowledgeDocument): void => {
+      nodes.push(node)
+      for (const child of byParent.get(node.id) ?? []) collect(child)
+    }
+    collect(document)
+    await this.deleteDocumentRecursive(document.id)
+    for (const node of nodes) {
+      items.push({
+        relativePath: node.sourcePath !== undefined ? this.relativeSourcePath(rootPath, node.sourcePath) : node.title,
+        kind: node.sourceType === 'directory' ? 'directory' : 'file',
+        documentId: node.id,
+        action: 'deleted',
+      })
+    }
+  }
+
+  /** Reindex a whole base synchronously. Collects per-root failures instead of
+   *  aborting the sweep: one unreadable source (a moved folder, an unmounted
+   *  drive) must not stop the remaining documents, exactly as the background job
+   *  and the bulk endpoint already behave. */
+  async reindexBase(baseId: string): Promise<{ reindexed: number; skipped: number; failed: number; items: DirectorySyncItem[] }> {
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
+    const ids = store.listDocuments(baseId, { includeRawText: false }).map(doc => doc.id)
+    // Fold to outermost roots: a directory reindexes its subtree recursively,
+    // so its descendants must not be reindexed a second time as siblings.
+    let reindexed = 0
+    let skipped = 0
+    let failed = 0
+    const items: DirectorySyncItem[] = []
+    for (const id of this.outermostSelectedIds(ids)) {
+      // In-flight documents are skipped (Cherry's REINDEX_ALLOWED_STATUSES),
+      // never failed: a base reindex triggered while an import is running must
+      // not abort the whole sweep because one row is busy.
+      if (this.indexing.has(id)) {
+        skipped += 1
+        continue
+      }
+      try {
+        const result = await this.reindexDocument(id)
+        reindexed += 1
+        if (result.sync !== undefined) {
+          items.push(...result.sync.items)
+          failed += result.sync.failed
+        }
+      } catch (error) {
+        failed += 1
+        const document = store.getDocument(id)
+        items.push({
+          relativePath: document?.title ?? id,
+          kind: document?.sourceType === 'directory' ? 'directory' : 'file',
+          documentId: id,
+          action: 'failed',
+          error: this.directoryItemError(error),
+        })
+      }
+    }
+    return { reindexed, skipped, failed, items }
+  }
+
+  /** Start re-embedding a whole base as a cancellable background job.
+   *
+   *  `total` counts the folded SOURCE ROOTS the job walks, which is the same unit
+   *  as `imported`, so `imported / total` stays meaningful. `documentTotal` is the
+   *  size of the base in documents, because a client that compares the job's
+   *  total with its document count would otherwise read one directory holding 200
+   *  files as a single unit of work. */
+  async startReindexBase(baseId: string): Promise<{ jobId: string; total: number; documentTotal: number }> {
+    const store = this.requireStore()
+    if (store.getBase(baseId) === undefined) throw new Error(`knowledge base not found: ${baseId}`)
+    const documents = store.listDocuments(baseId, { includeRawText: false })
+    const roots = this.outermostSelectedIds(documents.map(document => document.id))
+    const jobId = crypto.randomUUID()
+    this.pruneJobs()
+    this.jobs.set(jobId, {
+      baseId,
+      kind: 'reindex',
+      cancelled: false,
+      imported: 0,
+      skipped: 0,
+      total: roots.length,
+      current: '',
+      errors: [],
+      done: false,
+    })
+    this.runBackground('reindex job', this.runReindexJob(jobId, baseId))
+    return { jobId, total: roots.length, documentTotal: documents.length }
+  }
+
+  /** Progress snapshot of an active (or just-finished) reindex job. */
+  reindexJobStatus(jobId: string): BackgroundJob | undefined {
+    return this.jobs.get(jobId)
+  }
+
+  cancelReindexJob(jobId: string): void {
+    const job = this.jobs.get(jobId)
+    if (job !== undefined && !job.done) job.cancelled = true
+  }
+
+  private async runReindexJob(jobId: string, baseId: string): Promise<void> {
+    const job = this.jobs.get(jobId)
+    if (job === undefined) return
+    const store = this.requireStore()
+    const roots = this.outermostSelectedIds(store.listDocuments(baseId, { includeRawText: false }).map(document => document.id))
+    for (const id of roots) {
+      if (job.cancelled) break
+      const doc = store.getDocument(id)
+      if (doc === undefined) continue
+      job.current = doc.title
+      // Manually-created folders have no live source identity. They remain
+      // organizational containers, not background-sync roots.
+      if (doc.sourceType === 'directory' && doc.sourcePath === undefined) {
+        job.skipped += 1
+        continue
+      }
+      if (this.indexing.has(doc.id)) {
+        job.skipped += 1
+        continue
+      }
+      try {
+        await this.reindexDocument(doc.id)
+        job.imported += 1
+      } catch (error) {
+        job.errors.push({ file: doc.title, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    job.done = true
+    job.current = ''
+  }
+
+  async reindexDocuments(ids: readonly string[]): Promise<ReindexDocumentsResult> {
+    const store = this.requireStore()
+    // Fold the selection to its outermost roots first (Cherry's
+    // `getOutermostSelectedItemIds`): a directory and one of its descendants
+    // in the same batch must not reindex the subtree twice, and each selected
+    // directory reindexes its whole subtree recursively. In-flight rows are
+    // skipped and counted so the UI can tell the user (Cherry's bulk gate).
+    let reindexed = 0
+    let skipped = 0
+    let failed = 0
+    const items: DirectorySyncItem[] = []
+    for (const id of this.outermostSelectedIds(ids)) {
+      const document = store.getDocument(id)
+      if (document === undefined) continue
+      if (this.indexing.has(id)) {
+        skipped += 1
+        continue
+      }
+      try {
+        const result = await this.reindexDocument(id)
+        reindexed += 1
+        if (result.sync !== undefined) {
+          items.push(...result.sync.items)
+          failed += result.sync.failed
+        }
+      } catch (error) {
+        failed += 1
+        items.push({
+          relativePath: document.title,
+          kind: document.sourceType === 'directory' ? 'directory' : 'file',
+          documentId: document.id,
+          action: 'failed',
+          error: this.directoryItemError(error),
+        })
+      }
+    }
+    return { reindexed, skipped, failed, items }
+  }
+
+  /** Delete a selection (folded to its outermost roots).
+   *
+   *  `deleted` is the number of DOCUMENTS removed, including the descendants of
+   *  a selected directory — the meaning it had before 4.0 folded the selection.
+   *  Counting folded roots instead made the confirmation ("delete these N rows")
+   *  and the result ("deleted: 1" for a directory holding 200 files) describe the
+   *  same action with different numbers. `roots` carries the folded count. */
+  async deleteDocuments(ids: readonly string[], options?: { recursive?: boolean }): Promise<{ deleted: number; roots: number }> {
+    const store = this.requireStore()
+    if (ids.length === 0) throw new Error('no documents selected')
+    // Fold to outermost roots so a directory and its selected descendants are
+    // not deleted twice. Preflight *all* roots before the first delete so a
+    // missing recursive confirmation can never produce a partial batch write.
+    const roots = this.assertDeleteImpacts(ids, options?.recursive === true)
+    const touched = new Set<string>()
+    let deleted = 0
+    let removedRoots = 0
+    for (const id of roots) {
+      const document = store.getDocument(id)
+      if (document === undefined) continue
+      // The preflight already walked each subtree; reuse it so the reported count
+      // matches what the confirmation showed.
+      const impact = this.getDeleteImpact(id)
+      deleted += impact.directories + impact.files
+      await this.deleteDocumentRecursive(id)
+      touched.add(document.baseId)
+      removedRoots += 1
+    }
+    // One updatedAt write per affected base, not per document.
+    for (const baseId of touched) await this.touchBase(baseId)
+    await this.reconcileAfterDelete()
+    return { deleted, roots: removedRoots }
+  }
+
+  /**
+   * Resolve inclusion metadata and title exclusions within the requested base
+   * scope. Exclusion-only requests leave docIds absent rather than enumerating
+   * every remaining document. An empty docIds array matches no documents.
+   */
+  private resolveSearchFilter(request: SearchRequest): RetrievalDocumentFilter | undefined {
+    const filter = request.filter
+    if (filter === undefined) return undefined
+    const { docIds, excludeDocIds, titleIncludes, titleExcludes, sourceTypes, updatedAfter, updatedBefore } = filter
+    // Presence is semantically distinct from absence: callers use an empty
+    // allow-list to mean "match no documents", never "remove the filter".
+    if (docIds !== undefined && docIds.length === 0) return { docIds: [] }
+    if (sourceTypes !== undefined && sourceTypes.length === 0) return { docIds: [] }
+    const hasDocIds = docIds !== undefined
+    const title = titleIncludes?.trim().toLowerCase()
+    const hasTitle = title !== undefined && title.length > 0
+    const hasTypes = sourceTypes !== undefined
+    const hasTime = updatedAfter !== undefined || updatedBefore !== undefined
+    const hasInclusion = hasDocIds || hasTitle || hasTypes || hasTime
+    const excludedTitles = [...new Set((titleExcludes ?? []).map(term => term.trim().toLowerCase()).filter(term => term.length > 0))]
+    const excluded = new Set(excludeDocIds)
+    if (!hasInclusion && excluded.size === 0 && excludedTitles.length === 0) return undefined
+    if (!hasInclusion && excludedTitles.length === 0) return { excludeDocIds: [...excluded] }
+
+    const store = this.requireStore()
+    const scope = request.baseId !== undefined
+      ? [request.baseId]
+      : request.baseIds !== undefined && request.baseIds.length > 0
+        ? [...request.baseIds]
+        : store.listBases().map(base => base.id)
+    const included = hasDocIds ? new Set(docIds) : undefined
+    const allowed = hasInclusion ? new Set<string>() : undefined
+    for (const baseId of scope) {
+      for (const doc of store.listDocuments(baseId, { includeRawText: false })) {
+        const normalizedTitle = doc.title.toLowerCase()
+        if (excludedTitles.some(term => normalizedTitle.includes(term))) excluded.add(doc.id)
+        if (allowed === undefined || excluded.has(doc.id)) continue
+        if (included !== undefined && !included.has(doc.id)) continue
+        if (hasTitle && !normalizedTitle.includes(title!)) continue
+        if (hasTypes && !sourceTypes!.includes(doc.sourceType)) continue
+        if (updatedAfter !== undefined && (doc.updatedAt ?? doc.createdAt) < updatedAfter) continue
+        if (updatedBefore !== undefined && (doc.updatedAt ?? doc.createdAt) > updatedBefore) continue
+        allowed.add(doc.id)
+      }
+    }
+    return {
+      ...(allowed !== undefined ? { docIds: [...allowed] } : {}),
+      ...(excluded.size > 0 ? { excludeDocIds: [...excluded] } : {}),
+    }
+  }
+
+  /**
+   * Fold a set of selected document ids to its outermost roots (Cherry's
+   * `getOutermostSelectedItemIds`): ids that are descendants of another
+   * selected id are dropped, so a directory plus one of its children in the
+   * same batch resolves to just the directory — the subtree is then handled
+   * once by the recursive operations.
+   */
+  private outermostSelectedIds(ids: readonly string[]): string[] {
+    const store = this.requireStore()
+    const selected = new Set(ids)
+    if (selected.size === 0) return []
+    const known = new Set<string>()
+    const childrenOf = new Map<string, string[]>()
+    for (const base of store.listBases()) {
+      for (const doc of store.listDocuments(base.id, { includeRawText: false })) {
+        known.add(doc.id)
+        const parent = doc.parentDirectoryId
+        if (parent === undefined) continue
+        const list = childrenOf.get(parent) ?? []
+        list.push(doc.id)
+        childrenOf.set(parent, list)
+      }
+    }
+    // A selected id is "inner" when any of its ancestors is also selected.
+    const inner = new Set<string>()
+    const walk = (docId: string, depth: number): void => {
+      if (depth > 0 && selected.has(docId)) inner.add(docId)
+      for (const child of childrenOf.get(docId) ?? []) walk(child, depth + 1)
+    }
+    for (const id of selected) if (known.has(id)) walk(id, 0)
+    return [...selected].filter(id => known.has(id) && !inner.has(id))
+  }
+
+  documentStatus(id:string){
+    const store=this.requireStore(),doc=store.getDocument(id)
+    if(!doc||!store.getBase(doc.baseId))throw new NotFoundError('document not found')
+    const active=this.indexing.get(id),key=embeddingKey(this.getConfigFor(doc.baseId))
+    const counts=store.docEmbeddingStatus?.(id,key)
+    const chunks=counts?[]:store.listChunksByDoc(id)
+    const count=counts?.count??chunks.length,embeddedCount=counts?.embeddedCount??chunks.filter(chunk=>chunk.embedding!==undefined&&(!key||chunk.embeddingModel===key)).length
+    return {embedded:count>0&&count===embeddedCount,status:doc.embeddingError?'failed':active?'processing':count>0&&count===embeddedCount?'completed':'pending',
+      chunkCount:doc.chunkCount,charCount:doc.charCount,tokenCount:doc.tokenCount,updatedAt:doc.updatedAt,
+      embeddingError:doc.embeddingError,errorCode:doc.errorCode,indexingPhase:active?.phase,indexingProgress:active?.progress}
+  }
+  async listDocumentsForUi(baseId:string):Promise<DocumentSummary[]> {
+    const store=this.requireStore(),key=embeddingKey(this.getConfigFor(baseId))
+    const summary=await (store.docChunkStatusAsync?.(baseId,key)??store.docChunkStatus(baseId,key))
+    return this.listDocuments(baseId,summary)
+  }
+  listDocuments(baseId: string, summary?:{withChunks:Set<string>;missingEmbedding:Set<string>}): DocumentSummary[] {
+    const store = this.requireStore()
+    // One grouped pass over the base's chunks (embedding is all-or-nothing per
+    // doc), avoiding a full chunk scan per document on every list.
+    const { withChunks, missingEmbedding } = summary ?? store.docChunkStatus(baseId, embeddingKey(this.getConfigFor(baseId)))
+    const allDocs = store.listDocuments(baseId, { includeRawText: false })
+    const childCount = new Map<string, number>()
+    for (const doc of allDocs) {
+      if (doc.parentDirectoryId !== undefined) {
+        childCount.set(doc.parentDirectoryId, (childCount.get(doc.parentDirectoryId) ?? 0) + 1)
+      }
+    }
+    return allDocs.map(doc => {
+      const embedded = withChunks.has(doc.id) && !missingEmbedding.has(doc.id)
+      const active = this.indexing.get(doc.id)
+      let status: 'pending' | 'processing' | 'completed' | 'failed' = 'pending'
+      if (doc.sourceType !== 'directory') {
+        if (doc.embeddingError !== undefined) status = 'failed'
+        else if (active !== undefined) status = 'processing'
+        else if (embedded) status = 'completed'
+      }
+      return {
+        ...(doc.markdownRevision?{markdownRevision:doc.markdownRevision}:{}),
+        id: doc.id,
+        baseId: doc.baseId,
+        title: doc.title,
+        sourceType: doc.sourceType,
+        fileName: doc.fileName,
+        url: doc.url,
+        ...(doc.parentDirectoryId !== undefined ? { parentDirectoryId: doc.parentDirectoryId } : {}),
+        ...(doc.sourcePath !== undefined ? { sourcePath: doc.sourcePath } : {}),
+        ...(doc.processing !== undefined ? { processing: doc.processing } : {}),
+        charCount: doc.charCount,
+        tokenCount: doc.tokenCount,
+        chunkCount: doc.chunkCount,
+        ...(doc.sourceType === 'directory' ? { childCount: childCount.get(doc.id) ?? 0 } : {}),
+        embedded,
+        ...(doc.embeddingError !== undefined ? { embeddingError: doc.embeddingError } : {}),
+        ...(doc.errorCode !== undefined ? { errorCode: doc.errorCode } : {}),
+        ...(doc.sourceType !== 'directory' ? { status } : {}),
+        ...(active !== undefined ? { indexingProgress: active.progress, indexingPhase: active.phase } : {}),
+        createdAt: doc.createdAt,
+        ...(doc.updatedAt !== undefined ? { updatedAt: doc.updatedAt } : {}),
+      }
+    })
+  }
+
+  /** Pre-order DFS outline of one base's directory tree (kb_list outline mode). */
+  listBaseOutline(baseId: string): {
+    baseId: string
+    totalItems: number
+    nodes: Array<{ depth: number; docId: string; title: string; type: DocumentSourceType; status: string }>
+  } {
+    const summaries = this.listDocuments(baseId)
+    const children = new Map<string, DocumentSummary[]>()
+    const roots: DocumentSummary[] = []
+    for (const doc of summaries) {
+      if (doc.parentDirectoryId === undefined) roots.push(doc)
+      else {
+        const list = children.get(doc.parentDirectoryId) ?? []
+        list.push(doc)
+        children.set(doc.parentDirectoryId, list)
+      }
+    }
+    const byTitle = (a: DocumentSummary, b: DocumentSummary): number => a.title.localeCompare(b.title)
+    roots.sort(byTitle)
+    for (const list of children.values()) list.sort(byTitle)
+    const nodes: Array<{ depth: number; docId: string; title: string; type: DocumentSourceType; status: string }> = []
+    const walk = (doc: DocumentSummary, depth: number): void => {
+      nodes.push({
+        depth,
+        docId: doc.id,
+        title: doc.title,
+        type: doc.sourceType,
+        status: doc.status ?? 'completed',
+      })
+      for (const child of children.get(doc.id) ?? []) walk(child, depth + 1)
+    }
+    for (const root of roots) walk(root, 0)
+    return { baseId, totalItems: summaries.length, nodes }
+  }
+
+  /** Live progress plus recent terminal failures for client-side recovery. */
+  indexingStatus(): Array<
+    | { docId: string; baseId: string; title: string; phase: 'parsing' | 'embedding'; progress: number; status?: 'running'; processingProgress?: ProcessingProgress }
+    | { docId: string; baseId: string; title: string; phase: 'parsing' | 'embedding'; progress: number; status: 'failed'; error: { code: string; message: string } }
+  > {
+    const now = Date.now()
+    const out: Array<
+      | { docId: string; baseId: string; title: string; phase: 'parsing' | 'embedding'; progress: number; status?: 'running'; processingProgress?: ProcessingProgress }
+      | { docId: string; baseId: string; title: string; phase: 'parsing' | 'embedding'; progress: number; status: 'failed'; error: { code: string; message: string } }
+    > = []
+    for (const [docId, entry] of this.indexing) {
+      out.push({ docId, baseId: entry.baseId, title: entry.title, phase: entry.phase, progress: entry.progress,
+        ...(this.processingProgress.has(docId) ? { processingProgress: this.processingProgress.get(docId)! } : {}),
+      })
+    }
+    // Linger entries (finished jobs) keep the last percentage for a short
+    // window; expired ones are collected lazily.
+    for (const [docId, entry] of [...this.progressLinger]) {
+      if (entry.expireAt <= now) {
+        this.progressLinger.delete(docId)
+        continue
+      }
+      out.push({ docId, baseId: entry.baseId, title: entry.title, phase: entry.phase, progress: entry.progress })
+    }
+    for (const [docId, failure] of [...this.indexingFailures]) {
+      if (failure.expireAt <= now) {
+        this.indexingFailures.delete(docId)
+        continue
+      }
+      out.push({
+        docId,
+        baseId: failure.baseId,
+        title: failure.title,
+        phase: failure.phase,
+        progress: 0,
+        status: 'failed',
+        error: { code: failure.code, message: failure.message },
+      })
+    }
+    return out
+  }
+
+  /** Probe only the saved endpoint: never accept an arbitrary caller URL. */
+  readonly mineruDeployment = new MineruDeployment(
+    () => join(dirname(resolveChunkStorePath(this.baseConfig.chunkStorePath)), 'mineru-management.json'),
+    {},
+    () => { const config = this.getConfig(); return { hfEndpoint: config.hfEndpoint, pythonIndexUrl: config.mineruPythonIndexUrl } },
+  )
+
+  get managementBindHost(): string { return this.ctx.webServer.host }
+
+  async checkProcessor(baseId?: string) {
+    if (baseId !== undefined && this.requireStore().getBase(baseId) === undefined) throw new NotFoundError('knowledge base not found')
+    const config = baseId === undefined ? this.getConfig() : this.getConfigFor(baseId)
+    return probeMineruLocal({ apiUrl: config.mineruLocalUrl ?? 'http://127.0.0.1:8000', apiKey: config.mineruLocalApiKey, tier: config.mineruTier, timeoutMs: 10_000 })
+  }
+
+  cancelProcessing(id: string): { cancelled: boolean } {
+    if (this.requireStore().getDocument(id) === undefined) throw new NotFoundError('document not found')
+    const parsing = this.processingControllers.get(id)
+    const indexing = this.indexing.get(id)?.controller
+    parsing?.abort()
+    indexing?.abort()
+    return { cancelled: parsing !== undefined || indexing !== undefined }
+  }
+
+  async readDocumentEvidence(id: string, options: { revision?: string; pageIndex?: number; blockId?: string; blockOffset?: number; maxTokens?: number } = {}): Promise<DocumentEvidence> {
+    const doc = this.requireStore().getDocument(id)
+    if (doc === undefined) throw new NotFoundError('document not found')
+    if (options.revision !== undefined && doc.processing?.revision !== options.revision) throw new NotFoundError('evidence revision is no longer current; search again')
+    if (doc.processing === undefined) return { documentId: id, title: doc.title, blocks: [], assets: [], estimatedTokens: 0, truncated: false }
+    const parsed = await this.artifacts.load(doc.baseId, id, doc.processing)
+    return composeDocumentEvidence(doc, parsed, options)
+  }
+
+  async getEvidenceAsset(id: string, assetId: string, revision: string) {
+    const doc = this.requireStore().getDocument(id)
+    if (doc?.processing === undefined || doc.processing.revision !== revision) throw new NotFoundError('evidence revision is no longer current; refresh the document')
+    const asset = await this.artifacts.readAsset(doc.baseId, id, doc.processing, assetId)
+    if (asset === undefined) throw new NotFoundError('evidence asset not found')
+    return { ...asset, fileName: assetId }
+  }
+
+  /** Current download/load state of an in-process embedding model. */
+  async getLocalModelStatus(modelId?: string): Promise<LocalModelStatus> {
+    const id = modelId?.trim() || DEFAULT_LOCAL_MODEL
+    const live = getLocalModelStatus(id)
+    if (live.status !== 'idle') return live
+    // The in-memory map only tracks downloads/loads since this process
+    // started; a model whose weights are already on disk is ready even
+    // before its first lazy load (the embed worker loads it on demand).
+    if (await isLocalModelDownloaded(id)) {
+      return { model: id, status: 'ready', progress: 100, message: '' }
+    }
+    return live
+  }
+
+  /**
+   * Embed one probe text through the given (or current) embedding config and
+   * return the vector width — Cherry's `useEmbeddingDimensions` probe, run
+   * before a config save so a wrong-dimension model is caught up front.
+   * Local models answer from the catalog without loading the ~600MB pipeline.
+   */
+  async probeEmbeddingDimensions(options: {
+    provider?: EmbeddingProvider
+    baseUrl?: string
+    model?: string
+    apiKey?: string
+    dimensions?: number
+  } = {}): Promise<number> {
+    const config = this.getConfig()
+    const provider = options.provider ?? config.embeddingProvider
+    if (provider === 'none') throw new Error('no embedding provider configured')
+    const model = options.model ?? config.embeddingModel
+    const dimensions = embeddingOutputDimensions({ embeddingProvider: provider, embeddingModel: model, embeddingDimensions: options.dimensions ?? 0 })
+    if (provider === 'local') {
+      const descriptor = LOCAL_MODELS.find(entry => entry.kind === 'embedding' && entry.id === model)
+      if (descriptor?.dimensions !== undefined) return dimensions || descriptor.dimensions
+    }
+    const [vector] = await embedTexts(
+      provider,
+      options.baseUrl ?? config.embeddingBaseUrl,
+      model,
+      options.apiKey ?? config.embeddingApiKey,
+      ['test'],
+      undefined, 'query', dimensions,
+    )
+    if (vector === undefined || vector.length === 0) throw new Error('embedding returned an empty vector')
+    return vector.length
+  }
+
+  // ── local model manager (settings "本地模型") ──────────────────────────────
+
+  async enterEmbeddingForeground(yieldIgpu = false) {
+    if (isManagedCaptionCall() || localSearch.isDocumentVision()) return () => {}
+    this.idleEnrichment.interrupt()
+    this.foregroundReservations++; this.applyEmbeddingCpuTuning(this.getConfig())
+    const releases = await Promise.allSettled([Promise.resolve(localSearch.enterForeground()), embeddingAcceleration.enterForeground(yieldIgpu), embeddingFp16Acceleration.enterForeground(yieldIgpu), this.ocrAcceleration.enterForeground(yieldIgpu), this.structureV3.enterForeground(), enterOcrPoolForeground()])
+    const failed = releases.find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') { for (const result of releases) if (result.status === 'fulfilled') result.value(); this.foregroundReservations--;this.applyEmbeddingCpuTuning(this.getConfig());throw failed.reason }
+    let done=false
+    return () => { if(done)return;done=true;for (const result of releases) if (result.status === 'fulfilled') result.value();this.foregroundReservations--;this.applyEmbeddingCpuTuning(this.getConfig()) }
+  }
+  embeddingAccelerationStatus(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).status() }
+  prepareEmbeddingAcceleration(model?: string) { return (model === FP16_EMBEDDING_MODEL ? embeddingFp16Acceleration : embeddingAcceleration).prepare() }
+
+  async listLocalModels(): Promise<LocalModelSummary[]> {
+    const legacy = await listLocalModels()
+    if (!localSearch.hasSetup() || localSearch.setupState().setup.status !== 'ready') return legacy
+    return [...legacy,
+      { id: localSearch.embeddingId, name: 'Qwen3 Embedding 0.6B · automatic', kind: 'embedding', dimensions: 1024, subtitle: 'Managed by local search setup', status: 'ready', health: 'healthy', progress: 100, message: '' },
+      { id: localSearch.rerankerId, name: 'Qwen3 Reranker 0.6B', kind: 'reranking', subtitle: 'Managed by local search setup', status: 'ready', health: 'healthy', progress: 100, message: '' },
+    ]
+  }
+
+  downloadLocalModel(id: string): Promise<LocalModelSummary> {
+    return downloadLocalModel(id)
+  }
+
+  registerCustomLocalReranker(id: string): Promise<LocalModelSummary> {
+    return registerCustomLocalReranker(id)
+  }
+
+  selfTestLocalModel(id: string): Promise<LocalModelSummary> {
+    return selfTestLocalModel(id)
+  }
+
+  cancelLocalModel(id: string): Promise<LocalModelSummary> {
+    return cancelLocalModelDownload(id)
+  }
+
+  deleteLocalModel(id: string): Promise<LocalModelSummary> {
+    return deleteLocalModel(id)
+  }
+
+  // ── local OCR (scanned-PDF recognition, Cherry's local-document posture) ──
+
+  private readonly managedCaption = createManagedCaption({get: name => this.ctx.get(name)})
+  readonly structureV3 = new StructureV3Manager()
+  getStructureStatus() { return this.structureV3.status() }
+  prepareStructure() { return this.structureV3.prepare() }
+
+  getOcrStatus(): OcrModelStatus {
+    return getOcrModelStatus()
+  }
+
+  downloadOcr(): Promise<OcrModelStatus> {
+    // The OCR models come from a Hugging Face endpoint; honor the configured
+    // hfEndpoint mirror (default hf-mirror.com) so overseas users can point
+    // the download at huggingface.co.
+    return downloadOcrModels(this.baseConfig.hfEndpoint)
+  }
+
+  deleteOcr(): Promise<{ deleted: true }> {
+    return removeOcrModels().then(() => ({ deleted: true }))
+  }
+
+  // ── Ollama model management (pull + installed list for the settings page) ──
+
+  listOllamaModels(baseUrl: string): Promise<Array<{ name: string; size?: number }>> {
+    return listOllamaModelsHelper(baseUrl)
+  }
+
+  deleteOllamaModel(model: string, baseUrl: string): Promise<void> {
+    return deleteOllamaModelHelper(model, baseUrl)
+  }
+
+  pullOllamaModel(model: string, baseUrl: string): Promise<void> {
+    return pullOllamaModelHelper(model, baseUrl)
+  }
+
+  cancelOllamaPull(model: string): void {
+    cancelOllamaPullHelper(model)
+  }
+
+  getOllamaPullStatus(model: string): OllamaPullStatus {
+    return getOllamaPullStatusHelper(model)
+  }
+
+  /** In-flight pulls (the panel restores its progress cards from this on open). */
+  activeOllamaPulls(): Array<{ model: string; status: OllamaPullStatus['status']; progress: number; message: string }> {
+    return activeOllamaPullsHelper()
+  }
+
+  /** Resolve and create the directory only when the settings page opens it. */
+  async prepareLocalModelCacheDirectory(path?: string): Promise<{ path: string }> {
+    const requested = path?.trim()
+    const target = requested ? resolve(expandHomePath(requested)) : localModelCacheDir()
+    await mkdir(target, { recursive: true })
+    return { path: target }
+  }
+
+  /**
+   * Migrate downloaded local models (and OCR files) from the current cache
+   * directory to `to`, then point the config there. Loaded models are
+   * released first so file locks (Windows) cannot block the move; moves fall
+   * back to copy+delete across drives. The directory may be empty — the
+   * config still switches, so future downloads land in the new location.
+   */
+  async migrateLocalModels(to: string): Promise<{ moved: number; from: string; to: string }> {
+    const store = this.requireStore()
+    const target = resolve(expandHomePath(to.trim() === '' ? '~/.dsh/cache/dsh-knowledge/local-models' : to.trim()))
+    const from = localModelCacheDir()
+    // Windows paths are case-insensitive: `C:\Users\...` vs `c:\users\...`
+    // are the same directory and must not run a migration against itself.
+    const samePath = process.platform === 'win32'
+      ? from.toLowerCase() === target.toLowerCase()
+      : from === target
+    if (samePath) return { moved: 0, from, to: target }
+    const managedRoot = (await this.mineruDeployment.status()).root
+    if (managedRoot) {
+      const inside = (parent: string, child: string) => {
+        const rel = relative(parent, child)
+        return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+      }
+      if (inside(from, managedRoot) || inside(target, managedRoot) || inside(managedRoot, from) || inside(managedRoot, target)) {
+        throw new Error('The managed MinerU directory overlaps the cache migration path. Keep MinerU in a separate directory when moving the embedding model cache.')
+      }
+    }
+    // A download in flight writes into the current cache directory; moving
+    // its half-written files out from under the worker would corrupt the
+    // model. Refuse instead of silently breaking the download.
+    if (hasActiveLocalModelDownload() || hasActiveLocalRerankDownload()) {
+      throw new Error('A model is downloading. Wait for completion or cancel the download before moving the cache')
+    }
+    // Release loaded models (up to ~600MB each) and the OCR worker BEFORE
+    // touching the files, and wait for the worker threads to actually exit:
+    // onnxruntime keeps model files mmap'd, and a Windows file lock makes
+    // both the rename and the copy+delete fallback fail.
+    await disposeLocalModelWorker()
+    await disposeLocalRerankProcess()
+    await disposeOcrWorker()
+    const entries = await readdir(from).catch(() => [] as string[])
+    let moved = 0
+    await mkdir(target, { recursive: true })
+    // Custom reranker registrations live beside the model directories. Keep
+    // this hidden registry during migration without counting it as a model.
+    await cp(join(from, '.dsh-rerank-models.json'), join(target, '.dsh-rerank-models.json'), { force: true }).catch(() => {})
+    for (const entry of entries) {
+      // Hidden entries (dot-prefixed) are never models: when the configured
+      // cache dir is a parent of the target (e.g. from=/data/models,
+      // target=/data/models/.local-models), the target itself shows up as an
+      // entry — copying a directory into itself is a hard EINVAL. The same
+      // guard protects unrelated dot-dirs (e.g. .ollama) from being dragged
+      // into the migration.
+      if (entry.startsWith('.')) continue
+      const source = join(from, entry)
+      const dest = join(target, entry)
+      const info = await stat(source).catch(() => null)
+      if (info === null || !info.isDirectory()) continue
+      // Defense in depth: never move/copy a directory into itself or one of
+      // its descendants, whatever the entry name looks like. The relation is
+      // computed case-normalized on win32: `path.relative` is case-SENSITIVE
+      // string math, so `C:\Models` vs `c:\models` (the same directory on
+      // Windows) would produce a long `..\..\` detour and defeat the guard —
+      // a case-mismatched config path could then copy the target into itself
+      // again (the EINVAL we fixed once already).
+      const src = process.platform === 'win32' ? source.toLowerCase() : source
+      const dst = process.platform === 'win32' ? dest.toLowerCase() : dest
+      const rel = relative(src, dst)
+      if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) continue
+      // A destination entry that already exists is left untouched: a partial
+      // previous migration (or a pre-existing model) must not be overwritten.
+      if (await stat(dest).then(() => true).catch(() => false)) continue
+      try {
+        await rename(source, dest)
+      } catch {
+        // Cross-device or locked rename — copy then remove.
+        await cp(source, dest, { recursive: true })
+        await rm(source, { recursive: true, force: true })
+      }
+      moved += 1
+    }
+    await store.setConfigOverrides({ localModelCacheDir: target })
+    setLocalModelCacheDir(target)
+    return { moved, from, to: target }
+  }
+
+  listChunks(documentId: string, limit?: number, offset?: number): KnowledgeChunk[] {
+    // Bounded SQL read (LIMIT/OFFSET) on the SQLite-backed store.
+    const start = clampInt(offset ?? 0, 0, Number.MAX_SAFE_INTEGER, 0)
+    const count = limit === undefined ? undefined : clampInt(limit, 0, Number.MAX_SAFE_INTEGER, 0)
+    return this.requireStore().listChunksByDoc(documentId, count, start)
+  }
+
+  /** Read a bounded ordered context window around one current chunk anchor. */
+  getDocumentContext(
+    documentId: string,
+    options: {
+      anchorChunkId?: string
+      anchorIndex?: number
+      before?: number
+      after?: number
+      maxTokens?: number
+      focus?: string
+      crossHeading?: boolean
+    },
+  ): {
+    id: string
+    baseId: string
+    title: string
+    sourceType: DocumentSourceType
+    charCount: number
+    chunkCount: number
+    contextWindow: ContextWindow
+  } {
+    const hasChunkId = options.anchorChunkId !== undefined
+    const hasIndex = options.anchorIndex !== undefined
+    if (hasChunkId === hasIndex) throw new Error('provide exactly one of anchorChunkId or anchorIndex')
+    if (options.focus !== undefined && options.focus.length > 500) throw new Error('focus must not exceed 500 characters')
+    const store = this.requireStore()
+    const doc = store.getDocument(documentId)
+    if (doc === undefined) throw new Error(`document not found: ${documentId}`)
+    let anchor: KnowledgeChunk | undefined
+    if (options.anchorChunkId !== undefined) {
+      anchor = store.getChunk(options.anchorChunkId)
+      if (anchor === undefined) throw new Error('anchor chunk is stale or no longer exists; run knowledge_search again')
+    } else {
+      const requestedIndex = options.anchorIndex!
+      if (!Number.isInteger(requestedIndex) || requestedIndex < 0 || requestedIndex >= doc.chunkCount) {
+        throw new Error('anchorIndex is outside this document')
+      }
+      const index = requestedIndex
+      anchor = store.listChunksByIndexRange(documentId, index, index)[0]
+      if (anchor === undefined) throw new Error('anchorIndex is outside this document')
+    }
+    if (anchor.docId !== documentId || anchor.baseId !== doc.baseId) {
+      throw new Error('anchor chunk does not belong to the requested document')
+    }
+    const before = clampInt(options.before ?? 2, 0, 10, 2)
+    const after = clampInt(options.after ?? 2, 0, 10, 2)
+    const maxTokens = clampInt(options.maxTokens ?? 1600, 128, 4096, 1600)
+    const chunks = store.listChunksByIndexRange(documentId, anchor.index - before, anchor.index + after)
+    const contextWindow = composeContextWindow(chunks, anchor, {
+      before,
+      after,
+      maxTokens,
+      focus: options.focus,
+      crossHeading: options.crossHeading === true,
+      documentChunkCount: doc.chunkCount,
+    })
+    return {
+      id: doc.id,
+      baseId: doc.baseId,
+      title: doc.title,
+      sourceType: doc.sourceType,
+      charCount: doc.charCount,
+      chunkCount: doc.chunkCount,
+      contextWindow,
+    }
+  }
+
+  getDocument(id: string, opts?: { includeChunks?: boolean; rawTextLimit?: number }): DocumentDetail {
+    const store = this.requireStore()
+    const doc = store.getDocument(id)
+    if (doc === undefined) throw new Error(`document not found: ${id}`)
+    const rawText = doc.rawText
+    const rawTextLimit = clampRawTextLimit(opts?.rawTextLimit)
+    const truncated = rawText !== undefined && rawTextLimit !== undefined && rawText.length > rawTextLimit
+    return {
+      ...(doc.markdownRevision?{markdownRevision:doc.markdownRevision}:{}),
+      id: doc.id,
+      baseId: doc.baseId,
+      title: doc.title,
+      sourceType: doc.sourceType,
+      ...(doc.fileName !== undefined ? { fileName: doc.fileName } : {}),
+      ...(doc.url !== undefined ? { url: doc.url } : {}),
+      ...(doc.sourcePath !== undefined ? { sourcePath: doc.sourcePath } : {}),
+      ...(doc.rawFilePath !== undefined ? { rawFilePath: doc.rawFilePath } : {}),
+      ...(doc.processing !== undefined ? { processing: doc.processing } : {}),
+      rawText: truncated ? rawText.slice(0, snapSliceEnd(rawText, rawTextLimit)) : rawText,
+      ...(truncated ? { rawTextTruncated: true } : {}),
+      charCount: doc.charCount,
+      ...(doc.tokenCount !== undefined ? { tokenCount: doc.tokenCount } : {}),
+      chunkCount: doc.chunkCount,
+      createdAt: doc.createdAt,
+      ...(opts?.includeChunks === false ? {} : { chunks: store.listChunksByDoc(id) }),
+    }
+  }
+
+  /** Original source bytes of a file document (for the download route). */
+  async getRawFile(id: string): Promise<{ bytes: Uint8Array; fileName: string; mimeType?: string } | undefined> {
+    const store = this.requireStore()
+    const doc = store.getDocument(id)
+    if (doc === undefined) return undefined
+    const base = store.getBase(doc.baseId)
+    if (base?.storageMode === 'external') {
+      if (!base.externalPath || !doc.sourcePath) return undefined
+      const path = await externalFile(base.externalPath, doc.sourcePath)
+      if ((await stat(path)).size > 100 * 1024 * 1024) throw new Error('Original exceeds 100 MiB download limit')
+      const bytes = await readFile(path)
+      if (store.getBase(doc.baseId)?.externalPath !== base.externalPath || !store.getDocument(id)) throw new Error('Original source is no longer selected')
+      return { bytes, fileName: doc.fileName ?? basename(path), mimeType: doc.mimeType ?? (path.toLowerCase().endsWith('.pdf') ? 'application/pdf' : /\.(txt|md|markdown|log|csv)$/i.test(path) ? 'text/plain; charset=utf-8' : undefined) }
+    }
+    if (doc.rawFilePath === undefined) return undefined
+    const bytes = await store.raw?.read(doc.rawFilePath)
+    if (bytes === null || bytes === undefined) return undefined
+    return { bytes, fileName: doc.fileName ?? doc.title, mimeType: doc.mimeType }
+  }
+
+  /** Read one document's source text as a `[charStart, charEnd)` slice (kb_read read mode). */
+  readDocumentText(id: string, charStart?: number, charEnd?: number): {
+    id: string
+    baseId: string
+    title: string
+    sourceType: DocumentSourceType
+    totalChars: number
+    charStart: number
+    charEnd: number
+    content: string
+    truncated: boolean
+  } {
+    const store = this.requireStore()
+    const doc = store.getDocument(id)
+    if (doc === undefined) throw new Error(`document not found: ${id}`)
+    const text = doc.rawText ?? reconstructFromChunks(store.listChunksByDoc(id))
+    const total = text.length
+    const rawStart = clampInt(charStart ?? 0, 0, total, 0)
+    const start = snapSliceStart(text, rawStart)
+    // Where the caller would have ended without the cap (an omitted charEnd
+    // reads to the document end) — Cherry's readConcept slice cap.
+    const naturalEnd = clampInt(charEnd ?? total, start, total, total)
+    const rawEnd = Math.max(start, Math.min(naturalEnd, start + CONCEPT_READ_MAX_CHARS))
+    const end = Math.max(start, snapSliceEnd(text, rawEnd))
+    return {
+      id: doc.id,
+      baseId: doc.baseId,
+      title: doc.title,
+      sourceType: doc.sourceType,
+      totalChars: total,
+      charStart: start,
+      charEnd: end,
+      content: text.slice(start, end),
+      // "There is more to read" — true both when the 20k cap cut the slice
+      // short and when the caller stopped before the document end.
+      truncated: end < total,
+    }
+  }
+
+  /** Grep one document's source text for a regular expression (kb_read grep mode). */
+  grepDocument(id: string, pattern: string, maxMatches?: number, ignoreCase = true): {
+    id: string
+    baseId: string
+    title: string
+    totalMatches: number
+    matches: Array<{ line: number; charStart: number; charEnd: number; snippet: string }>
+  } {
+    const store = this.requireStore()
+    const doc = store.getDocument(id)
+    if (doc === undefined) throw new Error(`document not found: ${id}`)
+    const text = doc.rawText ?? reconstructFromChunks(store.listChunksByDoc(id))
+    let regex: RegExp
+    try {
+      regex = new RegExp(pattern, `g${ignoreCase ? 'i' : ''}`)
+    } catch (error) {
+      throw new Error(`invalid regex: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const cap = clampInt(maxMatches ?? 50, 1, 200, 50)
+    // Cherry's scanConceptMatches: the pattern runs over ONE truncated line at
+    // a time (2000 chars), so a catastrophic-backtracking pattern ((a+)+$) can
+    // never freeze the host by spanning the whole document; `totalMatches`
+    // counts the whole text even past the returned-match cap.
+    const matches: Array<{ line: number; charStart: number; charEnd: number; snippet: string }> = []
+    let totalMatches = 0
+    let lineNumber = 0
+    let lineStart = 0
+    while (lineStart <= text.length) {
+      lineNumber += 1
+      const newlineIndex = text.indexOf('\n', lineStart)
+      const lineEnd = newlineIndex === -1 ? text.length : newlineIndex
+      const line = text.slice(lineStart, snapSliceEnd(text, Math.min(lineEnd, lineStart + CONCEPT_GREP_MAX_LINE_CHARS)))
+      regex.lastIndex = 0
+      for (let match = regex.exec(line); match !== null; match = regex.exec(line)) {
+        totalMatches += 1
+        const matchLength = match[0].length
+        const matchStart = lineStart + match.index
+        const matchEnd = matchStart + matchLength
+        if (matches.length < cap) {
+          const snippetStart = snapSliceStart(text, Math.max(0, matchStart - CONCEPT_GREP_SNIPPET_PAD))
+          const snippetEnd = snapSliceEnd(text, Math.min(text.length, matchEnd + CONCEPT_GREP_SNIPPET_PAD))
+          matches.push({
+            line: lineNumber,
+            charStart: matchStart,
+            charEnd: matchEnd,
+            snippet: `${snippetStart > 0 ? '…' : ''}${text.slice(snippetStart, snippetEnd)}${snippetEnd < text.length ? '…' : ''}`,
+          })
+        }
+        // Zero-width match: advance past the same position so exec() moves on.
+        if (matchLength === 0) regex.lastIndex = match.index + 1
+      }
+      lineStart = lineEnd + 1
+    }
+    return { id: doc.id, baseId: doc.baseId, title: doc.title, totalMatches, matches }
+  }
+
+  // ── statistics ────────────────────────────────────────────────────────────
+
+  async baseLive(baseId:string){
+    const base=this.requireStore().getBase(baseId)
+    if(!base)throw new NotFoundError('knowledge base not found')
+    return {updatedAt:base.updatedAt,syncStatus:this.externalFolders?.states.get(baseId),stats:await this.statsForUi(baseId)}
+  }
+  async statsForUi(baseId?:string):Promise<BaseStats>{
+    const store=this.requireStore()
+    if(baseId!==undefined&&!store.getBase(baseId))throw new NotFoundError(`knowledge base not found: ${baseId}`)
+    const ids=baseId!==undefined?[baseId]:store.listBases().map(base=>base.id)
+    const summary=await (store.chunkStatsAsync?.(ids)??store.chunkStats(ids))
+    return this.stats(baseId,summary)
+  }
+  stats(baseId?: string, summary?:ReturnType<Store['chunkStats']>): BaseStats {
+    const store = this.requireStore()
+    // An unknown base must be an explicit error: filtering would answer with a
+    // plausible-looking zero summary that hides the caller's mistake.
+    if (baseId !== undefined && store.getBase(baseId) === undefined) {
+      throw new NotFoundError(`knowledge base not found: ${baseId}`)
+    }
+    const bases = baseId !== undefined ? store.listBases().filter(base => base.id === baseId) : store.listBases()
+    const totals=summary?.documents
+    const documents = totals?[]:bases.flatMap(base => store.listDocuments(base.id, { includeRawText: false }))
+    const charCount = totals?.charCount??documents.reduce((sum, doc) => sum + doc.charCount, 0)
+    const tokenCount = totals?.tokenCount??documents.reduce((sum, doc) => sum + (doc.tokenCount ?? 0), 0)
+    const chunkStats = summary ?? store.chunkStats(bases.map(base => base.id))
+    // Staleness: an embedded chunk is stale when it was produced by a different
+    // embedding source than the base's currently resolved configuration.
+    let staleChunkCount = 0
+    let hasCurrentKey = false
+    for (const base of bases) {
+      const key = embeddingKey(this.getConfigFor(base.id))
+      if (key === undefined) continue
+      hasCurrentKey = true
+      for (const entry of chunkStats.embeddingModelCounts) {
+        if (entry.baseId === base.id && entry.model !== key) staleChunkCount += entry.count
+      }
+    }
+    return {
+      ...(baseId !== undefined ? { baseId } : {}),
+      documentCount: totals?.documentCount??documents.length,
+      storedDocCount: totals?.storedDocCount??documents.reduce((sum, doc) => sum + (doc.rawFilePath !== undefined || doc.processing !== undefined ? 1 : 0), 0),
+      chunkCount: chunkStats.count,
+      charCount,
+      tokenCount,
+      embedded: chunkStats.embedded,
+      embeddedChunkCount: chunkStats.embeddedCount,
+      ...(chunkStats.dimensions !== undefined ? { embeddingDimensions: chunkStats.dimensions } : {}),
+      ...(hasCurrentKey && staleChunkCount > 0 ? { staleEmbeddings: true, staleChunkCount } : {}),
+    }
+  }
+
+  // ── retrieval ─────────────────────────────────────────────────────────────
+
+  async search(request: SearchRequest, execution: SearchExecutionOptions = {}): Promise<SearchResult> {
+    const startedAt = Date.now()
+    throwIfAborted(execution.signal)
+    throwIfDeadline(execution.deadlineAt)
+    const query = request.query.trim()
+    if (query.length === 0) return emptySearchResult(query, request.mode ?? 'lexical', 0)
+    if (query.length > 2000) throw new Error('search query must not exceed 2000 characters')
+
+    // A search spanning bases must encode its query at each base's vector
+    // width. Never silently drop reduced-width bases using the global width.
+    if (request.baseId === undefined && request.mode !== 'lexical') {
+      const globalConfig = this.getConfig()
+      const scope = this.requireStore().listBases().filter(base => request.baseIds === undefined || request.baseIds.includes(base.id))
+      if (scope.some(base => embeddingDimensionTag(this.getConfigFor(base.id)) !== embeddingDimensionTag(globalConfig))) {
+        const topK = clampInt(request.topK ?? globalConfig.topK, 1, 50, 6)
+        const results = await Promise.all(scope.map(base => this.search({ ...request, query, baseId: base.id, baseIds: undefined, topK: Math.min(50, Math.max(topK * 2, 12)) }, { ...execution, rerank: 'skip' })))
+        throwIfAborted(execution.signal)
+        throwIfDeadline(execution.deadlineAt)
+        return this.finishMultiQuerySearch(globalConfig, query, request.mode ?? globalConfig.searchMode, results, topK, request.threshold, startedAt, execution.rerank !== 'skip', execution.signal)
+      }
+    }
+
+    const variants = normalizeQueryVariants(query, request.queries)
+    const allowRerank = execution.rerank !== 'skip'
+    if (variants.length === 1) {
+      return this.searchSingle({ ...request, query, queries: undefined }, allowRerank, startedAt, execution.signal, execution.deadlineAt)
+    }
+
+    const config = this.getConfigFor(request.baseId)
+    const requestedMode = request.mode ?? config.searchMode
+    const topK = clampInt(request.topK ?? config.topK, 1, 50, 6)
+    const subTopK = Math.min(50, Math.max(topK * 2, 12))
+    const results = await Promise.all(variants.map(variant => this.searchSingle({
+      ...request,
+      query: variant,
+      queries: undefined,
+      topK: subTopK,
+    }, false, startedAt, execution.signal, execution.deadlineAt)))
+    throwIfAborted(execution.signal)
+    return this.finishMultiQuerySearch(config, query, requestedMode, results, topK, request.threshold, startedAt, allowRerank, execution.signal)
+  }
+
+  /** One retrieval pass. Multi-query orchestration lives in search() so each
+   * variant cannot independently invoke an expensive reranker. */
+  private async searchSingle(
+    request: SearchRequest,
+    allowRerank: boolean,
+    startedAt: number,
+    signal?: AbortSignal,
+    deadlineAt?: number,
+  ): Promise<SearchResult> {
+    throwIfAborted(signal)
+    throwIfDeadline(deadlineAt)
+    const store = this.requireStore()
+    const config = this.getConfigFor(request.baseId)
+    const query = request.query.trim()
+    if (query.length === 0) return emptySearchResult(query, request.mode ?? config.searchMode, 0)
+    const requestedMode = request.mode ?? config.searchMode
+    const topK = clampInt(request.topK ?? config.topK, 1, 50, 6)
+    if (request.baseId === undefined && request.baseIds !== undefined && request.baseIds.length === 0) {
+      return emptySearchResult(query, requestedMode, Date.now() - startedAt)
+    }
+    // A stale base id (e.g. a base deleted without sweeping child records)
+    // must not surface orphaned content.
+    if (request.baseId !== undefined && store.getBase(request.baseId) === undefined) {
+      return emptySearchResult(query, requestedMode, 0)
+    }
+
+    const threshold = request.threshold ?? config.similarityThreshold
+
+    // Both retrieval paths apply the same document selection before their
+    // candidate limits, so excluded rows cannot consume retrieval seats.
+    const documentFilter = this.resolveSearchFilter(request)
+    // A present-but-empty allow-list is an explicit "match nothing" result.
+    // Never pass it to a storage implementation that might interpret [] as
+    // unrestricted scope.
+    if (documentFilter?.docIds !== undefined && documentFilter.docIds.length === 0) {
+      return emptySearchResult(query, requestedMode, Date.now() - startedAt)
+    }
+
+    const lane = store.retrievalLane
+    if (lane !== undefined) {
+      const scope = request.baseId !== undefined
+        ? [request.baseId]
+        : request.baseIds !== undefined && request.baseIds.length > 0
+          ? [...request.baseIds]
+          : store.listBases().map(base => base.id)
+      const poolSize = Math.min(Math.max(topK * 4, 20), LANE_CANDIDATE_CAP)
+
+      let queryVector: number[] | undefined
+      if ((requestedMode === 'vector' || requestedMode === 'hybrid' || requestedMode === 'auto') && config.embeddingProvider !== 'none') {
+        // Allow the FP16 NPU query lane's five-second queue wait plus CPU fallback.
+        const embeddingBudget=AbortSignal.timeout(config.embeddingModel===FP16_EMBEDDING_MODEL?7500:2500)
+        try {
+          const [vector] = await embedTexts(
+            config.embeddingProvider,
+            config.embeddingBaseUrl,
+            config.embeddingModel,
+            config.embeddingApiKey,
+            [query],
+            signal?AbortSignal.any([signal,embeddingBudget]):embeddingBudget,
+            'query', config.embeddingDimensions ?? 0,
+          )
+          throwIfAborted(signal)
+          queryVector = vector
+        } catch (error) {
+          throwIfAborted(signal)
+          // A configured local model that cannot load (weights deleted, download
+          // failed) is a configuration problem, not a transient failure — surface
+          // it instead of silently degrading to lexical (the user believes hybrid
+          // is on). A model whose files ARE on disk but whose binding/worker
+          // reload failed ("Module did not self-register") is a runtime error,
+          // not a missing download — say so instead of sending them to re-download.
+          if (config.embeddingProvider === 'local' && !embeddingBudget.aborted) {
+            throw await localEmbeddingError(config, error)
+          }
+          this.ctx.logger.warn(`knowledge: embedding failed, using lexical retrieval: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+
+      const useVector = queryVector !== undefined && requestedMode !== 'lexical'
+      let ranked: RankedHit[] = []
+      const byId = new Map<string, KnowledgeChunk>()
+      let total = 0
+      let vectorAttempted = false
+      let vectorSucceeded = false
+      let vectorReturned = 0
+      let vectorError: string | undefined
+      let lexicalAttempted = false
+      let lexicalSucceeded = false
+      let lexicalReturned = 0
+      let lexicalError: string | undefined
+
+      let vec: Awaited<ReturnType<typeof lane.vector>> | undefined
+      if (useVector) {
+        vectorAttempted = true
+        try {
+          vec = await lane.vector(queryVector!, scope, poolSize, { ...documentFilter, embeddingModel: embeddingKey(config) }, deadlineAt)
+          vectorSucceeded = true
+          vectorReturned = vec.hits.length
+          total = Math.max(total, vec.total)
+          for (const hit of vec.hits) byId.set(hit.id, hit)
+        } catch (error) {
+          vectorError = retrievalErrorCode(error)
+          this.ctx.logger.warn(`knowledge: vector retrieval failed, using lexical retrieval: ${safeErrorMessage(error)}`)
+        }
+      } else if (requestedMode !== 'lexical' && config.embeddingProvider !== 'none' && queryVector === undefined) {
+        vectorError = 'embedding_unavailable'
+      }
+
+      // Hybrid/auto always execute lexical when vector worked, even when the
+      // vector lane returned zero rows: a successful empty lane is distinct
+      // from a failed lane in the public contract.
+      let lex: Awaited<ReturnType<typeof lane.lexical>> | undefined
+      if (requestedMode !== 'vector' || vec === undefined) {
+        lexicalAttempted = true
+        try {
+          lex = await lane.lexical(query, scope, poolSize, documentFilter, deadlineAt)
+          lexicalSucceeded = true
+          lexicalReturned = lex.hits.length
+          total = Math.max(total, lex.total)
+          for (const hit of lex.hits) if (!byId.has(hit.id)) byId.set(hit.id, hit)
+        } catch (error) {
+          lexicalError = retrievalErrorCode(error)
+          this.ctx.logger.warn(`knowledge: lexical retrieval failed: ${safeErrorMessage(error)}`)
+        }
+      }
+
+      if (vec !== undefined && lex !== undefined) {
+        // Hybrid/auto: fuse both lanes with Reciprocal Rank Fusion; the vector
+        // lane carries the configured relative weight.
+        const vectorOrder = vec.hits.map(hit => hit.id)
+        const lexicalOrder = lex.hits.map(hit => hit.id)
+        const vectorWeight = config.rrfVectorWeight
+        const fused = reciprocalRankFusion([vectorOrder, lexicalOrder], [vectorWeight, 1])
+        const maxFused = (vectorWeight + 1) / (RRF_K + 1)
+        const vectorScores = new Map(vec.hits.map(hit => [hit.id, hit.score]))
+        const lexicalScores = new Map(lex.hits.map(hit => [hit.id, hit.score]))
+        ranked = [...new Set([...vectorOrder, ...lexicalOrder])].map(id => ({
+          id,
+          score: (fused.get(id) ?? 0) / maxFused,
+          vectorScore: vectorScores.get(id),
+          lexicalScore: lexicalScores.get(id),
+        }))
+      } else if (vec !== undefined) {
+        ranked = vec.hits.map(hit => ({ id: hit.id, score: hit.score, vectorScore: hit.score }))
+      } else if (lex !== undefined) {
+        ranked = lex.hits.map(hit => ({ id: hit.id, score: hit.score, lexicalScore: hit.score }))
+      }
+      const laneStatus = retrievalStatus(requestedMode, {
+        attempted: lexicalAttempted,
+        succeeded: lexicalSucceeded,
+        returnedCount: lexicalReturned,
+        ...(lexicalError !== undefined ? { errorCode: lexicalError } : {}),
+      }, {
+        attempted: vectorAttempted,
+        succeeded: vectorSucceeded,
+        returnedCount: vectorReturned,
+        ...(vectorError !== undefined ? { errorCode: vectorError } : {}),
+      })
+
+      ranked.sort((a, b) => b.score - a.score)
+      if (request.mmr ?? config.mmrDiversity > 0) {
+        if (config.mmrDiversity > 0 && queryVector !== undefined) {
+          const compatible = new Map([...byId].map(([id, chunk]) => [id, chunk.embeddingModel === embeddingKey(config) ? chunk : { ...chunk, embedding: undefined }]))
+          ranked = maximalMarginalRelevance(ranked, compatible, queryVector, config.mmrDiversity, Math.max(topK * 3, 12))
+        }
+      }
+      throwIfAborted(signal)
+      return this.finishSearch(store, config, query, requestedMode, ranked, byId, topK, threshold, total, startedAt, laneStatus, allowRerank, signal)
+    }
+
+    const allowed = documentFilter?.docIds !== undefined ? new Set(documentFilter.docIds) : undefined
+    const excluded = new Set(documentFilter?.excludeDocIds)
+    const chunks = (request.baseId !== undefined
+      ? store.listChunks(request.baseId)
+      : request.baseIds !== undefined && request.baseIds.length > 0
+        ? request.baseIds.flatMap(id => store.listChunks(id))
+        : store.listBases().flatMap(base => store.listChunks(base.id)))
+      .filter(chunk => (allowed === undefined || allowed.has(chunk.docId)) && !excluded.has(chunk.docId))
+    if (chunks.length === 0) return emptySearchResult(query, requestedMode, 0)
+
+    const byId = new Map(chunks.map(chunk => [chunk.id, chunk]))
+    const candidates = chunks.map(chunk => ({
+      id: chunk.id,
+      text: chunkSearchText(chunk),
+      embedding: chunk.embeddingModel === embeddingKey(config) ? chunk.embedding : undefined,
+    }))
+
+    let queryVector: number[] | undefined
+    if (requestedMode !== 'lexical' && config.embeddingProvider !== 'none') {
+      try {
+        const [vector] = await embedTexts(
+          config.embeddingProvider,
+          config.embeddingBaseUrl,
+          config.embeddingModel,
+          config.embeddingApiKey,
+          [query],
+          signal,
+          'query', config.embeddingDimensions ?? 0,
+        )
+        throwIfAborted(signal)
+        queryVector = vector
+      } catch (error) {
+        throwIfAborted(signal)
+        // See the lane path: a broken local model must not silently degrade.
+        if (config.embeddingProvider === 'local') {
+          throw await localEmbeddingError(config, error)
+        }
+        this.ctx.logger.warn(`knowledge: embedding failed, using lexical retrieval: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
+    // Retrieval produces a candidate pool; rerank (if configured) re-scores it
+    // before the threshold + Top K cut, exactly like Cherry Studio's pipeline.
+    const poolSize = Math.min(chunks.length, Math.max(topK * 4, 20))
+    const ranked = rank(query, candidates, {
+      mode: requestedMode,
+      topK: poolSize,
+      threshold: 0,
+      mmr: request.mmr ?? config.mmrDiversity > 0,
+      mmrLambda: config.mmrDiversity,
+      queryVector,
+    })
+    throwIfAborted(signal)
+    const retrieval = retrievalStatus(
+      requestedMode,
+      { attempted: true, succeeded: true, returnedCount: ranked.filter(hit => hit.lexicalScore !== undefined).length },
+      {
+        attempted: requestedMode !== 'lexical' && config.embeddingProvider !== 'none',
+        succeeded: queryVector !== undefined,
+        returnedCount: ranked.filter(hit => hit.vectorScore !== undefined).length,
+      },
+    )
+    return this.finishSearch(store, config, query, requestedMode, ranked, byId, topK, threshold, chunks.length, startedAt, retrieval, allowRerank, signal)
+  }
+
+  /** Merge independent query rankings with RRF, then optionally rerank once. */
+  private async finishMultiQuerySearch(
+    config: KnowledgeConfig,
+    query: string,
+    requestedMode: SearchMode,
+    results: readonly SearchResult[],
+    topK: number,
+    requestedThreshold: number | undefined,
+    startedAt: number,
+    allowRerank: boolean,
+    signal?: AbortSignal,
+  ): Promise<SearchResult> {
+    const store = this.requireStore()
+    throwIfAborted(signal)
+    const orders = results.map(result => result.hits.map(hit => hit.chunkId))
+    const fused = reciprocalRankFusion(orders)
+    const maxFused = results.length / (RRF_K + 1)
+    const byId = new Map<string, SearchHit>()
+    for (const result of results) {
+      for (const hit of result.hits) if (!byId.has(hit.chunkId)) byId.set(hit.chunkId, hit)
+    }
+    let hits = [...byId.values()]
+      .map(hit => ({ ...hit, score: (fused.get(hit.chunkId) ?? 0) / maxFused }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.min(50, Math.max(topK * 4, 20)))
+    const applied = await this.applyRerank(store, config, query, hits, topK, allowRerank, signal)
+    hits = applied.hits
+
+    const retrieval = combineRetrievalStatus(requestedMode, results)
+    const mode = retrieval.effectiveMode
+    const threshold = requestedThreshold ?? config.similarityThreshold
+    if (applied.reranked || mode === 'vector') hits = hits.filter(hit => hit.score >= threshold)
+    const finalHits = attachContextWindows(store, hits.slice(0, topK), query, config.siblingChunks, SEARCH_EVIDENCE_TOKENS)
+    return {
+      query,
+      mode,
+      scoreKind: applied.reranked ? 'rerank' : 'rrf',
+      retrieval,
+      total: results.reduce((max, result) => Math.max(max, result.total), 0),
+      reranked: applied.reranked,
+      ...(applied.rerank !== undefined ? { rerank: applied.rerank } : {}),
+      elapsedMs: Date.now() - startedAt,
+      hits: finalHits,
+    }
+  }
+
+  /** Shared tail: rerank (optional), threshold + top-K cut, and hit mapping. */
+  private async finishSearch(
+    store: Store,
+    config: KnowledgeConfig,
+    query: string,
+    requestedMode: SearchMode,
+    initial: RankedHit[],
+    byId: ReadonlyMap<string, KnowledgeChunk>,
+    topK: number,
+    threshold: number,
+    total: number,
+    startedAt: number,
+    // Required, and placed before the optional tail so the compiler enforces it:
+    // the status must come from the lanes that actually ran. The old row-derived
+    // default is gone because that inference IS the #16 defect — a search whose
+    // vector lane contributed reported `mode: "lexical"` whenever no single row
+    // happened to carry both scores.
+    retrieval: RetrievalStatus,
+    allowRerank = true,
+    signal?: AbortSignal,
+  ): Promise<SearchResult> {
+    throwIfAborted(signal)
+    const ranked = initial
+    const candidates = ranked
+      .map(hit => searchHitOf(store, byId.get(hit.id), hit, this.citationOrigin()))
+      .filter((hit): hit is SearchHit => hit !== undefined)
+    const applied = await this.applyRerank(store, config, query, candidates, topK, allowRerank, signal)
+
+    // Cherry's applyRelevanceThreshold: only 'relevance' scores are
+    // threshold-filtered — pure-vector cosine (mode 'vector') and reranked
+    // relevance. Raw BM25/hybrid ranking scores (incomparable scales) never
+    // are, even with a threshold configured.
+    const relevanceScores = applied.reranked || requestedMode === 'vector'
+    const hits = attachContextWindows(
+      store,
+      applied.hits
+        .filter(hit => (relevanceScores ? hit.score >= threshold : true))
+        .slice(0, topK),
+      query,
+      config.siblingChunks,
+      SEARCH_EVIDENCE_TOKENS,
+    )
+
+    return {
+      query,
+      mode: retrieval.effectiveMode,
+      scoreKind: applied.reranked ? 'rerank' : scoreKindForMode(retrieval.effectiveMode),
+      retrieval,
+      total,
+      reranked: applied.reranked,
+      ...(applied.rerank !== undefined ? { rerank: applied.rerank } : {}),
+      elapsedMs: Date.now() - startedAt,
+      hits,
+    }
+  }
+
+  /** One canonical rerank stage for both single-query retrieval and RRF-fused
+   * multi-query retrieval. It owns contextual input, deadline/retry policy,
+   * stable tie handling, structured degradation, and original-order fallback. */
+  private async applyRerank(
+    store: Store,
+    config: KnowledgeConfig,
+    query: string,
+    input: readonly SearchHit[],
+    topK: number,
+    allowRerank: boolean,
+    signal?: AbortSignal,
+  ): Promise<{ hits: SearchHit[]; reranked: boolean; rerank?: RerankStatus }> {
+    throwIfAborted(signal)
+    const original = [...input]
+    const rerankModel = allowRerank ? config.rerankModel.trim() : ''
+    if (rerankModel === '') return { hits: original, reranked: false }
+    if (original.length <= 1) {
+      return {
+        hits: original,
+        reranked: false,
+        rerank: this.notNeededRerankStatus(rerankModel, original.length),
+      }
+    }
+
+    const rerankQuery = fitRerankQuery(query)
+    const contextual = attachContextWindows(
+      store,
+      original,
+      query,
+      config.siblingChunks,
+      RERANK_EVIDENCE_TOKENS,
+      hit => rerankTitleReserve(hit.documentTitle),
+    )
+    const candidateCount = contextual.length
+    const rerankStartedAt = Date.now()
+    // A cold local child loads ~280MB before it can score anything, and that load
+    // shares this single deadline with the inference it precedes. Without an
+    // allowance the first query after a restart (or after an idle release) could
+    // be killed mid-load, which used to latch the readiness gate and leave the
+    // reranker unusable until a manual self-test (issue #18). The allowance is
+    // granted only when the child has not scored anything yet.
+    const rerankTimeoutMs = rerankModel.startsWith('local:')
+      ? config.localRerankTimeoutMs + (localRerankChildIsWarm() ? 0 : LOCAL_RERANK_LOAD_ALLOWANCE_MS)
+      : 60_000
+    try {
+      const scores = await rerankCandidates(
+        config.rerankBaseUrl,
+        config.rerankModel,
+        config.rerankApiKey,
+        rerankQuery,
+        contextual.map(hit => ({
+          id: hit.chunkId,
+          text: rerankEvidenceText(hit),
+        })),
+        {
+          topN: topK,
+          timeoutMs: rerankTimeoutMs,
+          deadlineAt: rerankStartedAt + rerankTimeoutMs,
+          retries: rerankModel.startsWith('local:') ? 0 : 1,
+          ...(signal !== undefined ? { signal } : {}),
+        },
+      )
+      throwIfAborted(signal)
+      const order = new Map(contextual.map((hit, index) => [hit.chunkId, index]))
+      const rescored = contextual
+        .filter(hit => scores.has(hit.chunkId))
+        .map(hit => ({ ...hit, score: scores.get(hit.chunkId)! }))
+        .sort((left, right) => right.score - left.score
+          || (order.get(left.chunkId) ?? 0) - (order.get(right.chunkId) ?? 0))
+      // rerankCandidates rejects an empty response, but retain this defensive
+      // branch for custom/test providers so an empty set never erases hits.
+      if (rescored.length === 0) {
+        const detail: RerankErrorDetail = {
+          code: 'invalid_response',
+          message: 'rerank provider returned no scored candidates',
+          retryable: false,
+          action: 'check_config',
+        }
+        const rerank = this.degradedRerankStatus(rerankModel, candidateCount, Date.now() - rerankStartedAt, detail)
+        this.logRerankFailure(rerankModel, detail.code, candidateCount, rerank.elapsedMs ?? 0, detail.message)
+        return { hits: original, reranked: false, rerank }
+      }
+      this.rerankLogState.delete(rerankModel)
+      return {
+        hits: rescored,
+        reranked: true,
+        rerank: this.appliedRerankStatus(rerankModel, candidateCount, Date.now() - rerankStartedAt),
+      }
+    } catch (error) {
+      throwIfAborted(signal)
+      const detail = rerankErrorDetail(error)
+      const rerank = this.degradedRerankStatus(rerankModel, candidateCount, Date.now() - rerankStartedAt, detail)
+      this.logRerankFailure(rerankModel, detail.code, candidateCount, rerank.elapsedMs ?? 0, rerankTechnicalMessage(error))
+      return { hits: original, reranked: false, rerank }
+    }
+  }
+
+  private rerankProvider(model: string): 'local' | 'remote' {
+    return model.startsWith('local:') ? 'local' : 'remote'
+  }
+
+  private notNeededRerankStatus(model: string, candidateCount: number): RerankStatus {
+    return {
+      configured: true,
+      provider: this.rerankProvider(model),
+      model,
+      status: 'not_needed',
+      attempted: false,
+      applied: false,
+      candidateCount,
+    }
+  }
+
+  private appliedRerankStatus(model: string, candidateCount: number, elapsedMs: number): RerankStatus {
+    return {
+      configured: true,
+      provider: this.rerankProvider(model),
+      model,
+      status: 'applied',
+      attempted: true,
+      applied: true,
+      candidateCount,
+      elapsedMs,
+    }
+  }
+
+  private degradedRerankStatus(model: string, candidateCount: number, elapsedMs: number, error: RerankErrorDetail): RerankStatus {
+    const skipped = ['model_not_downloaded', 'model_checking', 'model_unhealthy', 'unsupported_model', 'circuit_open', 'busy'].includes(error.code)
+    return {
+      configured: true,
+      provider: this.rerankProvider(model),
+      model,
+      // A gate refusal is not a degradation: nothing was attempted, so say so
+      // and omit the elapsed time rather than reporting a failure at 0ms.
+      status: skipped ? 'skipped' : 'degraded',
+      attempted: !skipped,
+      applied: false,
+      candidateCount,
+      ...(skipped ? {} : { elapsedMs }),
+      error,
+    }
+  }
+
+  private logRerankFailure(model: string, code: string, candidateCount: number, elapsedMs: number, technicalMessage: string): void {
+    if (this.rerankLogState.get(model) === code) return
+    this.rerankLogState.set(model, code)
+    this.ctx.logger.warn(`knowledge: rerank degraded model=${JSON.stringify(model)} code=${code} candidates=${candidateCount} elapsedMs=${elapsedMs} detail=${JSON.stringify(technicalMessage)}`)
+  }
+
+  // ── internal ──────────────────────────────────────────────────────────────
+
+  /**
+   * How many parse+ingest tasks may run concurrently per base (Cherry Studio:
+   * 5, on a per-base queue). Local-model inference no longer constrains this:
+   * it runs in a dedicated worker thread (see embed.ts), exactly like Cherry's
+   * own-worker embedding service.
+   */
+  private static readonly INGEST_CONCURRENCY = 5
+
+  private ingestConcurrency(): number {
+    return KnowledgeService.INGEST_CONCURRENCY
+  }
+
+  /** Queue one parse+ingest task behind a per-base worker pool (Cherry's job queue). */
+  private enqueueIngest(baseId: string, task: () => Promise<void | boolean>): void {
+    let entry = this.ingestQueues.get(baseId)
+    if (entry === undefined) {
+      entry = { pending: [], running: 0 }
+      this.ingestQueues.set(baseId, entry)
+    }
+    const meterId = `uploads:${baseId}`
+    if (!this.processingMeter.active(meterId)) this.processingMeter.start(meterId, baseId)
+    this.processingMeter.add(meterId)
+    entry.pending.push(task)
+    this.pumpIngestQueue(baseId)
+  }
+
+  private pumpIngestQueue(baseId: string): void {
+    const entry = this.ingestQueues.get(baseId)
+    if (entry === undefined) return
+    const concurrency = this.ingestConcurrency()
+    while (entry.running < concurrency && entry.pending.length > 0) {
+      const task = entry.pending.shift()
+      if (task === undefined) break
+      entry.running += 1
+      this.processingMeter.begin(`uploads:${baseId}`)
+      // Swallow the finally chain's rejection: a task that throws (e.g. an
+      // unexpected store error) would otherwise become an unhandledRejection
+      // and kill the whole DSH process.
+      let outcome: 'processed' | 'failed' = 'failed'
+      void task().then(result => { outcome = result === false ? 'failed' : 'processed' }).finally(() => {
+        this.processingMeter.settle(`uploads:${baseId}`, outcome)
+        entry.running -= 1
+        this.pumpIngestQueue(baseId)
+      }).catch((error: unknown) => {
+        this.ctx.logger.warn(`knowledge: ingest task failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+    if (entry.running === 0 && entry.pending.length === 0) { this.ingestQueues.delete(baseId); this.processingMeter.finish(`uploads:${baseId}`) }
+  }
+
+  /** Serialize a read-then-write section per base (dedup check + first persist). */
+  private withBaseWriteLock<T>(baseId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.baseWriteChains.get(baseId) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    this.baseWriteChains.set(baseId, run.then(() => undefined, () => undefined))
+    return run
+  }
+
+  /**
+   * Resolve once every queued/active ingest task has settled (all bases).
+   * Pipeline/test helper — the HTTP surface never needs it because the client
+   * polls /indexing-status. Throws when the tasks do not drain in time.
+   * The initial 25ms tick lets a fire-and-forget task (e.g. the in-place
+   * backfill after a model change) reach its first indexing entry before the
+   * first busy() probe, avoiding a false "idle".
+   */
+  async waitForIdle(timeoutMs = 15000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    await new Promise(resolve => setTimeout(resolve, 25))
+    const busy = (): boolean =>
+      this.indexing.size > 0
+      || this.embeddingBackfills.size > 0
+      || [...this.ingestQueues.values()].some(entry => entry.running > 0 || entry.pending.length > 0)
+    while (busy()) {
+      if (Date.now() > deadline) throw new Error('knowledge: ingest tasks did not settle in time')
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+  }
+
+  private async ingestDocument(input: {
+    baseId: string
+    title: string
+    sourceType: DocumentSourceType
+    fileName?: string
+    mimeType?: string
+    url?: string
+    parentDirectoryId?: string
+    text: string
+    documentId?: string
+    /** A portable archive may contain the same text at different paths. */
+    keepSeparate?: boolean
+    processed?: ProcessedFile
+    /** Base-relative path of the persisted original source bytes (file docs). */
+    rawFilePath?: string
+    /** Absolute source path the item was imported from (file/path imports). */
+    sourcePath?: string
+    /** Pre-created placeholder id (already stored, shown while embedding). */
+    placeholderId?: string
+  }, signal?: AbortSignal): Promise<KnowledgeDocument> {
+    const store = this.requireStore()
+    const config = this.getConfigFor(input.baseId)
+    if (store.getBase(input.baseId)?.storageMode === 'external' && (!input.sourcePath || input.sourceType !== 'file')) throw new Error('External bases only accept files from their selected source folder')
+    const contentHash = sha256(input.text)
+    // Dedup check + first persist run under the per-base write lock: concurrent
+    // imports of identical content must not both pass the check (Cherry guards
+    // the same read-then-write with its per-base mutation lock).
+    const half = await this.withBaseWriteLock(input.baseId, async () => {
+      // Cherry's deleting-guard: a base deleted while a queued import waited
+      // must not accept new rows; a placeholder row deleted by the user before
+      // its queued task ran must not be recreated.
+      if (store.getBase(input.baseId) === undefined) {
+        throw new Error('knowledge base no longer exists (deleted while indexing)')
+      }
+      if (input.placeholderId !== undefined && store.getDocument(input.placeholderId) === undefined) {
+        throw new Error('document no longer exists (deleted while indexing)')
+      }
+      if (!input.keepSeparate && store.getBase(input.baseId)?.storageMode !== 'external') {
+        const duplicate = store.findDocumentByContentHash
+          ? store.findDocumentByContentHash(input.baseId, contentHash, input.placeholderId)
+          : store.listDocuments(input.baseId, { includeRawText: false }).find(doc => doc.id !== input.placeholderId && doc.contentHash === contentHash)
+        if (duplicate) throw new Error(`duplicate document: "${duplicate.title}" already contains identical content`)
+      }
+      const docId = input.placeholderId ?? input.documentId ?? crypto.randomUUID()
+      const prior = input.placeholderId !== undefined ? store.getDocument(docId) : undefined
+      const createdAt = prior?.createdAt ?? Date.now()
+      // Persist the document (with its source text) BEFORE embedding starts and
+      // mark it incomplete: a crash mid-embedding then leaves a recoverable
+      // record — startup recovery re-runs the embed with hash reuse, which only
+      // re-embeds the batches that never landed. Without this write a crash
+      // would leave either a raw placeholder (no text to rebuild from) or an
+      // old complete record, both losing the in-flight work.
+      const halfDoc: KnowledgeDocument = {
+        id: docId,
+        baseId: input.baseId,
+        title: input.title,
+        sourceType: input.sourceType,
+        ...(input.processed !== undefined ? { processing: input.processed.processing } : {}),
+        ...(input.fileName !== undefined ? { fileName: input.fileName } : {}),
+        ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
+        ...(input.url !== undefined ? { url: input.url } : {}),
+        ...(input.parentDirectoryId !== undefined ? { parentDirectoryId: input.parentDirectoryId } : {}),
+        ...(input.rawFilePath !== undefined ? { rawFilePath: input.rawFilePath } : {}),
+        ...(input.sourcePath !== undefined ? { sourcePath: input.sourcePath } : {}),
+        contentHash,
+        rawText: input.text,
+        charCount: input.text.length,
+        tokenCount: estimateTokens(input.text),
+        chunkCount: 0,
+        incomplete: true,
+        createdAt,
+        updatedAt: Date.now(),
+      }
+      await store.putDocument(halfDoc)
+      return halfDoc
+    })
+    this.indexingFailures.delete(half.id)
+    // Chunking (regular or semantic) happens inside buildChunks; passing no
+    // pieces lets the configured semanticChunk path run.
+    const pieces = this.processingChunks(input.processed, config)
+    const { chunks, embeddingError, embeddingErrorCode } = await this.buildChunks(input.baseId, half.id, input.title, input.text, config, pieces, batch => store.stageDocumentGeneration(half, batch), signal, half.processing?.revision)
+    signal?.throwIfAborted()
+    // A delete that landed mid-embedding must not resurrect the row nor write
+    // chunks under a deleted base (Cherry's deleting-guard).
+    if (store.getDocument(half.id) === undefined || store.getBase(input.baseId) === undefined) {
+      // A delete landed mid-embedding: the row is gone, so any batch that had
+      // already passed its liveness check must not survive as orphan chunks
+      // that keep matching the retrieval lanes.
+      await store.deleteChunks(half.id).catch(() => {})
+      this.indexing.delete(half.id)
+      return half
+    }
+    // `half` carries the crash-resumable `incomplete` marker written before
+    // embedding. The completing write must drop it: leaving it set made startup
+    // recovery treat every imported document as an interrupted import, so a
+    // default restart re-indexed the whole library — and with auto-resume off,
+    // re-marked it failed on every start. `reindexDocument` clears it the same
+    // way.
+    const { incomplete: _resumableMarker, ...completed } = half
+    const document: KnowledgeDocument = {
+      ...completed,
+      chunkCount: chunks.length,
+      ...(embeddingError !== undefined
+        ? { embeddingError, ...(embeddingErrorCode !== undefined ? { errorCode: embeddingErrorCode } : {}) }
+        : {}),
+      updatedAt: Date.now(),
+    }
+    await this.commitIndexedGeneration(document, chunks, input.text, config, signal)
+    this.indexing.delete(half.id)
+    await this.touchBase(input.baseId)
+    return document
+  }
+
+  private async commitIndexedGeneration(document:KnowledgeDocument,chunks:KnowledgeChunk[],text:string,config:KnowledgeConfig,signal?:AbortSignal):Promise<void>{
+    const {markdownRevision:_previous,...rest}=document
+    let revision:string|undefined
+    try{
+      if(config.keepInternalMarkdown)revision=await this.markdownSnapshots.save(document,text,chunks)
+      signal?.throwIfAborted()
+      this.assertIndexTargetAlive(document.id,document.baseId)
+      const deferred = this.deferredVectorDocuments.get(document.id)
+      if (deferred !== undefined) {
+        const base = this.requireStore().getBase(document.baseId)
+        if (base && !base.embeddingBackfillPending) await this.requireStore().putBase({ ...base, embeddingBackfillPending: true })
+      }
+      await this.requireStore().commitDocumentGeneration({...rest,
+        ...(deferred !== undefined ? { semanticChunkingPending: deferred } : {}),
+        indexingSettingsFingerprint:indexingSettingsFingerprint(config),...(revision?{markdownRevision:revision}:{})},chunks)
+      if (deferred !== undefined) {
+        this.deferredVectorDocuments.delete(document.id)
+        this.parseEpochs.set(document.baseId, (this.parseEpochs.get(document.baseId) ?? 0) + 1)
+        void this.backfillBaseEmbeddings(document.baseId).catch(error => this.ctx.logger.warn(`knowledge: deferred vectorization pending: ${String(error)}`))
+      }
+    }catch(error){
+      if(revision&&(error as {published?:boolean}).published!==true)await this.markdownSnapshots.removeRevision(document.baseId,document.id,revision).catch(()=>{})
+      throw error
+    }
+  }
+  citationOrigin(): string | undefined {
+    return this.ctx.webServer.getOrigin?.()
+  }
+
+  citationUrl(documentId: string, chunk: KnowledgeChunk): string {
+    const document = this.requireStore().getDocument(documentId)
+    if (!document || chunk.docId !== documentId) throw new NotFoundError('document not found')
+    const path = passageUrl(documentId, chunk, document.markdownRevision), origin = this.citationOrigin()
+    return origin ? new URL(path, origin).href : path
+  }
+
+  citationRangeUrl(documentId: string, start: number, end: number): string {
+    const selection = this.readDocumentText(documentId, start, end)
+    const text = selection.content
+    start = selection.charStart
+    const path = `/knowledge/documents/${encodeURIComponent(documentId)}/range/${start}-${start + text.length}?hash=${passageHash(text)}&view=1#citation`
+    const origin = this.citationOrigin()
+    return origin ? new URL(path, origin).href : path
+  }
+
+  getCitationRange(documentId: string, start: number, end: number, hash: string) {
+    const store = this.requireStore(), document = store.getDocument(documentId)
+    if (!document || !store.getBase(document.baseId)) throw new NotFoundError('Cited document is no longer available')
+    const text = document.rawText ?? reconstructFromChunks(store.listChunksByDoc(documentId))
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > text.length || end - start > 20000)
+      throw new NotFoundError('Invalid citation range')
+    const excerpt = text.slice(start, end)
+    if (passageHash(excerpt) !== hash) throw new ConflictError('Cited source text has changed; retrieve fresh evidence')
+    const lineStart = text.slice(0, start).split('\n').length
+    const lineEnd = text.slice(0, end - 1).split('\n').length
+    return { schema: 1 as const, baseId: document.baseId, documentId, revision: 'current-index', title: document.title,
+      sha256: passageHash(text), createdAt: document.updatedAt ?? document.createdAt, text,
+      passages: [{ chunkId: `${start}-${end}`, index: 0, text: excerpt, ranges: [{ start, end, lineStart, lineEnd }] }] }
+  }
+
+  /** Retention-off fallback: verify the cited chunk still exists and is unchanged. */
+  getCitationPassage(documentId: string, chunkId: string, hash: string) {
+    const store = this.requireStore(), document = store.getDocument(documentId)
+    const chunk = store.getChunk(chunkId)
+    if (!document || !store.getBase(document.baseId) || !chunk || chunk.docId !== documentId)
+      throw new NotFoundError('Cited passage is no longer available')
+    if (passageHash(chunk.text) !== hash) throw new ConflictError('Cited passage has changed; search again for current evidence')
+    const text = document.rawText ?? ''
+    return { schema: 1 as const, baseId: document.baseId, documentId, revision: 'current-index',
+      title: document.title, sha256: passageHash(text), createdAt: document.updatedAt ?? document.createdAt,
+      text, passages: mapMarkdownPassages(text, store.listChunksByDoc(documentId)).filter(row => row.chunkId === chunkId) }
+  }
+
+  async getMarkdownSnapshot(documentId:string,revision:string){
+    const store=this.requireStore(),document=store.getDocument(documentId)
+    if(!document||!store.getBase(document.baseId))throw new NotFoundError('document not found')
+    const snapshot=await this.markdownSnapshots.load(document.baseId,documentId,revision)
+    if(!store.getDocument(documentId)||!store.getBase(document.baseId))throw new NotFoundError('document no longer exists')
+    if(!snapshot)throw new NotFoundError('saved Markdown revision not found')
+    return snapshot
+  }
+
+  private processingChunks(processed: ProcessedFile | undefined, config: KnowledgeConfig): readonly ChunkPiece[] | undefined {
+    // Keep legacy/plain-text segmentation exactly as before. Only a structured
+    // processor result introduces structural boundaries and source mapping.
+    if (processed === undefined || processed.parsed.provider !== 'mineru-local' || processed.parsed.blocks.length === 0) return undefined
+    return chunkParsedDocument(processed.parsed, processed.processing.revision, config.chunkSize, config.chunkOverlap, {
+      structured: config.structuredChunking !== false, smartChunk: config.smartChunk,
+      separator: config.chunkSeparator, tokenLimit: config.chunkTokenLimit,
+    })
+  }
+
+  private async buildChunks(
+    baseId: string,
+    docId: string,
+    title: string,
+    text: string,
+    config: KnowledgeConfig,
+    pieces?: readonly ChunkPiece[],
+    onBatch?: (chunks: KnowledgeChunk[]) => Promise<void>,
+    signal?: AbortSignal,
+    processingRevision?: string,
+  ): Promise<{ chunks: KnowledgeChunk[]; embeddingError?: string; embeddingErrorCode?: 'dimension_mismatch' | 'embedding_provider' }> {
+    let deferredKey: string | undefined
+    // Bulk import owns parsing slots until this method returns. Waiting here
+    // would deadlock the queue, so commit lexical chunks and persist a later pass.
+    if (!this.vectorPhaseDocuments.has(docId) && config.embeddingProvider !== 'none' && this.hasParsingWork()) {
+      deferredKey = embeddingKey(config)
+      this.deferredVectorDocuments.set(docId, config.semanticChunk && pieces === undefined)
+      config = { ...config, semanticChunk: false, embeddingProvider: 'none' }
+    }
+    let slices: ReadonlyArray<ChunkPiece & { embedding?: number[] }>
+    if (pieces !== undefined) {
+      slices = pieces
+    } else if (config.semanticChunk) {
+      // Semantic chunking: embed paragraph-level segments, merge adjacent
+      // similar ones (length-weighted mean vector — no extra embedding pass).
+      // Segment embedding is best-effort: any failure falls back to the
+      // regular chunker and the normal embedding flow below still runs.
+      const segments = refineChunksByTokenLimit(splitSemanticSegments(text, { separator: config.chunkSeparator, candidateTokens: config.semanticChunkCandidateTokens ?? 128 }), config.chunkSize, estimateTokens)
+      let merged: Array<ChunkPiece & { embedding?: number[] }> | null = null
+      if (segments.length > 0 && config.embeddingProvider !== 'none') {
+        try {
+          const merger = createSemanticMerger(segments, config.chunkSize, config.semanticChunkThreshold)
+          const batchSize = Math.max(1, config.embeddingBatchSize)
+          // Semantic merging performs real embedding inference. Expose that
+          // work instead of leaving large documents at parsing/normalizing 0%.
+          const semanticTask = this.indexing.get(docId)
+          if (semanticTask) {
+            semanticTask.phase = 'embedding'; semanticTask.total = segments.length; semanticTask.progress = 0
+            this.processingProgress.delete(docId)
+          }
+          for (let i = 0; i < segments.length; i += batchSize) {
+            signal?.throwIfAborted()
+            this.assertIndexTargetAlive(docId, baseId)
+            if (this.vectorPhaseDocuments.has(docId)) await this.yieldEmbeddingWork(signal)
+            const batch = segments.slice(i, i + batchSize)
+            const embedded = await this.embedTextsOnce(config, batch.map(segment => segment.text))
+            if (embedded.length !== batch.length) throw new Error('Semantic embedding count mismatch')
+            batch.forEach((segment, index) => merger.add(segment, embedded[index]))
+            if (semanticTask) semanticTask.progress = Math.round(100 * Math.min(i + batch.length, segments.length) / segments.length)
+          }
+          merged = merger.finish()
+        } catch (error) {
+          signal?.throwIfAborted()
+          this.ctx.logger.warn(`knowledge: semantic chunking embedding failed, using regular chunker: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      slices = merged !== null && merged.length > 0 ? merged : chunkText(text, config.chunkSize, config.chunkOverlap, {
+        smartChunk: config.smartChunk,
+        separator: config.chunkSeparator,
+      })
+    } else {
+      slices = chunkText(text, config.chunkSize, config.chunkOverlap, {
+        smartChunk: config.smartChunk,
+        separator: config.chunkSeparator,
+      })
+    }
+    // Token budget: oversized chunks split at preferred boundaries (Cherry's
+    // refineChunksByTokenLimit) so local models never see inputs past their
+    // context window.
+    if (config.chunkTokenLimit > 0) {
+      slices = refineChunksByTokenLimit(slices, config.chunkTokenLimit, estimateTokens)
+    }
+    // Cherry's deleting-guard on every persisted batch: a delete that lands
+    // mid-embedding aborts the remaining batches instead of writing chunks
+    // under a vanished document/base. The caller's finishing write re-checks
+    // too (buildChunks reports the abort as an embeddingError).
+    const guardedOnBatch = onBatch !== undefined
+      ? (batch: KnowledgeChunk[]): Promise<void> => {
+          this.assertIndexTargetAlive(docId, baseId)
+          return onBatch(batch)
+        }
+      : undefined
+    const chunks: KnowledgeChunk[] = slices.map((piece, index) => ({
+      id: crypto.randomUUID(),
+      docId,
+      baseId,
+      index,
+      text: piece.text,
+      ...(piece.sourceSpans !== undefined ? { sourceSpans: piece.sourceSpans } : {}),
+      ...(processingRevision !== undefined ? { processingRevision } : {}),
+      ...(piece.heading !== undefined ? { heading: piece.heading } : {}),
+      ...(piece.embedding !== undefined ? { embedding: piece.embedding } : {}),
+      context: piece.heading !== undefined ? `${title} > ${piece.heading}` : title,
+    }))
+    // Reusing byte-identical indexed passages must not churn their random
+    // primary keys, text payload pages or citation links on every rebuild.
+    const store = this.requireStore()
+    const identities = store.listChunkIdentitiesByDoc?.(docId)
+      ?? store.listChunksByDoc(docId).map(chunk => ({ id: chunk.id, index: chunk.index, text: chunk.text, searchText: chunkSearchText(chunk) }))
+    const previousByIndex = new Map(identities.map(chunk => [chunk.index, chunk]))
+    chunks.forEach((chunk, index) => {
+      const previous = previousByIndex.get(chunk.index)
+      if (previous?.text === chunk.text && previous.searchText === chunkSearchText(chunk)) chunks[index] = { ...chunk, id: previous.id }
+    })
+    if (deferredKey) {
+      // Preserve completed vectors before replacing the generation. Deferral
+      // must not turn an unchanged reindex into a full embedding bill.
+      const hashes = chunks.map(chunk => hashEmbeddingText(chunkSearchText(chunk)))
+      const cached = this.requireStore().listEmbeddingVectorsByHashes(hashes, deferredKey)
+      for (let i = 0; i < chunks.length; i++) {
+        const vector = cached.get(hashes[i])
+        if (vector) chunks[i] = { ...chunks[i], embedding: vector, embeddingModel: deferredKey }
+      }
+    }
+    let embeddingError: string | undefined
+    let embeddingErrorCode: 'dimension_mismatch' | 'embedding_provider' | undefined
+    if (config.embeddingProvider !== 'none' && chunks.length > 0) {
+      const key = embeddingKey(config)
+      const taskController = this.indexing.get(docId)?.controller
+      this.indexing.set(docId, { baseId, title, phase: 'embedding', total: chunks.length, progress: 0, controller: taskController })
+      try {
+        // Library-wide vector reuse (Cherry's decision A4): chunks whose search
+        // text is byte-identical to a chunk already stored under the SAME
+        // embedding model get that stored vector; only the missing hashes hit
+        // the embedding API. This covers re-chunking after a chunk-size change,
+        // reindexing, and re-importing text already indexed elsewhere — the
+        // reuse key is the hash of the exact text the model sees, so an equal
+        // hash guarantees an equal vector.
+        const hashes = chunks.map(chunk => hashEmbeddingText(chunkSearchText(chunk)))
+        const stored = key !== undefined
+          ? this.requireStore().listEmbeddingVectorsByHashes(hashes, key)
+          : new Map<string, number[]>()
+        // Cherry's `assertEmbeddingVectors`: one consistent width per batch and
+        // it must match the width already stored under this model — a switched
+        // model/维度 would silently corrupt every downstream cosine search.
+        const storedDimension = [...stored.values()][0]?.length
+        const need: number[] = []
+        const needTexts: string[] = []
+        for (let i = 0; i < chunks.length; i += 1) {
+          // Semantic merging already produced this chunk's vector (mean of its
+          // segments) — tag the model and skip the API call.
+          if (chunks[i].embedding !== undefined && key !== undefined) {
+            chunks[i] = { ...chunks[i], embeddingModel: key }
+            continue
+          }
+          const cached = stored.get(hashes[i])
+          if (cached !== undefined) {
+            chunks[i] = { ...chunks[i], embedding: cached, ...(key !== undefined ? { embeddingModel: key } : {}) }
+          } else {
+            need.push(i)
+            needTexts.push(chunkSearchText(chunks[i]))
+          }
+        }
+        // Embed in batches and persist every finished batch as it lands: a
+        // crash mid-embedding then leaves each completed batch in the store
+        // (onBatch → putChunkBatch), so startup recovery resumes from the
+        // persisted state — hash reuse re-embeds only the missing batches.
+        // The local in-process model is capped at 8 chunks per call (Cherry
+        // uses 10) so one forward pass never allocates a huge intermediate
+        // tensor in the shared main-process WASM heap.
+        const batchSize = config.embeddingProvider === 'local'
+          ? Math.min(config.embeddingBatchSize, config.embeddingModel === FP16_EMBEDDING_MODEL ? 64 : 8)
+          : config.embeddingBatchSize
+        for (let i = 0; i < need.length; i += batchSize) {
+          const batch = need.slice(i, i + batchSize)
+          const batchTexts = needTexts.slice(i, i + batchSize)
+          // Cherry's job retry policy (3 attempts, exponential backoff): a
+          // transient provider/network failure retries the batch before the
+          // import degrades to lexical-only.
+          const vectors = await this.embedWithRetry(config, batchTexts, signal)
+          // Same-width guarantee across the whole batch (a provider mixing
+          // widths would poison every vector comparison in the store).
+          const widths = new Set(vectors.map(vector => vector.length))
+          if (widths.size > 1) {
+            throw new Error(`embedding returned mixed vector dimensions: ${[...widths].join(', ')}`)
+          }
+          const width = vectors[0]?.length ?? 0
+          if (width === 0) throw new Error('embedding returned empty vectors')
+          if (storedDimension !== undefined && storedDimension !== width) {
+            embeddingErrorCode = 'dimension_mismatch'
+            throw new Error(`embedding vector dimension ${width} does not match the ${storedDimension} already stored for model "${key}" — switch back or reindex the base`)
+          }
+          const done: KnowledgeChunk[] = []
+          for (let j = 0; j < batch.length; j += 1) {
+            const index = batch[j]
+            chunks[index] = { ...chunks[index], embedding: vectors[j], ...(key !== undefined ? { embeddingModel: key } : {}) }
+            done.push(chunks[index])
+          }
+          if (guardedOnBatch !== undefined) await guardedOnBatch(done)
+          this.indexing.set(docId, { baseId, title, phase: 'embedding', total: need.length, progress: Math.round((Math.min(i + batch.length, need.length) / need.length) * 100), controller: taskController })        }
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (isMetadataWriteFailure(error)) throw error
+        embeddingError = error instanceof Error ? error.message : String(error)
+        embeddingErrorCode ??= 'embedding_provider'
+        // Record it where /indexing-status can see it, with the REAL phase and
+        // code. Only the parse path used to write this map (and it hardcoded
+        // phase 'parsing'), so an embedding failure was visible as
+        // `phase: "embedding", progress: 0` and then vanished with no error.
+        // buildChunks serves both import and reindex, so this covers both.
+        this.indexingFailures.set(docId, {
+          baseId,
+          title,
+          phase: 'embedding',
+          code: embeddingErrorCode,
+          message: safeIndexingErrorMessage(embeddingError),
+          expireAt: Date.now() + FAILURE_LINGER_TTL_MS,
+        })
+        this.ctx.logger.warn(`knowledge: embedding during import failed, storing lexical-only chunks: ${embeddingError}`)
+        // A local model that cannot embed must not keep reporting `ready` in the
+        // settings poller: previously only the download path marked an error, so
+        // every embed could fail while /local-model-status stayed green.
+        if (config.embeddingProvider === 'local' && config.embeddingModel.trim() !== '') {
+          markLocalModelError(config.embeddingModel, embeddingError)
+        }
+      } finally {
+        const active = this.indexing.get(docId)
+        // Cherry's linger: keep the final percentage visible for ~60s so the
+        // UI does not blank it while the row still reads processing.
+        if (active !== undefined) {
+          this.progressLinger.set(docId, {
+            baseId,
+            title,
+            phase: active.phase,
+            progress: active.progress,
+            expireAt: Date.now() + PROGRESS_LINGER_TTL_MS,
+          })
+        }
+      }
+    }
+    return { chunks, embeddingError, embeddingErrorCode }
+  }
+
+  /** Embed one batch through the configured provider (empty input → empty output). */
+  private async embedTextsOnce(config: KnowledgeConfig, texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
+    if (texts.length === 0) return []
+    embeddingAcceleration.setIndexCpuAvailability(() => !this.hasParsingWork())
+    embeddingFp16Acceleration.setIndexCpuAvailability(() => !this.hasParsingWork())
+    return embedTexts(
+      config.embeddingProvider,
+      config.embeddingBaseUrl,
+      config.embeddingModel,
+      config.embeddingApiKey,
+      texts,
+      signal,
+      'index',
+      config.embeddingDimensions ?? 0,
+    )
+  }
+
+  /**
+   * Embed with Cherry's job retry policy: 3 attempts, exponential backoff
+   * (1s → 30s), so a transient provider/network failure self-heals instead of
+   * degrading a whole import to lexical-only. An external abort (delete)
+   * interrupts the request chain immediately.
+   */
+  private async embedWithRetry(config: KnowledgeConfig, texts: readonly string[], signal?: AbortSignal): Promise<number[][]> {
+    return retryDocument(() => this.embedTextsOnce(config, texts, signal), { signal,
+      onRetry: attempt => { this.ctx.logger.warn(`knowledge: embedding attempt ${attempt}/3 failed; retrying`) },
+    })
+  }
+
+  /** Bump the base's updatedAt so the data view's "更新于" stays meaningful. */
+  private async touchBase(baseId: string): Promise<void> {
+    if (this.directoryWriteBatches.has(baseId)) return
+    const store = this.requireStore()
+    const base = store.getBase(baseId)
+    if (base !== undefined) await store.putBase({ ...base, updatedAt: Date.now() })
+  }
+
+  private requireStore(): Store {
+    if (this.store === undefined) {
+      // A durable backend that failed to open is NOT an empty library: report
+      // the real cause so the panel and the model both see "storage
+      // unavailable" instead of zero bases.
+      if (this.storageError !== undefined) {
+        throw new StorageUnavailableError(`knowledge storage is unavailable: ${this.storageError.message}`)
+      }
+      throw new Error('knowledge store is not ready')
+    }
+    return this.store
+  }
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+function chunkSearchText(chunk: KnowledgeChunk): string {
+  return chunk.context !== undefined && chunk.context.length > 0
+    ? `${chunk.context}\n${chunk.text}`
+    : chunk.text
+}
+
+/** Stable identifier for the embedding source, used to detect model changes. */
+function embeddingKey(config: KnowledgeConfig): string | undefined {
+  if (config.embeddingProvider === 'none') return undefined
+  // `embedTexts` falls back to the default local model when the field is empty;
+  // mirror that so the key matches what actually produced the vectors.
+  const model = config.embeddingModel.trim() === '' && config.embeddingProvider === 'local'
+    ? DEFAULT_LOCAL_MODEL
+    : config.embeddingModel.trim()
+  if (model === '') return undefined
+  // Older padded Qwen batches are not numerically compatible with the
+  // canonical single-text path, despite identical dimensions and weights.
+  const format = config.embeddingProvider === 'local' && model === localSearch.embeddingId ? ':portable-fp16-v1' : config.embeddingProvider === 'local' && model === FP16_EMBEDDING_MODEL ? ':canonical-fp16-v1' : config.embeddingProvider === 'local' && /qwen3/i.test(model) && /onnx/i.test(model)
+    ? ':canonical-single-v1' : config.embeddingProvider === 'local' && /(?:bge|gte|e5)/i.test(model) ? ':full-context-v1' : ''
+  return `${config.embeddingProvider}:${model}${format}${embeddingDimensionTag(config)}`
+}
+
+function retrievalStatus(
+  requestedMode: SearchMode,
+  lexical: RetrievalStatus['lexical'],
+  vector: RetrievalStatus['vector'],
+): RetrievalStatus {
+  const effectiveMode: SearchMode = lexical.succeeded && vector.succeeded
+    ? 'hybrid'
+    : vector.succeeded
+      ? 'vector'
+      : 'lexical'
+  return { requestedMode, effectiveMode, lexical, vector }
+}
+
+function emptyRetrievalStatus(requestedMode: SearchMode): RetrievalStatus {
+  return retrievalStatus(
+    requestedMode,
+    { attempted: false, succeeded: false, returnedCount: 0 },
+    { attempted: false, succeeded: false, returnedCount: 0 },
+  )
+}
+
+function emptySearchResult(query: string, requestedMode: SearchMode, elapsedMs: number): SearchResult {
+  const retrieval = emptyRetrievalStatus(requestedMode)
+  return {
+    query,
+    mode: retrieval.effectiveMode,
+    scoreKind: scoreKindForMode(retrieval.effectiveMode),
+    retrieval,
+    total: 0,
+    reranked: false,
+    elapsedMs,
+    hits: [],
+  }
+}
+
+function combineRetrievalStatus(requestedMode: SearchMode, results: readonly SearchResult[]): RetrievalStatus {
+  const lexical = results.reduce((total, result) => total + (result.retrieval?.lexical.returnedCount ?? 0), 0)
+  const vector = results.reduce((total, result) => total + (result.retrieval?.vector.returnedCount ?? 0), 0)
+  const lexicalAttempted = results.some(result => result.retrieval?.lexical.attempted === true)
+  const vectorAttempted = results.some(result => result.retrieval?.vector.attempted === true)
+  const lexicalSucceeded = results.some(result => result.retrieval?.lexical.succeeded === true)
+  const vectorSucceeded = results.some(result => result.retrieval?.vector.succeeded === true)
+  const lexicalError = results.find(result => result.retrieval?.lexical.errorCode !== undefined)?.retrieval?.lexical.errorCode
+  const vectorError = results.find(result => result.retrieval?.vector.errorCode !== undefined)?.retrieval?.vector.errorCode
+  return retrievalStatus(requestedMode, {
+    attempted: lexicalAttempted,
+    succeeded: lexicalSucceeded,
+    returnedCount: lexical,
+    ...(lexicalError !== undefined ? { errorCode: lexicalError } : {}),
+  }, {
+    attempted: vectorAttempted,
+    succeeded: vectorSucceeded,
+    returnedCount: vector,
+    ...(vectorError !== undefined ? { errorCode: vectorError } : {}),
+  })
+}
+
+function scoreKindForMode(mode: SearchMode): SearchScoreKind {
+  if (mode === 'hybrid') return 'rrf'
+  if (mode === 'vector') return 'vector_similarity'
+  return 'lexical_relevance'
+}
+
+function safeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function retrievalErrorCode(error: unknown): string {
+  if(error instanceof Error && error.name==='TimeoutError')return 'timeout'
+  if (error !== null && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string') {
+    return (error as { code: string }).code
+  }
+  return 'lane_error'
+}
+
+function safeIndexingErrorMessage(message: string): string {
+  // Status polling must remain useful without copying document text or a
+  // potentially huge provider payload into the API response.
+  const normalized = message.replace(/[\r\n]+/g, ' ')
+  return normalized.slice(0, snapSliceEnd(normalized, 300))
+}
+
+/** Bounded list of a base's top-level sources (directory roots / files / URLs /
+ *  text nodes), for the detail header. Nested children are covered by their
+ *  root, so only `parentDirectoryId === undefined` items are listed. */
+function baseSourceLines(documents: KnowledgeDocument[]): BaseSourceInfo[] {
+  const MAX = 4
+  const lines: BaseSourceInfo[] = []
+  for (const doc of documents) {
+    if (doc.parentDirectoryId !== undefined) continue
+    let kind: DocumentSourceType
+    let text: string
+    if (doc.sourceType === 'directory') {
+      kind = 'directory'
+      text = doc.sourcePath ?? doc.title
+    } else if (doc.sourceType === 'url') {
+      kind = 'url'
+      text = doc.url ?? doc.title
+    } else if (doc.sourceType === 'file') {
+      kind = 'file'
+      text = doc.sourcePath ?? doc.fileName ?? doc.title
+    } else {
+      kind = 'text'
+      text = 'node'
+    }
+    lines.push({
+      sourceId: doc.id,
+      kind,
+      text,
+      ...(doc.sourcePath !== undefined ? { sourcePath: doc.sourcePath } : {}),
+    })
+    if (lines.length >= MAX) break
+  }
+  return lines
+}
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+function estimateTokens(text: string): number {
+  const cjk = (text.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]/g) ?? []).length
+  const latin = text.length - cjk
+  return Math.max(1, Math.ceil(cjk / 1.5 + latin / 4))
+}
+
+function reconstructFromChunks(chunks: KnowledgeChunk[]): string {
+  return chunks
+    .slice()
+    .sort((a, b) => a.index - b.index)
+    .map(chunk => chunk.text)
+    .join('\n\n')
+}
+
+/**
+ * Sibling context of a search hit: the `radius` chunks before and after it in
+ * the same document, in reading order, each prefixed with its heading path so
+ * the caller can see where the excerpt sits. Empty when the chunk has no
+ * neighbours. This is the "full paragraph" a RAG answer needs — a bare chunk
+ * often cuts a sentence mid-way, and the neighbouring chunks carry the rest.
+ */
+const RERANK_EVIDENCE_TOKENS = 352
+const RERANK_QUERY_TOKENS = 128
+const RERANK_TITLE_TOKENS = 64
+const SEARCH_EVIDENCE_TOKENS = 768
+
+/** Deterministically retain both the intent at the start and qualifiers at the
+ * end of an oversized rerank query. The estimator is the same one used for
+ * evidence, so the pair budget remains enforceable without a model download. */
+function fitRerankQuery(query: string): string {
+  if (estimateContextTokens(query) <= RERANK_QUERY_TOKENS) return query
+  let low = 0
+  let high = query.length
+  let best = ''
+  while (low <= high) {
+    const retained = Math.floor((low + high) / 2)
+    const head = Math.ceil(retained * 0.6)
+    const tail = retained - head
+    const headEnd = snapSliceEnd(query, head)
+    const tailStart = snapSliceStart(query, query.length - tail)
+    const candidate = `${query.slice(0, headEnd).trimEnd()} … ${query.slice(tailStart).trimStart()}`
+    if (estimateContextTokens(candidate) <= RERANK_QUERY_TOKENS) {
+      best = candidate
+      low = retained + 1
+    } else {
+      high = retained - 1
+    }
+  }
+  return best || query.slice(0, snapSliceEnd(query, 1))
+}
+
+/** Bound untrusted document metadata before it enters the cross-encoder pair.
+ * The title remains useful for disambiguation, but can never crowd the
+ * query-centred anchor out of the fixed 352-token evidence budget. */
+function fitRerankTitle(title: string): string {
+  const trimmed = title.trim()
+  if (estimateContextTokens(trimmed) <= RERANK_TITLE_TOKENS) return trimmed
+  let low = 0
+  let high = trimmed.length
+  let best = ''
+  while (low <= high) {
+    const length = Math.floor((low + high) / 2)
+    const candidate = `${trimmed.slice(0, snapSliceEnd(trimmed, length)).trimEnd()}…`
+    if (estimateContextTokens(candidate) <= RERANK_TITLE_TOKENS) {
+      best = candidate
+      low = length + 1
+    } else {
+      high = length - 1
+    }
+  }
+  return best
+}
+
+function rerankTitleReserve(title: string): number {
+  const fitted = fitRerankTitle(title)
+  return fitted.length === 0 ? 0 : estimateContextTokens(`${fitted}\n`)
+}
+
+function rerankEvidenceText(hit: SearchHit): string {
+  const title = fitRerankTitle(hit.documentTitle)
+  const evidence = hit.contextWindow !== undefined ? serializeContextWindow(hit.contextWindow) : hit.text
+  const combined = title.length === 0 ? evidence : `${title}\n${evidence}`
+  // attachContextWindows reserved the exact fitted-title cost. Keep this
+  // defensive assertion local so a future serializer change degrades rerank
+  // instead of silently violating the public pair budget.
+  if (estimateContextTokens(combined) > RERANK_EVIDENCE_TOKENS) {
+    throw new Error('rerank evidence exceeded the 352-token budget')
+  }
+  return combined
+}
+
+function searchHitOf(store: Store, chunk: KnowledgeChunk | undefined, hit: RankedHit, origin?: string): SearchHit | undefined {
+  if (chunk === undefined) return undefined
+  const document=store.getDocument(chunk.docId)
+  return {
+    indexedMarkdownUrl: origin ? new URL(passageUrl(chunk.docId, chunk, document?.markdownRevision), origin).href : passageUrl(chunk.docId, chunk, document?.markdownRevision),
+    chunkId: chunk.id,
+    docId: chunk.docId,
+    baseId: chunk.baseId,
+    documentTitle: store.getDocument(chunk.docId)?.title ?? chunk.docId,
+    ...(chunk.heading !== undefined ? { heading: chunk.heading } : {}),
+    index: chunk.index,
+    text: chunk.text,
+    ...(chunk.sourceSpans !== undefined ? { sourceSpans: chunk.sourceSpans } : {}),
+    ...(chunk.processingRevision !== undefined ? { processingRevision: chunk.processingRevision } : {}),
+    score: hit.score,
+    ...(hit.vectorScore !== undefined ? { vectorScore: hit.vectorScore } : {}),
+    ...(hit.lexicalScore !== undefined ? { lexicalScore: hit.lexicalScore } : {}),
+  }
+}
+
+/** Attach token-bounded ordered context to all hits while loading all merged
+ * document ranges through one storage operation. */
+function attachContextWindows(
+  store: Store,
+  hits: readonly SearchHit[],
+  focus: string,
+  radius: number,
+  maxTokens: number,
+  reserveTokens?: (hit: SearchHit) => number,
+): SearchHit[] {
+  if (hits.length === 0) return []
+  const safeRadius = clampInt(radius, 0, 10, 0)
+  const ranges = mergeChunkRanges(hits.map(hit => ({
+    docId: hit.docId,
+    fromIdx: Math.max(0, hit.index - safeRadius),
+    toIdx: hit.index + safeRadius,
+  })))
+  const loaded = store.listChunksByIndexRanges(ranges)
+  const byDoc = new Map<string, KnowledgeChunk[]>()
+  for (const chunk of loaded) {
+    const list = byDoc.get(chunk.docId) ?? []
+    list.push(chunk)
+    byDoc.set(chunk.docId, list)
+  }
+  return hits.map(hit => {
+    const anchor: KnowledgeChunk = {
+      id: hit.chunkId,
+      docId: hit.docId,
+      baseId: hit.baseId,
+      index: hit.index,
+      text: hit.text,
+      ...(hit.sourceSpans !== undefined ? { sourceSpans: hit.sourceSpans } : {}),
+      ...(hit.processingRevision !== undefined ? { processingRevision: hit.processingRevision } : {}),
+      ...(hit.heading !== undefined ? { heading: hit.heading } : {}),
+    }
+    const neighbours = byDoc.get(hit.docId) ?? [anchor]
+    const document = store.getDocument(hit.docId)
+    const contextWindow = composeContextWindow(neighbours, anchor, {
+      before: safeRadius,
+      after: safeRadius,
+      maxTokens: Math.max(1, maxTokens - (reserveTokens?.(hit) ?? 0)),
+      focus,
+      documentChunkCount: document?.chunkCount,
+    })
+    const legacy = safeRadius > 0
+      ? neighbours
+        .filter(chunk => chunk.id !== anchor.id && chunk.index >= anchor.index - safeRadius && chunk.index <= anchor.index + safeRadius)
+        .sort((a, b) => a.index - b.index)
+        .map(chunk => `${chunk.heading !== undefined ? `[${chunk.heading}] ` : ''}${chunk.text}`)
+        .join('\n\n')
+      : ''
+    const { siblingContext: _oldSibling, contextWindow: _oldWindow, ...base } = hit
+    return {
+      ...base,
+      contextWindow,
+      ...(legacy.length > 0 ? { siblingContext: legacy } : {}),
+    }
+  })
+}
+
+function mergeChunkRanges(
+  ranges: readonly { docId: string; fromIdx: number; toIdx: number }[],
+): Array<{ docId: string; fromIdx: number; toIdx: number }> {
+  const ordered = [...ranges].sort((a, b) => a.docId.localeCompare(b.docId) || a.fromIdx - b.fromIdx || a.toIdx - b.toIdx)
+  const merged: Array<{ docId: string; fromIdx: number; toIdx: number }> = []
+  for (const range of ordered) {
+    const previous = merged[merged.length - 1]
+    if (previous !== undefined && previous.docId === range.docId && range.fromIdx <= previous.toIdx + 1) {
+      previous.toIdx = Math.max(previous.toIdx, range.toIdx)
+    } else {
+      merged.push({ ...range })
+    }
+  }
+  return merged
+}
+
+function clampInt(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, Math.trunc(value)))
+}
+
+/**
+ * Clamp a caller-supplied `rawTextLimit` to `[0, MAX_RAW_TEXT_LIMIT]`.
+ * `undefined` and non-finite values mean "no cap" (the caller did not ask for
+ * one); anything else is truncated and bounded. Exported for tests.
+ */
+export function clampRawTextLimit(limit: number | undefined): number | undefined {
+  if (limit === undefined || !Number.isFinite(limit)) return undefined
+  return Math.min(MAX_RAW_TEXT_LIMIT, Math.max(0, Math.trunc(limit)))
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted !== true) return
+  if (signal.reason instanceof Error) throw signal.reason
+  throw new DOMException('The operation was aborted', 'AbortError')
+}
+
+function throwIfDeadline(deadlineAt: number | undefined): void {
+  if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+    throw new DOMException('knowledge search deadline exceeded', 'TimeoutError')
+  }
+}
+
+/** Trim, validate, normalize, and cap multi-query variants. */
+function normalizeQueryVariants(primary: string, queries?: readonly string[]): string[] {
+  const variants = [primary]
+  const seen = new Set([primary.toLowerCase()])
+  for (const raw of (queries ?? []) as readonly unknown[]) {
+    if (typeof raw !== 'string') continue
+    const query = raw.trim()
+    if (query.length === 0) continue
+    if (query.length > 2000) throw new Error('extra search query must not exceed 2000 characters')
+    const key = query.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    variants.push(query)
+    if (variants.length >= 4) break
+  }
+  return variants
+}
+
+/** Drop empty-string config fields so a base only stores real overrides. */
+function compactBaseConfig(config: BaseConfig): BaseConfig {
+  const next: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(config)) {
+    if (typeof value === 'string') {
+      if (value.trim().length > 0) next[key] = value
+    } else if (typeof value === 'boolean') {
+      next[key] = value
+    } else if (value !== undefined && Number.isFinite(value)) {
+      next[key] = value
+    }
+  }
+  return next as BaseConfig
+}
+
+/** Merge a per-base config patch; an empty string clears the override (inherit global). */
+function mergeBaseConfig(existing: BaseConfig | undefined, patch: BaseConfig): BaseConfig | undefined {
+  const merged: Record<string, unknown> = { ...(existing ?? {}) }
+  for (const [key, value] of Object.entries(patch)) {
+    if (typeof value === 'string' && value.trim() === '') {
+      delete merged[key]
+    } else {
+      merged[key] = value
+    }
+  }
+  return merged as BaseConfig
+}
+
+function validateImageHeader(name: string, base64: string): void {
+  const kind = extensionOf(name)
+  if (!['png','jpg','jpeg','webp'].includes(kind)) return
+  const bytes = Buffer.from(base64.slice(0, 32), 'base64')
+  const valid = kind === 'png' ? bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a'
+    : kind === 'webp' ? bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP'
+    : bytes.subarray(0, 3).toString('hex') === 'ffd8ff'
+  if (!valid) throw new Error('Unsupported knowledge file type: invalid image data in ' + name)
+}
+
+function decodeBase64(value: string): Uint8Array {
+  if (typeof Buffer !== 'undefined') return Buffer.from(value, 'base64')
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+function encodeUtf8(text: string): Uint8Array {
+  return new TextEncoder().encode(text)
+}
+
+/** A safe file extension (leading dot, alphanumeric) for the raw store, from an upload name. */
+function safeRawExtension(fileName: string): string {
+  const ext = extname(fileName).toLowerCase()
+  return /^\.[a-z0-9]{1,10}$/.test(ext) ? ext : '.bin'
+}
+
+/** The extension of a stored raw file path (`.../<docId><ext>`). */
+function rawExtensionOf(relativePath: string): string {
+  const ext = extname(relativePath).toLowerCase()
+  return /^\.[a-z0-9]{1,10}$/.test(ext) ? ext : '.bin'
+}
+
+/** Hosts that must never be fetched by URL import — loopback, link-local,
+ *  and RFC1918 private ranges. Blocks the classic SSRF targets (metadata
+ *  endpoints, internal services); DNS-rebinding is outside this check (the
+ *  plugin trusts the host's resolver for public names).
+ *
+ *  Entries are the forms `URL.hostname` actually returns: it keeps the brackets
+ *  on an IPv6 literal, and the lookup below strips them before comparing, so the
+ *  previous bracketed entries could never match and EVERY IPv6 host bypassed the
+ *  guard (`http://[::1]/`, `http://[::ffff:127.0.0.1]:11434/`). Literal
+ *  addresses are now classified with `isIP` instead of a string table. */
+const BLOCKED_URL_HOSTS = new Set([
+  'localhost',
+  '0.0.0.0',
+  'metadata.google.internal',
+])
+
+/** Private, loopback, link-local, CGNAT, benchmarking, multicast and reserved
+ *  IPv4 space: none of it is a legitimate target for a document-supplied URL. */
+function isBlockedIpv4(host: string): boolean {
+  const parts = host.split('.').map(part => Number(part))
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return true
+  const a = parts[0]!
+  const b = parts[1]!
+  if (a === 0 || a === 10 || a === 127) return true
+  if (a === 169 && b === 254) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  if (a === 192 && b === 0) return true
+  if (a === 198 && (b === 18 || b === 19)) return true
+  if (a >= 224) return true
+  return false
+}
+
+/** Loopback, unspecified, unique-local, link-local and multicast IPv6, plus the
+ *  forms that reach the IPv4 stack (IPv4-mapped, in both notations). */
+function isBlockedIpv6(host: string): boolean {
+  if (host === '::' || host === '::1') return true
+  const mappedDotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(host)
+  if (mappedDotted !== null) return isBlockedIpv4(mappedDotted[1]!)
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host)
+  if (mappedHex !== null) {
+    const high = Number.parseInt(mappedHex[1]!, 16)
+    const low = Number.parseInt(mappedHex[2]!, 16)
+    return isBlockedIpv4(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`)
+  }
+  const firstGroup = host.split(':').find(part => part.length > 0)
+  const first = firstGroup === undefined ? 0 : Number.parseInt(firstGroup, 16)
+  if (Number.isNaN(first)) return true
+  if ((first & 0xfe00) === 0xfc00) return true // fc00::/7 unique local
+  if ((first & 0xffc0) === 0xfe80) return true // fe80::/10 link local
+  if ((first & 0xff00) === 0xff00) return true // ff00::/8 multicast
+  return false
+}
+
+function isBlockedUrlHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (BLOCKED_URL_HOSTS.has(host)) return true
+  const family = isIP(host)
+  if (family === 4) return isBlockedIpv4(host)
+  if (family === 6) return isBlockedIpv6(host)
+  // Named hosts keep the documented posture: the resolver is trusted, so only
+  // the explicit deny-list above applies.
+  return false
+}
+
+async function fetchHtml(url: string): Promise<string> {
+  // Manual redirect handling: `fetch` follows redirects by default, which
+  // would let a public page 302 to a loopback/private address and bypass the
+  // SSRF check below — every hop is validated here instead.
+  let current = url
+  for (let hop = 0; hop <= 5; hop += 1) {
+    let parsed: URL
+    try {
+      parsed = new URL(current)
+    } catch {
+      throw new Error(`invalid URL: ${current}`)
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`URL protocol not allowed: ${parsed.protocol}`)
+    }
+    if (isBlockedUrlHost(parsed.hostname)) {
+      throw new Error(`URL host not allowed: ${parsed.hostname}`)
+    }
+    const response = await httpFetch(parsed.toString(), {
+      method: 'GET',
+      headers: { 'user-agent': 'dsh-knowledge/0.1 (+knowledge-base-import)' },
+      timeoutMs: 30000,
+      redirect: 'manual',
+    })
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      if (location === null) throw new Error(`URL redirect without Location (HTTP ${response.status})`)
+      current = new URL(location, parsed).toString()
+      continue
+    }
+    if (!response.ok) throw new Error(`URL fetch failed: HTTP ${response.status}`)
+    const contentType = (response.headers.get('content-type') ?? '').split(';', 1)[0]?.trim().toLowerCase()
+    if (contentType !== '' && contentType !== 'text/html' && contentType !== 'application/xhtml+xml') {
+      throw new Error(`URL did not return HTML (content-type: ${contentType || 'unknown'})`)
+    }
+    return response.text()
+  }
+  throw new Error('URL redirect limit exceeded')
+}
+
+/** Lowercased extensions accepted by addFileDocument (defensive gate; the UI filters first). */
+const SUPPORTED_DOCUMENT_EXTENSION_SET = new Set<string>(SUPPORTED_DOCUMENT_EXTENSIONS)
+
+/** Dot-prefixed forms for the host-side directory scan (Cherry's directory import has no cap). */
+const DIRECTORY_EXTENSIONS = new Set(SUPPORTED_DOCUMENT_EXTENSIONS.map(ext => `.${ext}`))
+
+const DIRECTORY_MAX_FILES = 500
+const DIRECTORY_MAX_DEPTH = 8
+
+/** Recursively collect supported files under a directory (bounded). */
+async function scanDirectory(root: string): Promise<string[]> {
+  const found: string[] = []
+  async function walk(dir: string, depth: number): Promise<void> {
+    if (depth > DIRECTORY_MAX_DEPTH || found.length >= DIRECTORY_MAX_FILES) return
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch (error) {
+      throw new Error(`cannot read directory ${root}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    for (const entry of entries) {
+      if (found.length >= DIRECTORY_MAX_FILES) return
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await walk(full, depth + 1)
+      } else if (entry.isFile() && DIRECTORY_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
+        found.push(full)
+      }
+    }
+  }
+  await walk(root, 0)
+  return found
+}
+
+export default KnowledgeService

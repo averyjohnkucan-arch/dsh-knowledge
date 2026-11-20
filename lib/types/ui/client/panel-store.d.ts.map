@@ -1,0 +1,1 @@
+{"version":3,"file":"panel-store.d.ts","sourceRoot":"","sources":["../../../../src/ui/client/panel-store.ts"],"names":[],"mappings":"AAAA;;;;;GAKG;AAEH,MAAM,WAAW,mBAAmB;IAClC,WAAW,IAAI,OAAO,CAAA;IACtB,SAAS,CAAC,QAAQ,EAAE,MAAM,IAAI,GAAG,MAAM,IAAI,CAAA;IAC3C,IAAI,IAAI,IAAI,CAAA;IACZ,KAAK,IAAI,IAAI,CAAA;IACb,MAAM,IAAI,IAAI,CAAA;CACf;AAED,wBAAgB,yBAAyB,IAAI,mBAAmB,CAyB/D"}

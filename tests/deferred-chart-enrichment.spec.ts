@@ -1,0 +1,90 @@
+import {afterEach,expect,it,vi} from 'vitest'
+import {Context} from '@deepseek-ai/cordis'
+import {createHash} from 'node:crypto'
+import {KnowledgeService} from '../src/knowledge/index.js'
+const disposals:Array<()=>Promise<void>>=[]
+afterEach(async()=>{for(const dispose of disposals.splice(0))await dispose()})
+async function fixture(){
+ const ctx=new Context();ctx.provide('webServer',{register:()=>()=>{}})
+ const fiber=ctx.plugin(KnowledgeService,{embeddingProvider:'none',imageCaptionProvider:'off',chunkStorePath:'',deferredChartEnrichment:true} as import('../src/knowledge/config.js').Config)
+ await fiber;disposals.push(async()=>{await fiber.dispose()})
+ const service=ctx.get('knowledge') as KnowledgeService;const internal=service as any
+ const base=await service.createBase({name:'idle charts'})
+ const doc=await service.addTextDocument({baseId:base.id,title:'example.pdf',content:'Original searchable source text.'})
+ const bytes=Buffer.from('PDF fixture');const sourceHash=createHash('sha256').update(bytes).digest('hex')
+ const parsed={schemaVersion:1 as const,text:'Original searchable source text.',sourceHash,provider:'builtin' as const,optionsFingerprint:'test',completeness:'complete' as const,blocks:[{id:'text',index:0,type:'text' as const,text:'Original searchable source text.',textStart:0,textEnd:32}],assets:[],warnings:[]}
+ const processing=await internal.artifacts.save(base.id,doc.id,{document:parsed,assets:[]})
+ await internal.store.putDocument({...internal.store.getDocument(doc.id),sourceType:'file',fileName:'example.pdf',rawFilePath:'fixture.pdf',processing})
+ internal.store.raw={read:async()=>bytes}
+ const extract=vi.spyOn(service.structureV3,'extract').mockResolvedValue({document:{...parsed,blocks:[{id:'table',index:0,type:'table',text:'Measured chart value: 42',textStart:0,textEnd:24}]},assets:[]})
+ return {service,internal,doc,extract,processing}
+}
+it('merges idle chart text without re-running source OCR, and marks the new revision once',async()=>{
+ const {internal,doc,extract}=await fixture()
+ expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(true)
+ const next=internal.store.getDocument(doc.id)
+ expect(next.rawText).toContain('Original searchable source text.')
+ expect(next.rawText).toContain('Measured chart value: 42')
+ expect(next.deferredChartEnrichment).toEqual({revision:next.processing.revision,status:'completed'})
+ expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(false)
+ expect(extract).toHaveBeenCalledOnce()
+ expect(internal.store.listChunksByDoc(doc.id).map((c:any)=>c.text).join(' ')).toContain('Measured chart value: 42')
+})
+it('cancellation retains the original searchable generation and leaves enrichment resumable',async()=>{
+ const {internal,doc,extract,processing}=await fixture();const controller=new AbortController()
+ extract.mockImplementation(async()=>{controller.abort();throw controller.signal.reason})
+ await internal.enrichNextIdleChart(controller.signal)
+ const next=internal.store.getDocument(doc.id)
+ expect(next.processing.revision).toBe(processing.revision)
+ expect(next.deferredChartEnrichment).toBeUndefined()
+ expect(next.rawText).toBe('Original searchable source text.')
+ expect(internal.store.listChunksByDoc(doc.id).length).toBeGreaterThan(0)
+})
+it('an optional model failure keeps source text and records failure without an infinite retry loop',async()=>{
+ const {internal,doc,extract,processing}=await fixture();extract.mockRejectedValue(new Error('model unavailable'))
+ await internal.enrichNextIdleChart(new AbortController().signal)
+ const next=internal.store.getDocument(doc.id)
+ expect(next.processing.revision).toBe(processing.revision)
+ expect(next.deferredChartEnrichment.status).toBe('failed')
+ expect(next.rawText).toBe('Original searchable source text.')
+ expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(false)
+})
+
+it('a foreground interruption during embedding does not mark the model as failed',async()=>{
+ const {service,internal,doc,processing}=await fixture();const controller=new AbortController()
+ const config={...service.getConfigFor(doc.baseId),embeddingProvider:'openai',embeddingModel:'test'}
+ vi.spyOn(service,'getConfigFor').mockReturnValue(config as any)
+ vi.spyOn(internal,'embedWithRetry').mockImplementation(async()=>{controller.abort();throw controller.signal.reason})
+ await internal.enrichNextIdleChart(controller.signal)
+ expect(internal.store.getDocument(doc.id).processing.revision).toBe(processing.revision)
+ expect(internal.store.getDocument(doc.id).deferredChartEnrichment).toBeUndefined()
+ expect(internal.indexingFailures.has(doc.id)).toBe(false)
+})
+
+it('runs photos and charts as separate passes and carries completion markers across merges',async()=>{
+ const captions=await import('../src/knowledge/caption.js')
+ const original=captions.captionPdfImages
+ const calls:string[]=[]
+ const caption=vi.spyOn(captions,'captionPdfImages').mockImplementation(async(bytes,config)=>{
+  calls.push(config.provider)
+  return config.provider==='dsh'?'A photograph of a mountain.':original(bytes,config)
+ })
+ try{
+  const {service,internal,doc}=await fixture()
+  const config={...service.getConfigFor(doc.baseId),deferredPhotoCaptions:true,deferredPhotoCaptionModel:'ninfer/vision'}
+  vi.spyOn(service,'getConfigFor').mockReturnValue(config)
+  await internal.enrichNextIdleChart(new AbortController().signal)
+  let stored=internal.store.getDocument(doc.id)
+  expect(calls).toEqual(['dsh'])
+  expect(stored.rawText).toContain('photograph of a mountain')
+  expect(stored.rawText).not.toContain('Measured chart value')
+  await internal.enrichNextIdleChart(new AbortController().signal)
+  stored=internal.store.getDocument(doc.id)
+  expect(calls).toEqual(['dsh','paddle'])
+  expect(stored.rawText).toContain('photograph of a mountain')
+  expect(stored.rawText).toContain('Measured chart value')
+  expect(stored.deferredPhotoCaptions.revision).toBe(stored.processing.revision)
+  expect(stored.deferredChartEnrichment.revision).toBe(stored.processing.revision)
+  expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(false)
+ }finally{caption.mockRestore()}
+})

@@ -1,0 +1,57 @@
+{
+  "results": [
+    {
+      "name": "before32",
+      "concurrency": 32,
+      "seconds": 1.2230754980000003,
+      "documents": 256,
+      "chunks": 4219,
+      "inputBytes": 6847378,
+      "walBytes": 41195912,
+      "batchHistogram": {
+        "32": 8
+      },
+      "accountedWriteBytes": 134377472
+    },
+    {
+      "name": "after32",
+      "concurrency": 32,
+      "seconds": 1.594858486,
+      "documents": 256,
+      "chunks": 4219,
+      "inputBytes": 6847378,
+      "walBytes": 36185992,
+      "batchHistogram": {
+        "32": 8
+      },
+      "accountedWriteBytes": 121982976
+    },
+    {
+      "name": "after128",
+      "concurrency": 128,
+      "seconds": 1.0310190510000001,
+      "documents": 256,
+      "chunks": 4219,
+      "inputBytes": 6847378,
+      "walBytes": 51092152,
+      "batchHistogram": {
+        "128": 2
+      },
+      "accountedWriteBytes": 96636928
+    },
+    {
+      "name": "after256",
+      "concurrency": 256,
+      "seconds": 0.9324772259999999,
+      "documents": 256,
+      "chunks": 4219,
+      "inputBytes": 6847378,
+      "walBytes": 51042712,
+      "batchHistogram": {
+        "128": 2
+      },
+      "accountedWriteBytes": 96567296
+    }
+  ],
+  "notes": "Read-only 256 Markdown sources; actual DomainStore/SQLite pipeline including placeholder, resumable source-text update, publication and source signature. Simulated 5ms parser delay in both variants. Separate databases; WAL checkpoint mode: runtime automatic. Linux process-accounted bytes include shutdown checkpoint; they are not SSD controller-level physical-write counters. Does not include processor artifacts, OCR, embedding or physical SSD writes."
+}

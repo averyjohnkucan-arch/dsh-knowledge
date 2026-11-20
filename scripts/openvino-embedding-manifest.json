@@ -1,0 +1,36 @@
+{
+  "repository": "OpenVINO/Qwen3-Embedding-0.6B-int8-ov",
+  "revision": "80d352d7061ec3e5caa3f26dc4e1f67bb8a21a5e",
+  "files": [
+    {
+      "name": "config.json",
+      "sha256": "68f2df7c4bea23d67b321a89503429303aedaef24a3fd646ce14e5c355047a43",
+      "size": 1358
+    },
+    {
+      "name": "openvino_config.json",
+      "sha256": "2e353ec70d54f40d68646e0178a1d3cef31144b2d97254c992f7882148b8fe74",
+      "size": 1436
+    },
+    {
+      "name": "openvino_model.bin",
+      "sha256": "b88066b1898f5e74eb31fe87578f10ab3d01709765a09bd8c4ea4fe256f62bb4",
+      "size": 616316780
+    },
+    {
+      "name": "openvino_model.xml",
+      "sha256": "fc0218b8973d09f43e7f8175760b69d4f2a9c9bab6e354aca8cee639d9b57e15",
+      "size": 2444999
+    },
+    {
+      "name": "tokenizer.json",
+      "size": 11423705,
+      "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a"
+    },
+    {
+      "name": "tokenizer_config.json",
+      "size": 5404,
+      "sha256": "443bfa629eb16387a12edbf92a76f6a6f10b2af3b53d87ba1550adfcf45f7fa0"
+    }
+  ]
+}

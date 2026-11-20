@@ -63,6 +63,7 @@ export async function askVision(ctx, modelId, role, image, signal) {
           ],
         },
       ],
+      reasoningEffort: 'off',
       maxTokens: role === 'ocr' ? 4096 : 768,
       signal: deadline,
     });
