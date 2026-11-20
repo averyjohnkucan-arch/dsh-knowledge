@@ -1,5 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { Knowledge } from './Knowledge.jsx';
+import footerStyles from './sidebar.css';
 
 export const inject = ['slots'];
 export function apply(ctx) {
@@ -15,26 +16,37 @@ export function apply(ctx) {
     return () => listeners.delete(notify);
   }
   function Action({ wide }) {
+    const expanded = useSyncExternalStore(subscribe, () => open);
+    const size = wide ? 16 : 18;
     return (
-      <button
-        type="button"
-        title="Knowledge"
-        aria-label="Knowledge"
-        onClick={() => change(true)}
-        style={{
-          background: 'none',
-          border: 0,
-          color: 'inherit',
-          cursor: 'pointer',
-          padding: '6px 10px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}
-      >
-        <span aria-hidden="true">▤</span>
-        {wide && 'Knowledge'}
-      </button>
+      <>
+        <style>{footerStyles}</style>
+        <button
+          type="button"
+          className={wide ? 'kn-footer' : 'kn-footer kn-footer-rail'}
+          title="Knowledge"
+          aria-label="Knowledge"
+          aria-haspopup="dialog"
+          aria-expanded={expanded}
+          onClick={() => change(!expanded)}
+        >
+          <svg
+            aria-hidden="true"
+            width={size}
+            height={size}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+          </svg>
+          {wide && <span>Knowledge</span>}
+        </button>
+      </>
     );
   }
   function Overlay() {
@@ -57,11 +69,11 @@ export function apply(ctx) {
       </dialog>
     ) : null;
   }
-  const add = (name, id, component) =>
+  const add = (name, id, order, component) =>
     slots.inject(name, () =>
-      slots.register({ name, id, order: 60, label: () => 'Knowledge' }, component),
+      slots.register({ name, id, order, label: () => 'Knowledge' }, component),
     );
-  add('sidebar.footer.action', 'knowledge', Action);
-  add('shell.overlay', 'knowledge', Overlay);
-  add('settings.section', 'knowledge-setup', Knowledge);
+  add('sidebar.footer.action', 'knowledge', 10, Action);
+  add('shell.overlay', 'knowledge', 10, Overlay);
+  add('settings.section', 'knowledge-setup', 60, Knowledge);
 }

@@ -422,6 +422,9 @@ function Knowledge() {
   ] });
 }
 
+// src/client/sidebar.css
+var sidebar_default = "/* Match the original Knowledge row and the Harness Settings trigger in both sidebar widths. */\n.kn-footer {\n  flex: none;\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  width: calc(100% + 8px);\n  height: 34px;\n  margin: 4px -4px;\n  padding: 6px 2px 6px 10px;\n  box-sizing: border-box;\n  border: 0;\n  border-radius: 12px;\n  background: transparent;\n  color: var(--dsw-alias-label-primary, currentColor);\n  font: inherit;\n  font-size: 14px;\n  line-height: 22px;\n  cursor: pointer;\n  overflow: hidden;\n}\n.kn-footer svg {\n  flex: none;\n}\n.kn-footer:hover {\n  background: color-mix(in srgb, currentColor 9%, transparent);\n}\n.kn-footer:active {\n  background: color-mix(in srgb, currentColor 16%, transparent);\n}\n.kn-footer[aria-expanded='true'] {\n  color: var(--dsw-alias-brand-primary, #3b6ef6);\n  background: color-mix(in srgb, currentColor 10%, transparent);\n}\n.kn-footer-rail {\n  width: 36px;\n  height: 36px;\n  margin: 8px 0 10px;\n  justify-content: center;\n  gap: 0;\n  padding: 0;\n  border-radius: 50%;\n}\n";
+
 // src/client/index.jsx
 var import_jsx_runtime2 = require("react/jsx-runtime");
 var inject = ["slots"];
@@ -438,29 +441,44 @@ function apply(ctx) {
     return () => listeners.delete(notify);
   }
   function Action({ wide }) {
-    return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
-      "button",
-      {
-        type: "button",
-        title: "Knowledge",
-        "aria-label": "Knowledge",
-        onClick: () => change(true),
-        style: {
-          background: "none",
-          border: 0,
-          color: "inherit",
-          cursor: "pointer",
-          padding: "6px 10px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8
-        },
-        children: [
-          /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { "aria-hidden": "true", children: "\u25A4" }),
-          wide && "Knowledge"
-        ]
-      }
-    );
+    const expanded = (0, import_react2.useSyncExternalStore)(subscribe, () => open);
+    const size = wide ? 16 : 18;
+    return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_jsx_runtime2.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("style", { children: sidebar_default }),
+      /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+        "button",
+        {
+          type: "button",
+          className: wide ? "kn-footer" : "kn-footer kn-footer-rail",
+          title: "Knowledge",
+          "aria-label": "Knowledge",
+          "aria-haspopup": "dialog",
+          "aria-expanded": expanded,
+          onClick: () => change(!expanded),
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(
+              "svg",
+              {
+                "aria-hidden": "true",
+                width: size,
+                height: size,
+                viewBox: "0 0 24 24",
+                fill: "none",
+                stroke: "currentColor",
+                strokeWidth: "1.8",
+                strokeLinecap: "round",
+                strokeLinejoin: "round",
+                children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("path", { d: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20" }),
+                  /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("path", { d: "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" })
+                ]
+              }
+            ),
+            wide && /* @__PURE__ */ (0, import_jsx_runtime2.jsx)("span", { children: "Knowledge" })
+          ]
+        }
+      )
+    ] });
   }
   function Overlay() {
     const visible = (0, import_react2.useSyncExternalStore)(subscribe, () => open);
@@ -482,12 +500,12 @@ function apply(ctx) {
       }
     ) : null;
   }
-  const add = (name, id, component) => slots.inject(
+  const add = (name, id, order, component) => slots.inject(
     name,
-    () => slots.register({ name, id, order: 60, label: () => "Knowledge" }, component)
+    () => slots.register({ name, id, order, label: () => "Knowledge" }, component)
   );
-  add("sidebar.footer.action", "knowledge", Action);
-  add("shell.overlay", "knowledge", Overlay);
-  add("settings.section", "knowledge-setup", Knowledge);
+  add("sidebar.footer.action", "knowledge", 10, Action);
+  add("shell.overlay", "knowledge", 10, Overlay);
+  add("settings.section", "knowledge-setup", 60, Knowledge);
 }
 return module.exports;}});

@@ -1,6 +1,13 @@
 {
   "name": "dsh-knowledge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Import Markdown, text, scans and charts into a searchable local library.",
-  "entry": { "name": "dsh-knowledge", "inject": ["webServer", "tools", "connection"] }
+  "entry": {
+    "name": "dsh-knowledge",
+    "inject": [
+      "webServer",
+      "tools",
+      "connection"
+    ]
+  }
 }

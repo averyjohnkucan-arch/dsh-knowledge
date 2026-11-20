@@ -6,15 +6,15 @@ Paste text or drop in a document. Knowledge saves a Markdown copy, indexes passa
 
 Use the **web profile** of DeepSeek Harness 0.2.2-rc.4 or rc.5 with Node.js 24.9 or newer. The plugin installer and model downloads need internet access the first time.
 
-1. In Harness, open **Plugins → Add plugin**. Paste the full path to the downloaded `dsh-knowledge-1.0.0.tgz` on the computer running Harness, or the HTTPS address of a published release tarball. Click **Install**.
+1. In Harness, open **Plugins → Add plugin**. Paste the repository address `https://github.com/averyjohnkucan-arch/dsh-knowledge`. You can also paste the full path to the downloaded plugin archive on the Harness host, or its HTTPS release download link. Click **Install**.
 2. If Harness asks about native dependencies, select **onnxruntime-node** and **openvino-node** and click **Allow these scripts and retry**. When Harness shows **Installed**, click **Enable now**. Follow any reload or restart prompt.
-3. Open **Knowledge** in the sidebar. Click **Set up Knowledge** once. The checklist shows both downloads, verifies a real search on CPU, checks the available accelerator, and displays the device selected for indexing. You can close the panel while setup runs.
+3. Open the **Knowledge** book button directly above **More** at the bottom of the sidebar. Click **Set up Knowledge** once. The checklist shows both downloads, verifies a real search on CPU, checks the available accelerator, and displays the device selected for indexing. You can close the panel while setup runs.
 4. When **Local search is ready** appears, open **Paste text** or **Add files**. Ask a question under **Search your documents**, or ask Harness chat to search the Knowledge library.
 
 The same package can be installed from a terminal on the Harness host.
 
 ```sh
-dsh plugin --profile web add /absolute/path/to/dsh-knowledge-1.0.0.tgz
+dsh plugin --profile web add /absolute/path/to/dsh-knowledge-1.0.1.tgz
 ```
 
 The standard models take about **2.23 GB** to download. Intel acceleration adds up to **1.19 GB** of model files. Allow additional space for the native runtimes and library. A retry verifies cached files and downloads the remaining files.

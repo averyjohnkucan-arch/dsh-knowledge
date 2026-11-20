@@ -1,0 +1,43 @@
+/* Match the original Knowledge row and the Harness Settings trigger in both sidebar widths. */
+.kn-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% + 8px);
+  height: 34px;
+  margin: 4px -4px;
+  padding: 6px 2px 6px 10px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, currentColor);
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.kn-footer svg {
+  flex: none;
+}
+.kn-footer:hover {
+  background: color-mix(in srgb, currentColor 9%, transparent);
+}
+.kn-footer:active {
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+.kn-footer[aria-expanded='true'] {
+  color: var(--dsw-alias-brand-primary, #3b6ef6);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.kn-footer-rail {
+  width: 36px;
+  height: 36px;
+  margin: 8px 0 10px;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  border-radius: 50%;
+}

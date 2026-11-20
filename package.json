@@ -1,6 +1,6 @@
 {
   "name": "dsh-knowledge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A Markdown-first knowledge library for DeepSeek Harness with one-click local Qwen search.",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -14,7 +14,9 @@
     ".": "./src/host/plugin.js",
     "./client": "./dist/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
   },
   "dsh": {
     "bundle": {
@@ -35,7 +37,9 @@
     "cordis.patch.yml",
     "dsh.plugin.json",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "locale",
+    "icon.svg"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
