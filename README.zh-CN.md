@@ -21,6 +21,10 @@
 
 ---
 
+## v1.3.0 — 本地 Active Directory 和 Windows 共享文件夹
+
+在个人 Harness 的 Knowledge 面板中使用域账号登录。管理员可为读取、设置、同步、模型安装和权限管理分别指定 AD 安全组。每次检索都会先用当前用户的身份检查 Windows 文件权限，再对可读内容重排。[部署指南](docs/active-directory.md)
+
 ## 一键设置 PDF 识别与本地检索
 
 打开“知识库”，新建或选择知识库。在知识库设置中点击“设置 PDF 识别与本地检索”。插件将下载 OvisOCR2、Qwen3 嵌入与重排模型，并验证推理。显示“可以导入 PDF”后，正常导入 PDF 即可保存 Markdown、分块并检索。模型在同一 Harness 主目录下共享。目前托管 OCR 支持 Linux x86-64。详见 [1.2.0 安装指南](docs/releases/v1.2.0.md)。

@@ -10,6 +10,7 @@ import type { ProcessingSnapshot } from '../../knowledge/processing-meter.js'
  * @module dsh-knowledge/client/KnowledgeSection
  */
 
+import { LocalModelsSection, type LocalModelsSectionProps } from './LocalModelsSection.js'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, DragEvent } from 'react'
 import { serializeContextWindow } from '../../knowledge/context.js'
@@ -127,6 +128,27 @@ export function SidebarKnowledgeAction(props: {
 
 // ── the panel ────────────────────────────────────────────────────────────────
 
+function useReaderMode(open: boolean) {
+  const [mode, setMode] = useState<{reader:boolean;url?:string} | null>(null)
+  useEffect(() => {
+    if (!open) return
+    let current = true
+    void fetch('/knowledge/reader-mode', {cache:'no-store'}).then(r => r.json()).then(value => {
+      if (current) setMode({reader:value.reader === true,url:value.url})
+    }).catch(() => { if (current) setMode({reader:false}) })
+    return () => { current = false }
+  }, [open])
+  return mode
+}
+
+export function KnowledgeSettings(props: LocalModelsSectionProps): JSX.Element | null {
+  const mode = useReaderMode(true)
+  if (!mode) return null
+  if (!mode.reader) return <LocalModelsSection {...props} />
+  if (mode.url) return <a href={mode.url + '?view=settings'} target="_blank" rel="noreferrer">Open Knowledge administration</a>
+  return <iframe title="Knowledge administration" src="/knowledge/reader/?view=settings" style={{border:0,width:'100%',height:'75vh'}} />
+}
+
 /** Frame-wide Cherry Studio-style knowledge base page. */
 export function KnowledgePanel(props: {
   store: KnowledgePanelStore
@@ -134,7 +156,13 @@ export function KnowledgePanel(props: {
   t: Translate
 }): JSX.Element | null {
   const open = useSyncExternalStore(props.store.subscribe, props.store.getSnapshot)
-  if (!open) return null
+  const mode = useReaderMode(open)
+  if (!open || mode === null) return null
+  if (mode.reader) return <section role="dialog" aria-label="Windows Knowledge" style={{position:'fixed',inset:'3rem 1rem 1rem',zIndex:1000,background:'Canvas',color:'CanvasText',padding:'1rem',display:'flex',flexDirection:'column'}}>
+    <button style={{alignSelf:'end'}} onClick={() => props.store.close()}>Close Knowledge</button>
+    {mode.url ? <a href={mode.url} target="_blank" rel="noreferrer">Open the domain sign-in for Knowledge</a>
+      : <iframe title="Windows Knowledge" src="/knowledge/reader/" style={{border:0,flex:1,width:'100%'}} />}
+  </section>
   return <PanelBody api={props.api} t={props.t} onClose={() => props.store.close()} />
 }
 

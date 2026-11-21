@@ -1,3 +1,5 @@
+import type { AdClient } from '../knowledge/ad/http.js'
+import type { ReaderHit } from '../knowledge/ad/retrieval.js'
 import { citationDefinition, requestCitations, resolveCitationStream, resolvedCitation } from './citation-hooks.js'
 import { KNOWLEDGE_CITATION_INSTRUCTIONS, KNOWLEDGE_CITATION_REMINDER, citationLinks, isKnowledgeCitationPath, originalSourceUrl } from '../shared/citations.js'
 /**
@@ -267,9 +269,65 @@ function modelText(text: string): Array<{ type: 'text'; text: string }> {
   return [{ type: 'text', text: ensureWellFormed(text) }]
 }
 
+function registerAdTools(ctx: Context, client: AdClient) {
+  const output = {
+    schema: {type:'object',additionalProperties:false,properties:{result:{type:'string',required:true}}} as const,
+    render: (_: unknown, value: {result:string}) => modelText(value.result),
+  }
+  const search = async (query: string, baseId?: string, topK?: number) => {
+    const raw = await client.tool('/search',{query,baseId,topK})
+    const response = JSON.parse(raw) as { hits: ReaderHit[] }
+    const host = ctx.knowledge.citationOrigin()
+    return response.hits.map(hit => ({
+      title:hit.title, text:hit.text, citation:host ? new URL(hit.citation,host).href : hit.citation,
+    }))
+  }
+  ctx.tools.register(defineTool({
+    name:'knowledge_search', description:'Search the signed-in user’s Windows shares. Cite each relevant passage using its citation URL.',
+    parameters:{query:{type:'string',required:true},baseId:{type:'string'},topK:{type:'number'}},output,
+    async execute(args) { return {result:JSON.stringify(await search(args.query,args.baseId,args.topK))} },
+  }))
+  ctx.tools.register(defineTool({
+    name:'knowledge_list',description:'List the signed-in user’s knowledge bases or visible items in a folder.',
+    parameters:{baseId:{type:'string'},folderId:{type:'string'}},output,
+    async execute(args) {
+      const params = new URLSearchParams()
+      if (args.baseId) params.set('baseId',args.baseId)
+      if (args.folderId) params.set('folderId',args.folderId)
+      return {result:await client.tool('/browse?' + params)}
+    },
+  }))
+  ctx.tools.register(defineTool({
+    name:'knowledge_read_document',description:'Read a cited passage or page of an accessible indexed Markdown document.',
+    parameters:{citation:{type:'string',required:true},offset:{type:'number'}},output,
+    async execute(args) {
+      const url = new URL(args.citation,'http://localhost')
+      if (!/^\/knowledge\/reader\/documents\/[a-zA-Z0-9_-]+\/[a-f0-9]{64}\/markdown$/.test(url.pathname)) throw new Error('Use a Knowledge reader citation.')
+      const text = await client.tool(url.pathname.slice('/knowledge/reader'.length) + url.search)
+      const offset = Math.max(0,Math.trunc(args.offset ?? 0))
+      return {result:text.slice(offset,offset + 16000)}
+    },
+  }))
+  ctx.on('agent/pre-step', async ({messages,signal},next) => {
+    const decision = await next()
+    if (decision.kind === 'reject' || signal.aborted || !decision.messages.length) return decision
+    const query = userTextOf(messages).slice(0,2000)
+    if (!query) return decision
+    try {
+      const hits = await search(query,undefined,4)
+      if (!hits.length || signal.aborted) return decision
+      const background = {role:'user',id:crypto.randomUUID(),source:{kind:'dsh-knowledge',form:'notice',summary:'Windows share search',passageCount:hits.length},
+        content:modelText('Evidence from accessible Windows shares. Cite each source used.\n' + JSON.stringify(hits))}
+      return {...decision,messages:foldBackground(decision.messages,messages,background as never)}
+    } catch { return decision }
+  })
+}
+
 /** Register the knowledge tool surface. */
 export function apply(ctx: Context): void {
   const knowledge = ctx.knowledge
+  if (knowledge.adClient) return registerAdTools(ctx,knowledge.adClient)
+  if (knowledge.adServer) return
   const scopedBases = () => knowledge.enabledBases()
   const requireBaseEnabled = (baseId: string): void => {
     const scope = knowledge.enabledScope()

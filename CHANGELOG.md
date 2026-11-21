@@ -1,3 +1,9 @@
+## v1.3.0 — On-premises Active Directory and Windows shares
+
+- Sign in from a personal Harness or the HTTPS Knowledge reader using a Kerberos domain account.
+- Assign security groups to reading, settings, sync, model installation and editing group assignments. Nested groups count.
+- Check SMB folder and file access, match the indexed source bytes, refill search candidates and rerank only accessible text. Recheck citations, Markdown and original downloads on each request.
+
 ## 1.2.0 — One-click PDF OCR and local search
 
 - Add per-base setup for OvisOCR2, Qwen3 Embedding and Qwen3 Reranker. Setup verifies the installed models and resumes interrupted work.

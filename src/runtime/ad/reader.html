@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Knowledge · Windows shares</title><link rel="stylesheet" href="/knowledge/reader/style.css"><script defer src="/knowledge/reader/app.js"></script></head>
+<body><main><header><h1>Knowledge</h1><span id="identity"></span><button id="logout" hidden>Sign out</button></header>
+<form id="login" hidden><h2>Sign in to your Windows shares</h2><label>Domain username<input name="name" autocomplete="username" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form>
+<div id="library" hidden><form id="search"><label>Search your Windows shares<input name="query" type="search" required maxlength="2000"></label><button>Search</button></form>
+<section><h2 id="folder">Knowledge bases</h2><button id="back" hidden>Back</button><ul id="items"></ul></section>
+<section id="results" hidden><h2>Search results</h2><ul id="hits"></ul></section></div>
+<section id="admin" hidden><h2>Administration</h2><label id="scopeLabel">Settings scope<select id="scope"></select></label><form id="settings" hidden><div id="fields"></div><button>Save settings</button></form>
+<button id="sync" hidden>Sync Windows folder</button> <button id="models" hidden>Set up PDF OCR and search models</button>
+<form id="policy" hidden><h2>AD group permissions</h2><p>Enter one AD security group name or SID per line for each permission.</p><div id="groupFields"></div><button>Save group permissions</button></form></section>
+<p role="status" id="status"></p></main></body></html>

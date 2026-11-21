@@ -1,3 +1,5 @@
+import { privateHost } from './ad/http.js'
+import { readerPath } from './ad/config.js'
 import { pipeline } from 'node:stream/promises'
 import { renderMarkdownSnapshot } from './markdown-snapshots.js'
 /**
@@ -41,6 +43,15 @@ export function knowledgeRoute(service: KnowledgeService): WebRoute {
 
 async function handleRequest(service: KnowledgeService, req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
+    if (service.adClient) return await service.adClient.handle(req,res,service.managementBindHost)
+    const readerMode = req.method === 'GET' && req.url?.split('?')[0] === '/knowledge/reader-mode'
+    if (service.adServer) {
+      if (readerMode && privateHost(req, service.managementBindHost)) {
+        writeJson(res,200,{reader:true, url:service.adServer.publicOrigin + readerPath + '/'})
+      } else writeJson(res,403,{error:'Open the signed-in Knowledge reader.'})
+      return
+    }
+    if (readerMode) { writeJson(res,200,{reader:false}); return }
     await service.whenReady()
     const url = new URL(req.url ?? '/', 'http://dsh.internal')
     const pathname = url.pathname

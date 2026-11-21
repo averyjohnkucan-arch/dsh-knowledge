@@ -2,6 +2,10 @@
 
 This branch targets DeepSeek Harness `0.2.2-rc.4` and Node.js 24.9 or newer.
 
+## v1.3.0 highlights — Active Directory and Windows shares
+
+Sign in from Knowledge in a personal Harness. Assign AD security groups to reading, settings, folder sync, model setup and access-policy administration. The reader checks live Windows file access before reranking. [Deployment and group setup](docs/active-directory.md)
+
 ## v1.2.0 highlights — One-click PDF OCR and local search
 
 Open **Knowledge**, create or select a base, then open its **Settings** and click **Set up PDF OCR and local search**. When the panel shows **Ready to import PDFs**, add a PDF through the usual file importer. The plugin saves its Markdown, indexes the chunks with local Qwen3 embeddings and uses the local reranker for recall. Installed models are shared across bases.
@@ -107,7 +111,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.2.0.tgz
+pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.3.0.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge

@@ -1,3 +1,5 @@
+import { AdClient, startAdServer } from './ad/http.js'
+import { loadAdConfig, loopback } from './ad/config.js'
 import { exportArchive, importArchive } from './base-archive.js'
 import type { IncomingMessage } from 'node:http'
 import * as localSearch from 'dsh-knowledge/local-search'
@@ -312,6 +314,10 @@ export class KnowledgeService extends Service {
   static inject = ['webServer']
   static Config = Config
 
+  readonly adClient = process.env.DSH_KNOWLEDGE_READER_URL ? new AdClient(process.env.DSH_KNOWLEDGE_READER_URL) : undefined
+  readonly adServer = process.env.DSH_KNOWLEDGE_AD_CONFIG ? loadAdConfig(process.env.DSH_KNOWLEDGE_AD_CONFIG) : undefined
+  private readonly adHitGuard = new AsyncLocalStorage<(hit: SearchHit) => boolean>()
+
   private readonly baseConfig: Config
   private store: Store | undefined
   /** Set when the durable backend exists but could not be opened, so every
@@ -374,12 +380,19 @@ export class KnowledgeService extends Service {
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'knowledge')
+    if (this.adClient && this.adServer) throw new Error('Select either an AD indexer or a personal reader')
+    if ((this.adClient || this.adServer) && !loopback(ctx.webServer.host)) throw new Error('AD integration requires a loopback-bound Harness')
     this.baseConfig = config
     this.storeReady = new Promise<void>(resolve => { this.resolveStore = resolve })
     ctx.effect(() => ctx.webServer.register(knowledgeRoute(this)), 'knowledge: /knowledge route')
   }
 
   protected async [Service.init](): Promise<void> {
+    if (this.adClient) { this.resolveStore(); return }
+    if (this.adServer) {
+      const close = await startAdServer(this, this.adServer)
+      this.ctx.effect(() => close, 'knowledge: AD reader')
+    }
     useOcrAcceleration(this.ocrAcceleration)
     this.ctx.effect(() => () => { this.ocrAcceleration.dispose(); useOcrAcceleration(undefined) }, 'knowledge: OCR accelerator workers')
     setLocalModelCacheDir(this.baseConfig.localModelCacheDir)
@@ -4276,6 +4289,16 @@ export class KnowledgeService extends Service {
     }
   }
 
+  adSourceBases() { return this.requireStore().listBases() }
+  adSourceRows(baseId: string) { return this.requireStore().listDocuments(baseId, { includeRawText: false }) }
+  adCurrentSource(id: string) {
+    const store = this.requireStore(), row = store.getDocument(id)
+    return { row, base: row ? store.getBase(row.baseId) : undefined }
+  }
+  adSearch(request: SearchRequest, guard?: (hit: SearchHit) => boolean) {
+    return guard ? this.adHitGuard.run(guard, () => this.search(request)) : this.search(request, { rerank: 'skip' })
+  }
+
   // ── retrieval ─────────────────────────────────────────────────────────────
 
   async search(request: SearchRequest, execution: SearchExecutionOptions = {}): Promise<SearchResult> {
@@ -4682,7 +4705,11 @@ export class KnowledgeService extends Service {
     signal?: AbortSignal,
   ): Promise<{ hits: SearchHit[]; reranked: boolean; rerank?: RerankStatus }> {
     throwIfAborted(signal)
-    const original = [...input]
+    const guard = this.adHitGuard.getStore()
+    const original = guard ? input.filter(hit => {
+      const chunk = store.getChunk(hit.chunkId)
+      return chunk?.docId === hit.docId && chunk.baseId === hit.baseId && chunk.text === hit.text && guard(hit)
+    }) : [...input]
     const rerankModel = allowRerank ? config.rerankModel.trim() : ''
     if (rerankModel === '') return { hits: original, reranked: false }
     if (original.length <= 1) {

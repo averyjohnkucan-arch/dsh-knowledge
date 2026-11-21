@@ -8,6 +8,12 @@ import { pathToFileURL } from 'node:url'
 
 const REQUIRED_FILES = [
   'src/host/ocr.js',
+  'docs/active-directory.md',
+  'docs/releases/v1.3.0.md',
+  'src/runtime/ad/app.js',
+  'src/runtime/ad/style.css',
+  'src/runtime/ad/check_access.py',
+  'src/runtime/ad/reader.html',
   'src/runtime/ocr/document_ocr/__main__.py',
   'src/runtime/ocr/document_ocr/install.py',
   'src/runtime/ocr/runtime-support/models-ovis.json',
@@ -62,7 +68,7 @@ const REQUIRED_FILES = [
 const FORBIDDEN_PREFIXES = ['scripts/__pycache__/', 'tests/', 'node_modules/', '.git/', '.github/', 'docs/superpowers/', 'docs/issues/', 'docs/images/']
 // The local-search package export runs directly from these narrow source
 // directories. Other development source still belongs outside the artifact.
-const hostAsset = /^src\/(?:host\/[\w-]+(?:\.d\.ts|\.js)|shared\/local-setup\.ts|runtime\/(?:[\w-]+\.js|weights\.json|ocr\/(?:NOTICE\.md|document_ocr\/\w+\.py|runtime-support\/(?:[\w-]+\.(?:json|txt)|probe\.png))))$/
+const hostAsset = /^src\/(?:host\/[\w-]+(?:\.d\.ts|\.js)|shared\/local-setup\.ts|runtime\/(?:[\w-]+\.js|weights\.json|ad\/(?:app\.js|style\.css|check_access\.py|reader\.html)|ocr\/(?:NOTICE\.md|document_ocr\/\w+\.py|runtime-support\/(?:[\w-]+\.(?:json|txt)|probe\.png))))$/
 const FORBIDDEN_FILES = ['lib/knowledge/ocr-final-handoff.mjs','lib/knowledge/ocr-replay-final.mjs','scripts/ocr-cuda-baseline.py','scripts/ocr-cuda-candidate.py','scripts/ocr-intel-baseline.py','scripts/ocr-intel-candidate.py','lib/knowledge/ocr-replay-baseline.mjs','lib/knowledge/ocr-replay-candidate.mjs','lib/knowledge/ocr-replay-pool.mjs','lib/knowledge/ocr-render-baseline.mjs','lib/knowledge/pdf-parse-baseline.mjs','lib/knowledge/ocr-png-bench.mjs','lib/knowledge/private-python-benchmark.mjs','lib/knowledge/embed-benchmark.mjs','lib/knowledge/embedding-benchmark.mjs','lib/knowledge/indexing-baseline.mjs','lib/knowledge/indexing-optimized.mjs','lib/knowledge/ocr-accelerated.mjs','lib/knowledge/ocr-baseline.mjs','lib/knowledge/ocr-optimized.mjs','lib/knowledge/ocr-process-baseline.mjs','lib/knowledge/release-validation.mjs','lib/knowledge/embed-worker.mjs', 'lib/knowledge/embed-worker.mjs.map', 'lib/knowledge/ocr-worker.mjs', 'lib/knowledge/ocr-worker.mjs.map']
 
 function executable(name) {

@@ -1,3 +1,4 @@
+import { AdClient } from './ad/http.js';
 import type { IncomingMessage } from 'node:http';
 import type { SearchPreferences } from '../shared/local-setup.js';
 /**
@@ -19,7 +20,7 @@ import type { LocalModelSummary } from './localModels.js';
 import { type OcrModelStatus } from './ocr.js';
 import type { Store } from './store.js';
 import { type OllamaPullStatus } from './ollama.js';
-import type { AddFileDocumentRequest, AddFilesRequest, AddFilesResult, AddTextDocumentRequest, BaseConfig, BaseStats, BaseSummary, CreateBaseRequest, ContextWindow, DeleteImpact, DocumentDetail, DocumentSourceType, DocumentSummary, DirectoryImportResult, DirectorySyncItem, DirectorySyncResult, EmbeddingProvider, ImportDirectoryRequest, ImportUrlRequest, KnowledgeBase, KnowledgeChunk, KnowledgeConfig, KnowledgeDocument, SearchRequest, SearchResult, PathImportResult, ReindexDocumentResult, ReindexDocumentsResult, UpdateBaseRequest } from './types.js';
+import type { AddFileDocumentRequest, AddFilesRequest, AddFilesResult, AddTextDocumentRequest, BaseConfig, BaseStats, BaseSummary, CreateBaseRequest, ContextWindow, DeleteImpact, DocumentDetail, DocumentSourceType, DocumentSummary, DirectoryImportResult, DirectorySyncItem, DirectorySyncResult, EmbeddingProvider, ImportDirectoryRequest, ImportUrlRequest, KnowledgeBase, KnowledgeChunk, KnowledgeConfig, KnowledgeDocument, SearchHit, SearchRequest, SearchResult, PathImportResult, ReindexDocumentResult, ReindexDocumentsResult, UpdateBaseRequest } from './types.js';
 export type * from './types.js';
 export { Config } from './config.js';
 export { openStore, StorageUnavailableError } from './store.js';
@@ -102,6 +103,28 @@ export declare class DirectorySourceError extends Error {
 export declare class KnowledgeService extends Service {
     static inject: string[];
     static Config: import("@deepseek-ai/schemastery").default<Config>;
+    readonly adClient: AdClient | undefined;
+    readonly adServer: {
+        domainController: string;
+        groupPolicyFile: string;
+        policyAdmins: string[];
+        realm: string;
+        publicOrigin: string;
+        listenHost: string;
+        port: number;
+        certificate: string;
+        privateKey: string;
+        mappings: {
+            baseId: string;
+            localRoot: string;
+            server: string;
+            share: string;
+            subfolder: string[];
+        }[];
+        sessionMinutes: number;
+        maxSessions: number;
+    } | undefined;
+    private readonly adHitGuard;
     private readonly baseConfig;
     private store;
     /** Set when the durable backend exists but could not be opened, so every
@@ -690,6 +713,13 @@ export declare class KnowledgeService extends Service {
     }>;
     statsForUi(baseId?: string): Promise<BaseStats>;
     stats(baseId?: string, summary?: ReturnType<Store['chunkStats']>): BaseStats;
+    adSourceBases(): KnowledgeBase[];
+    adSourceRows(baseId: string): KnowledgeDocument[];
+    adCurrentSource(id: string): {
+        row: KnowledgeDocument | undefined;
+        base: KnowledgeBase | undefined;
+    };
+    adSearch(request: SearchRequest, guard?: (hit: SearchHit) => boolean): Promise<SearchResult>;
     search(request: SearchRequest, execution?: SearchExecutionOptions): Promise<SearchResult>;
     /** One retrieval pass. Multi-query orchestration lives in search() so each
      * variant cannot independently invoke an expensive reranker. */

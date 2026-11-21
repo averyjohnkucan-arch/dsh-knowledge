@@ -10,6 +10,7 @@ type Element = { type: unknown; props: Record<string, unknown> & { children?: un
 type Component = (props: Record<string, unknown>) => Element
 const compiled = new Map<string, string>()
 const translate = (key: string) => key
+const knowledgeSettingsPlaceholder: Component = () => ({type:'knowledge-settings',props:{}})
 const mineruPlaceholder: Component = () => ({ type: 'mineru-placeholder', props: {} })
 
 beforeAll(async () => {
@@ -39,7 +40,7 @@ function clientEntry(globals: Record<string, unknown> = {}) {
     './KnowledgeSource.js': { installKnowledgeSource: () => {} },
     './KnowledgeRetrieval.js': { KnowledgeRetrieval: () => null, retrievalDefinition: {} },
     './api.js': { KnowledgeApi: class {} },
-    './KnowledgeSection.js': { KnowledgePanel: () => null, SidebarKnowledgeAction: () => null },
+    './KnowledgeSection.js': { KnowledgePanel: () => null, KnowledgeSettings: knowledgeSettingsPlaceholder, SidebarKnowledgeAction: () => null },
     './LocalModelsSection.js': { LocalModelsSection: mineruPlaceholder },
     './locales.js': { en: {}, zh: {} },
     './panel-store.js': { createKnowledgePanelStore: () => ({}) },
@@ -344,7 +345,7 @@ describe('directory action injection (#42)', () => {
       './KnowledgeSource.js': { installKnowledgeSource: () => {} },
     './KnowledgeRetrieval.js': { KnowledgeRetrieval: () => null, retrievalDefinition: {} },
       './api.js': { KnowledgeApi: class {} },
-      './KnowledgeSection.js': { KnowledgePanel: () => null, SidebarKnowledgeAction: () => null },
+      './KnowledgeSection.js': { KnowledgePanel: () => null, KnowledgeSettings: knowledgeSettingsPlaceholder, SidebarKnowledgeAction: () => null },
       './LocalModelsSection.js': { LocalModelsSection: mineruPlaceholder },
       './locales.js': { en: {}, zh: {} },
       './panel-store.js': { createKnowledgePanelStore: () => ({}) },
@@ -361,7 +362,7 @@ describe('directory action injection (#42)', () => {
     services['remote.session'] = session
     const registration = registrations.find(item => item.options.id === 'local-models')!
     const props = (registration.options.inject as () => { directoryActions: DirectoryActions })()
-    expect(registration.component).toBe(mineruPlaceholder)
+    expect(registration.component).toBe(knowledgeSettingsPlaceholder)
     await expect(props.directoryActions.pickDirectory?.()).resolves.toBe('C:\\native')
     await expect(props.directoryActions.canOpenPath?.()).resolves.toBe(true)
     await props.directoryActions.openPath?.('C:\\absolute-cache')

@@ -10,9 +10,8 @@ import { installKnowledgeSource } from './KnowledgeSource.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { KnowledgeRetrieval, retrievalDefinition } from './KnowledgeRetrieval.js'
 import { KnowledgeApi } from './api.js'
-import { KnowledgePanel, SidebarKnowledgeAction } from './KnowledgeSection.js'
+import { KnowledgePanel, KnowledgeSettings, SidebarKnowledgeAction } from './KnowledgeSection.js'
 import type { Translate } from './KnowledgeSection.js'
-import { LocalModelsSection } from './LocalModelsSection.js'
 import { en, zh } from './locales.js'
 import { createKnowledgePanelStore } from './panel-store.js'
 import { createDirectoryActions } from './directory-actions.js'
@@ -34,7 +33,7 @@ interface LocaleService {
 export const inject = ['slots', 'locale', 'uiConversation']
 
 /** Register the knowledge sidebar action and its overlay panel. */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context): void | Promise<void> {
   installKnowledgeSource(ctx)
   const slots = ctx.get('slots') as SlotsService | undefined
   const locale = ctx.get('locale') as LocaleService | undefined
@@ -66,28 +65,33 @@ export function apply(ctx: Context): void {
     inject: () => ({ store, api, t }),
   }, KnowledgePanel))
 
-  slots.inject('settings.section', () => slots.register({
-    name: 'settings.section',
-    id: 'local-models',
-    order: 60,
-    label: () => t('localModelsNav'),
-    inject: () => ({
-      api,
-      t,
-      // Root slot props are cached. Resolve optional services again on each
-      // capability read and action so late registration/HMR stays usable.
-      directoryActions: createDirectoryActions(() => ({
-        nativePicker: (globalThis as typeof globalThis & { __DSH_DIRECTORY_PICKER__?: unknown }).__DSH_DIRECTORY_PICKER__,
-        uiWorkspace: ctx.get('uiWorkspace'),
-        // `remote.session` is a scoped Remote service: reading `.session` off
-        // the `remote` service object is gated by the fiber's inject
-        // declaration and throws `cannot get property "remote.session"
-        // without inject`, crashing this whole slot (issue #47). The optional
-        // `ctx.get('remote.session')` lookup resolves the namespace directly
-        // and stays undefined on DSH generations that do not provide it.
-        remote: { session: ctx.get('remote.session') },
-        workspaces: ctx.get('workspaces'),
-      })),
-    }),
-  }, LocalModelsSection))
+  const registerSettings = (managed: boolean) => {
+    slots.inject('settings.section', () => slots.register({
+      name: 'settings.section',
+      id: managed ? 'knowledge-administration' : 'local-models',
+      order: 60,
+      label: () => managed ? 'Knowledge administration' : t('localModelsNav'),
+      inject: () => ({
+        api,
+        t,
+        // Root slot props are cached. Resolve optional services again on each
+        // capability read and action so late registration/HMR stays usable.
+        directoryActions: createDirectoryActions(() => ({
+          nativePicker: (globalThis as typeof globalThis & { __DSH_DIRECTORY_PICKER__?: unknown }).__DSH_DIRECTORY_PICKER__,
+          uiWorkspace: ctx.get('uiWorkspace'),
+          // `remote.session` is a scoped Remote service: reading `.session` off
+          // the `remote` service object is gated by the fiber's inject
+          // declaration and throws `cannot get property "remote.session"
+          // without inject`, crashing this whole slot (issue #47). The optional
+          // `ctx.get('remote.session')` lookup resolves the namespace directly
+          // and stays undefined on DSH generations that do not provide it.
+          remote: { session: ctx.get('remote.session') },
+          workspaces: ctx.get('workspaces'),
+        })),
+      }),
+    }, KnowledgeSettings))
+  }
+  if (typeof fetch !== 'function') { registerSettings(false); return }
+  return fetch('/knowledge/reader-mode', {cache:'no-store'}).then(r => r.json())
+    .then(mode => mode.reader === true, () => false).then(registerSettings)
 }

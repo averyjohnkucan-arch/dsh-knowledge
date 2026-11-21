@@ -9,5 +9,5 @@ import type { Context } from '@deepseek-ai/cordis';
 /** Required services; each target slot is awaited through `slots.inject`. */
 export declare const inject: string[];
 /** Register the knowledge sidebar action and its overlay panel. */
-export declare function apply(ctx: Context): void;
+export declare function apply(ctx: Context): void | Promise<void>;
 //# sourceMappingURL=index.d.ts.map
