@@ -3,24 +3,7 @@ import type { KnowledgeApi, MineruDeploymentPlan, MineruDeploymentStatus, Mineru
 import type { Translate, KnowledgeKey } from './locales.js'
 import { C, accentSoft, style } from './theme.js'
 
-const DRAFT_KEY = 'dsh-knowledge:mineru-deployment-draft:v1'
 const DEFAULT_PYTHON_INDEX = 'https://pypi.org/simple'
-type Draft = { root?: string; existing?: string; python?: string; manualPython?: string }
-function readDraft(): Draft {
-  if (typeof window === 'undefined') return {}
-  try {
-    const value = JSON.parse(window.localStorage.getItem(DRAFT_KEY) ?? '{}')
-    return value && typeof value === 'object' ? {
-      root: typeof value.root === 'string' ? value.root.slice(0, 4096) : undefined,
-      existing: typeof value.existing === 'string' ? value.existing.slice(0, 4096) : undefined,
-      python: typeof value.python === 'string' ? value.python.slice(0, 4096) : undefined,
-      manualPython: typeof value.manualPython === 'string' ? value.manualPython.slice(0, 4096) : undefined,
-    } : {}
-  } catch { return {} }
-}
-function saveDraft(draft: Draft): void {
-  try { window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)) } catch { /* Storage may be disabled; the current form remains usable. */ }
-}
 function capacity(bytes: number): string { return `${(bytes / 1024 ** 2).toFixed(1)} MiB` }
 const phases: Record<MineruDeploymentStatus['phase'], KnowledgeKey> = { absent: 'mineruPhaseAbsent', preparing_environment: 'mineruPhaseEnvironment', downloading: 'stageDownloading', probing: 'mineruPhaseProbe', ready: 'mineruPhaseReady', failed: 'stageFailed', canceled: 'stageCanceled', interrupted: 'mineruPhaseInterrupted' }
 const pythonReasons: Record<NonNullable<MineruPythonDiscovery['environments'][number]['reason']>, KnowledgeKey> = {
@@ -30,13 +13,12 @@ const pythonReasons: Record<NonNullable<MineruPythonDiscovery['environments'][nu
 /** Optional local MinerU deployment flow; detection never installs software. */
 export function MineruDeploymentSection({ api, t, pickDirectory }: { api: KnowledgeApi; t: Translate; pickDirectory?: () => Promise<string | null> }): JSX.Element {
   const id = useId()
-  const initial = useRef(readDraft()).current
-  const [root, setRoot] = useState(initial.root ?? '')
-  const [existing, setExisting] = useState(initial.existing ?? '')
-  const [python, setPython] = useState(initial.python ?? '')
+  const [root, setRoot] = useState('')
+  const [existing, setExisting] = useState('')
+  const [python, setPython] = useState('')
   const [pythonIndexUrl, setPythonIndexUrl] = useState(DEFAULT_PYTHON_INDEX)
   const [pythonIndexSaved, setPythonIndexSaved] = useState(false)
-  const [manualPython, setManualPython] = useState(initial.manualPython ?? initial.python ?? '')
+  const [manualPython, setManualPython] = useState('')
   const [pythonVerified, setPythonVerified] = useState(false)
   const [discovery, setDiscovery] = useState<MineruPythonDiscovery | null>(null)
   const [busy, setBusy] = useState(false)
@@ -51,7 +33,6 @@ export function MineruDeploymentSection({ api, t, pickDirectory }: { api: Knowle
   const mounted = useRef(true)
   const statusRevision = useRef(0)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
-  useEffect(() => { saveDraft({ root, existing, python, manualPython }) }, [root, existing, python, manualPython])
   useEffect(() => {
     let canceled = false
     let timer: ReturnType<typeof setTimeout> | undefined

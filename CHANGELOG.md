@@ -1,3 +1,8 @@
+## 1.3.1 — Clean uninstall
+
+- Add an authenticated action in Knowledge settings that removes the profile package and erases its local library, uploaded copies, generated Markdown, search index, setup preferences and managed downloads.
+- Protect linked source folders and other profiles using the same library. Clear the old MinerU draft when the browser loads Knowledge.
+
 ## v1.3.0 — On-premises Active Directory and Windows shares
 
 - Sign in from a personal Harness or the HTTPS Knowledge reader using a Kerberos domain account.

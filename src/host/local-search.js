@@ -191,15 +191,15 @@ export async function configure(ctx, patch, onReady) {
   if (settings.device !== before.device && ['ready','running'].includes(engine.state.status)) await startSetup(onReady, true);
   return setupState();
 }
-export function closeSearch() {
+export async function closeSearch() {
   if (!current) return;
   const { engine, store, jobs, ocr, controller } = current;
   current = undefined;
   controller.abort();
   ocr.close();
   engine.close();
-  if (engine.task || jobs.size) void Promise.allSettled([engine.task, ...jobs.values()]).then(() => store.db.close());
-  else store.db.close();
+  if (engine.task || jobs.size) await Promise.allSettled([engine.task, ...jobs.values()]);
+  store.db.close();
 }
 export function enterForeground() {
   const engine = current?.engine;

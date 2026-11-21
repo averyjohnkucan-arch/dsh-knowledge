@@ -1,0 +1,1 @@
+{"version":3,"file":"CleanUninstall.d.ts","sourceRoot":"","sources":["../../../../src/ui/client/CleanUninstall.tsx"],"names":[],"mappings":"AACA,OAAO,KAAK,EAAE,YAAY,EAAE,MAAM,UAAU,CAAA;AAC5C,OAAO,KAAK,EAAE,SAAS,EAAE,MAAM,cAAc,CAAA;AAG7C,wBAAgB,cAAc,CAAC,EAAE,GAAG,EAAE,CAAC,EAAE,EAAE;IAAC,GAAG,EAAE,YAAY,CAAC;IAAC,CAAC,EAAE,SAAS,CAAA;CAAC,+BA0B3E"}

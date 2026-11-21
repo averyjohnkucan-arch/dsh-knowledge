@@ -34,6 +34,9 @@ export const inject = ['slots', 'locale', 'uiConversation']
 
 /** Register the knowledge sidebar action and its overlay panel. */
 export function apply(ctx: Context): void | Promise<void> {
+  // Releases up to 1.3.0 stored an unfinished MinerU form across uninstalls.
+  try { globalThis.localStorage?.removeItem('dsh-knowledge:mineru-deployment-draft:v1') } catch { /* Browser storage is optional. */ }
+
   installKnowledgeSource(ctx)
   const slots = ctx.get('slots') as SlotsService | undefined
   const locale = ctx.get('locale') as LocaleService | undefined

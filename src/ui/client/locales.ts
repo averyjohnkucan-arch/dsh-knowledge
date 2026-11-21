@@ -5,6 +5,7 @@
  */
 
 export type KnowledgeKey =
+  | 'cleanUninstall' | 'cleanUninstallScope' | 'cleanUninstallConfirm' | 'cleanUninstallBusy'
   | 'documentSetupTitle' | 'documentSetupHint' | 'documentSetupStart' | 'documentSetupReady' | 'documentSetupPlatform' | 'documentSetupRetry' | 'documentSetupRunning'
   | 'importKnowledgeBase' | 'exportKnowledgeBase'
   | 'mineruLocalOption' | 'mineruLocalDesc' | 'mineruLocalUrl' | 'mineruLocalKey'
@@ -379,6 +380,10 @@ export type KnowledgeKey =
 export type Translate = (key: KnowledgeKey) => string
 
 export const zh: Record<KnowledgeKey, string> = {
+  cleanUninstall: '卸载并删除所有知识库',
+  cleanUninstallScope: '永久删除所有本地知识库、上传的副本、索引、设置及插件管理的模型，然后返回 Harness。关联的源文件夹和单独配置的模型缓存将保留。',
+  cleanUninstallConfirm: '删除所有本地知识库并卸载',
+  cleanUninstallBusy: '正在卸载知识库插件…',
   documentSetupTitle: '本地 PDF 识别与检索',
   documentSetupHint: '为此知识库安装 OvisOCR2、Qwen3 嵌入与重排模型。导入的 PDF 将保存为 Markdown，并分块建立检索索引。精简版约需 3.4 GB，NVIDIA BF16 版约需 12.5 GB，另需临时空间。',
   documentSetupStart: '设置 PDF 识别与本地检索', documentSetupReady: '可以导入 PDF',
@@ -779,6 +784,10 @@ export const zh: Record<KnowledgeKey, string> = {
 }
 
 export const en: Record<KnowledgeKey, string> = {
+  cleanUninstall: 'Uninstall and delete all KBs',
+  cleanUninstallScope: 'Permanently delete every local knowledge base, uploaded copy, index, setting and model in Knowledge’s managed storage, then return to Harness. Linked source folders and separately configured model caches stay on disk.',
+  cleanUninstallConfirm: 'Delete all local KBs and uninstall',
+  cleanUninstallBusy: 'Uninstalling Knowledge…',
   documentSetupTitle: 'Local PDF OCR and search',
   documentSetupHint: 'Install OvisOCR2, Qwen3 Embedding and Qwen3 Reranker for this base. PDFs are saved as Markdown, chunked and indexed. Allow about 3.4 GB for compact setup or 12.5 GB for NVIDIA BF16, plus temporary space.',
   documentSetupStart: 'Set up PDF OCR and local search', documentSetupReady: 'Ready to import PDFs',

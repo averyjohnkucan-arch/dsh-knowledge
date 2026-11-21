@@ -410,6 +410,10 @@ interface Envelope<T> {
 }
 
 export class KnowledgeApi {
+  cleanUninstall(): Promise<{uninstalled:boolean}> {
+    return this.call('POST', '/clean-uninstall', {confirm:'delete-all-local-kbs'}, 300_000)
+  }
+
   async importBase(file: File): Promise<{id:string}> {
     const response = await fetch('/knowledge/bases/import', {method:'POST',headers:{'content-type':'application/x-dsh-knowledge'},body:file})
     const result = await response.json()
@@ -426,12 +430,13 @@ export class KnowledgeApi {
   private async call<T>(method: string, path: string, body?: unknown, timeoutMs = 60_000): Promise<T> {
     const response = await fetch(`/knowledge${path}`, {
       method,
-      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path.startsWith('/local-setup') || path.startsWith('/embedding-acceleration') || path.startsWith('/ocr-acceleration') || path.startsWith('/structure-v3') || path === '/folder-picker' || path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
+      headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...(path === '/clean-uninstall' || path.startsWith('/local-setup') || path.startsWith('/embedding-acceleration') || path.startsWith('/ocr-acceleration') || path.startsWith('/structure-v3') || path === '/folder-picker' || path.startsWith('/processors/managed/') ? { 'x-dsh-mineru-management': '1' } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       // A hung host must not pin the panel's busy state forever: fail the
       // call with a clear error instead of an indefinite spinner. Long-running
       // jobs (reindex of a whole base) pass a larger budget so a slow sweep is
       // not cut short while the server is still working.
+      ...(path === '/clean-uninstall' ? {keepalive:true} : {}),
       signal: AbortSignal.timeout(timeoutMs),
     })
     let envelope: Envelope<T>

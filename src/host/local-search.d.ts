@@ -6,7 +6,7 @@ export function setupState(): LocalSetup
 export function startSetup(onReady: () => Promise<void>, force?: boolean): Promise<LocalSetup>
 export function resumeSetup(onReady: () => Promise<void>): void
 export function configure(ctx: unknown, input: Partial<SearchPreferences>, onReady: () => Promise<void>): Promise<LocalSetup>
-export function closeSearch(): void
+export function closeSearch(): Promise<void>
 export function enterForeground(): () => void
 export function isDocumentVision(): boolean
 export function visionCatalog(ctx: unknown): Promise<VisionCatalog>

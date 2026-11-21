@@ -1,3 +1,4 @@
+import { CleanUninstall } from './CleanUninstall.js'
 import { documentSubtreeIds } from './document-tree.js'
 import type { ProcessingSnapshot } from '../../knowledge/processing-meter.js'
 /**
@@ -144,9 +145,9 @@ function useReaderMode(open: boolean) {
 export function KnowledgeSettings(props: LocalModelsSectionProps): JSX.Element | null {
   const mode = useReaderMode(true)
   if (!mode) return null
-  if (!mode.reader) return <LocalModelsSection {...props} />
+  if (!mode.reader) return <><LocalModelsSection {...props} /><CleanUninstall api={props.api} t={props.t} /></>
   if (mode.url) return <a href={mode.url + '?view=settings'} target="_blank" rel="noreferrer">Open Knowledge administration</a>
-  return <iframe title="Knowledge administration" src="/knowledge/reader/?view=settings" style={{border:0,width:'100%',height:'75vh'}} />
+  return <><iframe title="Knowledge administration" src="/knowledge/reader/?view=settings" style={{border:0,width:'100%',height:'75vh'}} /><CleanUninstall api={props.api} t={props.t} /></>
 }
 
 /** Frame-wide Cherry Studio-style knowledge base page. */
@@ -2030,6 +2031,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
               busy={busy}
               onSaved={() => void saveBaseConfig()}
             />
+            <CleanUninstall api={api} t={t} />
           </SidePanel>
         )}
 

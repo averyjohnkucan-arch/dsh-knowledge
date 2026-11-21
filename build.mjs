@@ -64,6 +64,7 @@ const hostExternal = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-*',
   'zod',
+  'yaml',
   'pdf-parse',
   'mammoth',
   'jszip',

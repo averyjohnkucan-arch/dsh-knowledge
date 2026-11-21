@@ -1,3 +1,6 @@
+import { knowledgeDomainSpec } from './domain.js'
+import { cleanUninstall, type UninstallProfile, type UninstallManager } from './clean-uninstall.js'
+import { DeploymentError } from './mineru-deployment-plan.js'
 import { AdClient, startAdServer } from './ad/http.js'
 import { loadAdConfig, loopback } from './ad/config.js'
 import { exportArchive, importArchive } from './base-archive.js'
@@ -415,8 +418,8 @@ export class KnowledgeService extends Service {
     this.ctx.effect(() => async () => { await store?.close() }, 'knowledge: close store')
     // Terminate the local-model inference worker on teardown so a loaded
     // ~600MB model can never outlive the plugin (Cherry: lifecycle-managed worker).
-    this.ctx.effect(() => () => { void disposeLocalModelWorker() }, 'knowledge: dispose local model worker')
-    this.ctx.effect(() => () => { void disposeLocalRerankProcess() }, 'knowledge: dispose local rerank process')
+    this.ctx.effect(() => () => disposeLocalModelWorker(), 'knowledge: dispose local model worker')
+    this.ctx.effect(() => () => disposeLocalRerankProcess(), 'knowledge: dispose local rerank process')
     this.ctx.effect(() => async () => { await Promise.all([disposeOcrWorker(), disposePdfParsers()]) }, 'knowledge: dispose OCR and PDF workers')
     this.ctx.effect(() => () => { embeddingAcceleration.dispose(); embeddingFp16Acceleration.dispose() }, 'knowledge: dispose embedding accelerators')
     this.ctx.effect(() => () => this.structureV3.dispose(), 'knowledge: dispose PP-StructureV3')
@@ -814,6 +817,38 @@ export class KnowledgeService extends Service {
 
   getConfig(): KnowledgeConfig {
     return resolveConfig(this.baseConfig, this.requireStore().getConfigOverrides())
+  }
+
+  private uninstallTask?: Promise<{uninstalled:boolean}>
+
+  authorizeUninstall(req: IncomingMessage) {
+    const connection = this.ctx.get('connection') as { requestRejection?(request: IncomingMessage): number | undefined } | undefined
+    const denied = connection?.requestRejection ? connection.requestRejection(req) : 403
+    if (denied) throw new DeploymentError('uninstall_forbidden', 'Sign in to the local Harness to uninstall Knowledge.', denied)
+    if (this.adServer) throw new DeploymentError('shared_reader', 'The shared AD index is managed on its server.', 403)
+  }
+
+  uninstallFromSettings() {
+    const profile = this.ctx.get('profileContext') as UninstallProfile | undefined
+    const manager = this.ctx.get('pluginManager') as UninstallManager | undefined
+    if (!profile || !manager) throw new DeploymentError('uninstall_unavailable', 'Open Settings in a running Harness Web profile.', 409)
+    if (!this.uninstallTask) {
+      const sources = (this.store?.listBases() ?? []).flatMap(base => base.externalPath ? [base.externalPath] : [])
+      const facility = this.store?.raw && this.ctx.get('storageDomain') as StorageDomainFacility | undefined
+      const clearMetadata = facility ? async () => {
+        const domain = await facility.open(knowledgeDomainSpec)
+        try {
+          for (const name of ['bases', 'documents'] as const) {
+            const table = domain.table(name)
+            await table.deleteMany([...table.keys()])
+          }
+          await domain.global.set(knowledgeDomainSpec.global.initial)
+        } finally { await domain.close() }
+      } : undefined
+      this.uninstallTask = cleanUninstall(profile, manager, resolveChunkStorePath(this.baseConfig.chunkStorePath), sources, clearMetadata)
+        .finally(() => { this.uninstallTask = undefined })
+    }
+    return this.uninstallTask
   }
 
   archiveRejection(req: IncomingMessage) {

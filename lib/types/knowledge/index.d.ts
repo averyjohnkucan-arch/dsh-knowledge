@@ -195,6 +195,11 @@ export declare class KnowledgeService extends Service {
     /** Wait until the durable store is ready; the HTTP route awaits this. */
     whenReady(): Promise<void>;
     getConfig(): KnowledgeConfig;
+    private uninstallTask?;
+    authorizeUninstall(req: IncomingMessage): void;
+    uninstallFromSettings(): Promise<{
+        uninstalled: boolean;
+    }>;
     archiveRejection(req: IncomingMessage): number | undefined;
     exportBase(id: string): {
         name: string;

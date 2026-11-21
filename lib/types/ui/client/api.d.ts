@@ -402,6 +402,9 @@ export interface DirectoryImportStatus {
     done: boolean;
 }
 export declare class KnowledgeApi {
+    cleanUninstall(): Promise<{
+        uninstalled: boolean;
+    }>;
     importBase(file: File): Promise<{
         id: string;
     }>;

@@ -43,6 +43,15 @@ export function knowledgeRoute(service: KnowledgeService): WebRoute {
 
 async function handleRequest(service: KnowledgeService, req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
+    if (req.url?.split('?')[0] === '/knowledge/clean-uninstall' && req.method === 'POST') {
+      requireLocalManagement(req, service.managementBindHost)
+      service.authorizeUninstall(req)
+      const body = await readJson(req)
+      if (body?.confirm !== 'delete-all-local-kbs') throw new InvalidRequestError('Confirm permanent deletion of all local KBs.')
+      await service.whenReady()
+      writeJson(res, 200, { ok:true, value:await service.uninstallFromSettings() })
+      return
+    }
     if (service.adClient) return await service.adClient.handle(req,res,service.managementBindHost)
     const readerMode = req.method === 'GET' && req.url?.split('?')[0] === '/knowledge/reader-mode'
     if (service.adServer) {

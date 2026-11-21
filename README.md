@@ -2,6 +2,10 @@
 
 This branch targets DeepSeek Harness `0.2.2-rc.4` and Node.js 24.9 or newer.
 
+## v1.3.1 highlights — Clean uninstall
+
+In Harness **Settings → Local Models**, choose **Uninstall and delete all KBs** to permanently remove the plugin, local KBs, uploaded copies, search indexes, settings and managed downloads. Linked source folders and separately configured model caches stay on disk. [Removal and fresh install](docs/releases/v1.3.1.md)
+
 ## v1.3.0 highlights — Active Directory and Windows shares
 
 Sign in from Knowledge in a personal Harness. Assign AD security groups to reading, settings, folder sync, model setup and access-policy administration. The reader checks live Windows file access before reranking. [Deployment and group setup](docs/active-directory.md)
@@ -111,7 +115,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.3.0.tgz
+pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.3.1.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge
