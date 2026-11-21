@@ -50,6 +50,7 @@ export declare const baseConfigSchema: z.ZodObject<{
         builtin: "builtin";
         mineru: "mineru";
         "mineru-local": "mineru-local";
+        "ovis-local": "ovis-local";
     }>>;
     mineruApiKey: z.ZodOptional<z.ZodString>;
     mineruApiHost: z.ZodOptional<z.ZodString>;
@@ -97,6 +98,7 @@ export declare const documentProcessingInfoSchema: z.ZodObject<{
         paddle: "paddle";
         mineru: "mineru";
         "mineru-local": "mineru-local";
+        "ovis-local": "ovis-local";
     }>;
     processorVersion: z.ZodOptional<z.ZodString>;
     optionsFingerprint: z.ZodString;
@@ -158,6 +160,7 @@ export declare const documentSchema: z.ZodObject<{
             paddle: "paddle";
             mineru: "mineru";
             "mineru-local": "mineru-local";
+            "ovis-local": "ovis-local";
         }>;
         processorVersion: z.ZodOptional<z.ZodString>;
         optionsFingerprint: z.ZodString;
@@ -235,6 +238,7 @@ export declare const configOverridesSchema: z.ZodObject<{
         builtin: "builtin";
         mineru: "mineru";
         "mineru-local": "mineru-local";
+        "ovis-local": "ovis-local";
     }>>;
     mineruApiKey: z.ZodOptional<z.ZodString>;
     mineruApiHost: z.ZodOptional<z.ZodString>;
@@ -390,6 +394,7 @@ export declare const knowledgeDomainSpec: {
                     builtin: "builtin";
                     mineru: "mineru";
                     "mineru-local": "mineru-local";
+                    "ovis-local": "ovis-local";
                 }>>;
                 mineruApiKey: z.ZodOptional<z.ZodString>;
                 mineruApiHost: z.ZodOptional<z.ZodString>;

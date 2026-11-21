@@ -1994,6 +1994,7 @@ function PanelBody(props: { api: KnowledgeApi; t: Translate; onClose: () => void
         {ragOpen && globalConfig !== null && selectedBase !== null && (
           <SidePanel title={t('baseSettings')} onClose={() => setRagOpen(false)} width={sidePanelWidth} onResizeWidth={onSideResizeStart}>
             <RagConfigPanel
+              key={selectedBase.id}
               base={selectedBase}
               globalConfig={globalConfig}
               api={api}

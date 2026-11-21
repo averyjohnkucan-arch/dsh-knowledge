@@ -26,3 +26,12 @@ export interface VisionCatalog {
   models: Array<{ id: string; name: string; verified: boolean }>
   unavailable: string[]
 }
+
+export interface DocumentSetup {
+  status: 'new' | 'running' | 'ready' | 'error'
+  supported: boolean
+  stage?: string
+  progress?: { received: number; total: number }
+  error?: string
+  backend?: 'ovis' | 'ovis-bf16'
+}

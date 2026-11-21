@@ -1,3 +1,9 @@
+## 1.2.0 — One-click PDF OCR and local search
+
+- Add per-base setup for OvisOCR2, Qwen3 Embedding and Qwen3 Reranker. Setup verifies the installed models and resumes interrupted work.
+- Route PDF and image imports through the local OCR worker. Keep Markdown, page evidence and existing chunking, embedding and retrieval entry points.
+- Share downloaded model assets across bases while preserving each base’s processor and embedding settings. [Setup guide](docs/releases/v1.2.0.md)
+
 ## 0.5.26 — Embedding controls and explanatory settings help
 
 - Add paired sliders and editable number boxes for vector dimensions, embedding batch size, retrieval count, thresholds, context stitching, fusion weight and CPU worker tuning.

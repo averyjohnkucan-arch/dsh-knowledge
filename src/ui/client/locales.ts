@@ -5,6 +5,7 @@
  */
 
 export type KnowledgeKey =
+  | 'documentSetupTitle' | 'documentSetupHint' | 'documentSetupStart' | 'documentSetupReady' | 'documentSetupPlatform' | 'documentSetupRetry' | 'documentSetupRunning'
   | 'importKnowledgeBase' | 'exportKnowledgeBase'
   | 'mineruLocalOption' | 'mineruLocalDesc' | 'mineruLocalUrl' | 'mineruLocalKey'
   | 'mineruTier' | 'mineruFlash' | 'mineruBasic' | 'mineruStandard' | 'mineruAdvanced'
@@ -378,6 +379,11 @@ export type KnowledgeKey =
 export type Translate = (key: KnowledgeKey) => string
 
 export const zh: Record<KnowledgeKey, string> = {
+  documentSetupTitle: '本地 PDF 识别与检索',
+  documentSetupHint: '为此知识库安装 OvisOCR2、Qwen3 嵌入与重排模型。导入的 PDF 将保存为 Markdown，并分块建立检索索引。精简版约需 3.4 GB，NVIDIA BF16 版约需 12.5 GB，另需临时空间。',
+  documentSetupStart: '设置 PDF 识别与本地检索', documentSetupReady: '可以导入 PDF',
+  documentSetupPlatform: '本地 OvisOCR2 目前支持 Linux x86-64。', documentSetupRetry: '重试 PDF 识别与检索设置',
+  documentSetupRunning: '正在设置本地模型…',
   importKnowledgeBase:'导入知识库', exportKnowledgeBase:'导出知识库',
   mineruLocalOption: 'MinerU（本地 / 自部署 V1）',
   mineruLocalDesc: '文件只发送到此自部署地址。服务需独立安装；此插件不下载模型，也不会自动转到云端。由 MinerU 提供解析。',
@@ -773,6 +779,11 @@ export const zh: Record<KnowledgeKey, string> = {
 }
 
 export const en: Record<KnowledgeKey, string> = {
+  documentSetupTitle: 'Local PDF OCR and search',
+  documentSetupHint: 'Install OvisOCR2, Qwen3 Embedding and Qwen3 Reranker for this base. PDFs are saved as Markdown, chunked and indexed. Allow about 3.4 GB for compact setup or 12.5 GB for NVIDIA BF16, plus temporary space.',
+  documentSetupStart: 'Set up PDF OCR and local search', documentSetupReady: 'Ready to import PDFs',
+  documentSetupPlatform: 'Local OvisOCR2 currently supports Linux x86-64.', documentSetupRetry: 'Retry PDF OCR and search setup',
+  documentSetupRunning: 'Setting up local models…',
   importKnowledgeBase:'Import knowledge base', exportKnowledgeBase:'Export knowledge base',
   mineruLocalOption: 'MinerU (local / self-hosted V1)',
   mineruLocalDesc: 'Files are sent only to this self-hosted address. Install the service separately; this plugin does not download models or switch to cloud automatically. Parsing powered by MinerU.',

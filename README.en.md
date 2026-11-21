@@ -19,6 +19,10 @@ A **knowledge base system** as a standalone, open-source bundle plugin for [Deep
 
 ---
 
+## v1.2.0 highlights — One-click PDF OCR and local search
+
+Open a knowledge base’s **Settings** and click **Set up PDF OCR and local search** to install OvisOCR2, Qwen3 Embedding and Qwen3 Reranker. Once ready, import a PDF normally to save, chunk and search its Markdown. The managed OCR runtime supports Linux x86-64. [Installation and model details](docs/releases/v1.2.0.md).
+
 ## Local pipeline configuration
 
 Use the built-in PDF parser, PaddleOCR for scanned documents, and optional
@@ -105,7 +109,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.26.tgz
+pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.2.0.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge

@@ -25,7 +25,7 @@ export function artifactUrl(documentId: string, revision: string, assetId: strin
 export function ProcessingSummary({ processing, t }: { processing?: DocumentProcessingInfo; t: Translate }): JSX.Element | null {
   if (processing === undefined) return null
   const completeness = processing.completeness === 'complete' ? 'processingComplete' : processing.completeness === 'partial' ? 'processingPartial' : 'processingUnknown'
-  const provider = processing.provider === 'mineru-local' ? t('mineruLocalOption') : processing.provider === 'mineru' ? t('mineruOption') : t('processorBuiltin')
+  const provider = processing.provider === 'ovis-local' ? 'OvisOCR2' : processing.provider === 'mineru-local' ? t('mineruLocalOption') : processing.provider === 'mineru' ? t('mineruOption') : t('processorBuiltin')
   return <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.6, marginBottom: 10 }}>
     <div>{t('processingInfo')}: {provider}{processing.processorVersion ? ` ${processing.processorVersion}` : ''} · {t(completeness)}{processing.reused ? ` · ${t('processingReused')}` : ''}</div>
     {processing.warnings.length > 0 ? <ul style={{ margin: '4px 0', paddingLeft: 18, color: C.warn }}>

@@ -1,9 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Engine, steps } from './engine.js';
+import { OcrWorker, installOcr, installedBackend, platformSupported, verifyOcr } from './ocr.js';
+import { models } from '../runtime/assets.js';
 import { pdfBody } from './pdf.js';
 import { askVision, imageMarkdown } from './vision.js';
 export { isDocumentVision, visionCatalog } from './vision.js';
@@ -85,7 +87,8 @@ let current;
 function runtime() {
   if (!current) {
     const store = new Preferences();
-    current = { store, engine: new Engine(join(root(), 'models'), store) };
+    current = { store, engine: new Engine(join(root(), 'models'), store),
+      ocr: new OcrWorker(join(root(), 'ocr')), jobs: new Map(), controller: new AbortController() };
   }
   return current;
 }
@@ -95,14 +98,85 @@ export function setupState() {
 }
 export function startSetup(onReady, force = false) {
   const { engine } = runtime();
+  runtime().store.put('searchScope', 'global');
   engine.onReady = onReady;
   if (engine.state.status === 'ready' && !force) return Promise.resolve(onReady()).then(setupState);
   engine.start(force);
   return Promise.resolve(setupState());
 }
 export function resumeSetup(onReady) {
-  if (hasSetup() && runtime().engine.state.status === 'running') void startSetup(onReady);
+  if (hasSetup() && runtime().engine.state.status === 'running' && runtime().store.get('searchScope', 'global') === 'global') void startSetup(onReady);
 }
+function searchAssetsPresent(engine) {
+  return ['embedding', 'reranker'].every(kind => models[kind].files.every(asset => {
+    try { return statSync(join(engine.root, kind, asset.path)).size === asset.bytes; }
+    catch { return false; }
+  }));
+}
+
+export function documentSetupState(id, configured) {
+  const rt = runtime();
+  const saved = rt.store.get('document:' + id, { status: 'new' });
+  const { engine } = rt;
+  if (saved.status === 'running') {
+    const checkingSearch = rt.stage === 'search';
+    return { status: 'running', supported: platformSupported, stage: checkingSearch ? steps[engine.state.step] : rt.stage || 'Preparing local models',
+      ...(checkingSearch && engine.state.progress ? { progress: engine.state.progress } : {}) };
+  }
+  if (saved.status === 'ready' && (!configured || !installedBackend(rt.ocr.root) || !searchAssetsPresent(engine)))
+    return { status: 'new', supported: platformSupported };
+  return { ...saved, supported: platformSupported };
+}
+
+async function ensureAssets(rt) {
+  const signal = rt.controller.signal;
+  const engine = rt.engine;
+  const stage = message => { rt.stage = message; };
+  stage('Checking local OCR support');
+  if (!platformSupported) throw new Error('Local OvisOCR2 currently supports Linux x86-64.');
+  stage('search');
+  if (!engine.task) { rt.store.put('searchScope', 'base'); engine.onReady = () => {}; }
+  engine.start(engine.state.status === 'ready' && !searchAssetsPresent(engine));
+  await engine.task;
+  signal.throwIfAborted();
+  if (engine.state.status !== 'ready') throw new Error(engine.state.error || 'Local search setup failed.');
+  const backend = await installOcr(rt.ocr.root, stage, signal);
+  stage('Testing OvisOCR2 on a scanned image');
+  await verifyOcr(rt.ocr, backend, signal);
+  return backend;
+}
+
+export function startDocumentSetup(id, configured, apply) {
+  const rt = runtime();
+  if (!rt.jobs.has(id) && documentSetupState(id, configured).status !== 'ready') {
+    const key = 'document:' + id;
+    rt.store.put(key, { status: 'running' });
+    rt.assets ||= ensureAssets(rt).finally(() => { rt.assets = undefined; });
+    const job = rt.assets.then(async backend => {
+      rt.controller.signal.throwIfAborted();
+      await apply(id);
+      rt.store.put(key, { status: 'ready', backend });
+    }).catch(error => {
+      if (!rt.controller.signal.aborted) rt.store.put(key, { status: 'error', error: String(error.message || error).slice(0, 600) });
+    }).finally(() => rt.jobs.delete(id));
+    rt.jobs.set(id, job);
+  }
+  return documentSetupState(id, configured);
+}
+export function resumeDocumentSetup(apply) {
+  if (!hasSetup()) return;
+  const rt = runtime();
+  for (const { key } of rt.store.db.prepare("SELECT key FROM config WHERE key LIKE 'document:%'").all()) {
+    if (rt.store.get(key, {}).status === 'running') startDocumentSetup(key.slice(9), false, apply);
+  }
+}
+export function readOcr(bytes, suffix, signal, timeout) {
+  return runtime().ocr.convert(bytes, suffix, signal, timeout);
+}
+export function ocrIdentity() {
+  return 'ovis-ocr2-v1/' + (installedBackend(join(root(), 'ocr')) || 'uninstalled');
+}
+
 export async function configure(ctx, patch, onReady) {
   if (patch.ocrModel || patch.descriptionModel) {
     const { visionCatalog } = await import('./vision.js');
@@ -119,16 +193,19 @@ export async function configure(ctx, patch, onReady) {
 }
 export function closeSearch() {
   if (!current) return;
-  const { engine, store } = current;
+  const { engine, store, jobs, ocr, controller } = current;
   current = undefined;
+  controller.abort();
+  ocr.close();
   engine.close();
-  if (engine.task) void engine.task.finally(() => store.db.close());
+  if (engine.task || jobs.size) void Promise.allSettled([engine.task, ...jobs.values()]).then(() => store.db.close());
   else store.db.close();
 }
 export function enterForeground() {
   const engine = current?.engine;
   if (!engine) return () => {};
   engine.foreground++;
+  if (!current.ocr.pending) current.ocr.stop();
   engine.workers.accelerator.stop('Reserved for chat');
   return () => { engine.foreground--; engine.lastChat = Date.now(); };
 }

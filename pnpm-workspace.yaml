@@ -4,6 +4,7 @@ overrides:
 allowBuilds:
   esbuild: true
   onnxruntime-node: true
+  openvino-node: true
   protobufjs: true
   sharp: true
   tesseract.js: false

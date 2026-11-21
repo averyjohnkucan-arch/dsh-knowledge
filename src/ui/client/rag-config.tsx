@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { KnowledgeApi } from './api.js'
 import type { BaseConfig, BaseSummary, EmbeddingProvider, KnowledgeConfig, LocalModelStatus, ModelSuggestions } from './api.js'
 import { C, style } from './theme.js'
+import { DocumentSetupSection } from './DocumentSetupSection.js'
 import { RECOMMENDED_LOCAL } from './RecommendedLocalStack.js'
 import { IconRefresh } from './icons.js'
 import type { Translate } from './locales.js'
@@ -35,6 +36,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
     ...(base.config ?? {}),
   }))
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [modelListRevision, setModelListRevision] = useState(0)
   const [localStatus, setLocalStatus] = useState<LocalModelStatus | null>(null)
   const [suggestions, setSuggestions] = useState<ModelSuggestions>({ embedding: [], local: [], rerank: [], ollamaEmbedding: [], ollamaVision: [] })
   // Models actually downloaded/installed on this machine — the pickers below
@@ -74,7 +76,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
       setReadyLocalRerankers(ready.filter(m => m.kind === 'reranking').map(m => m.id))
     }).catch(() => {})
     return () => { cancelled = true }
-  }, [api])
+  }, [api, modelListRevision])
 
   // Installed Ollama models, per relevant base URL: the embedding picker
   // uses the embedding base URL, the captioning picker its own.
@@ -278,6 +280,13 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0 }}>
       <div style={{ ...style.card, flex: 1, overflowY: 'auto' }} className="kb-scroll kb-rag-config">
+        <DocumentSetupSection key={base.id} api={api} id={base.id} t={t}
+          configured={base.config?.documentProcessorProvider === 'ovis-local' && base.config?.embeddingModel === RECOMMENDED_LOCAL.embeddingModel}
+          onReady={() => {
+          setModelListRevision(value => value + 1)
+          setValues(previous => ({ ...previous, ...RECOMMENDED_LOCAL, documentProcessorProvider: 'ovis-local', ocrEnabled: true }))
+          onSaved()
+        }} />
         {/* 文档处理 */}
         <Section title={t('docProcessing')} help={SETTINGS_HELP.docProcessing} hint={t('docProcessingHint')}>
           <select
@@ -287,6 +296,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
             onChange={(e) => { patch({ documentProcessorProvider: e.target.value as KnowledgeConfig['documentProcessorProvider'] }); setProcessorCheckResult(null) }}
           >
             <option value="builtin">{t('processorBuiltin')}</option>
+            <option value="ovis-local">OvisOCR2</option>
             <option value="mineru-local">{t('mineruLocalOption')}</option>
             <option value="mineru">{t('mineruOption')}</option>
           </select>
@@ -330,9 +340,9 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
               {!processorDirty && processorCheckResult !== null && <div role="status" style={{ fontSize: 12, color: processorCheckError ? C.danger : C.success }}>{processorCheckResult}</div>}
             </div>
           )}
-          <FieldRow label="PaddleOCR for scanned PDFs" help={SETTINGS_HELP.ocr} hint="Recognize scanned pages locally when ordinary text extraction is insufficient. OCR models must be downloaded first.">
+          {values.documentProcessorProvider !== 'ovis-local' && <FieldRow label="PaddleOCR for scanned PDFs" help={SETTINGS_HELP.ocr} hint="Recognize scanned pages locally when ordinary text extraction is insufficient. OCR models must be downloaded first.">
             <Switch checked={values.ocrEnabled !== false} onChange={v => patch({ ocrEnabled: v })} />
-          </FieldRow>
+          </FieldRow>}
           <FieldRow label={t('processingTimeout')} help={SETTINGS_HELP.processingTimeout}>
             <input type="number" style={style.input} min={10000} max={7200000} step={1000} value={values.documentProcessingTimeoutMs ?? 1_800_000} onChange={e => patchNumber('documentProcessingTimeoutMs', e.target.value)} />
           </FieldRow>

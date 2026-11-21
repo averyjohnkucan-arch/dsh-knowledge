@@ -147,7 +147,7 @@ export const Config: Schema<Config> = Schema.object({
   hfEndpoint: Schema.string().default(''),
   mineruPythonIndexUrl: Schema.string().default('https://pypi.org/simple'),
   chunkStorePath: Schema.string().default(''),
-  documentProcessorProvider: Schema.union(['builtin', 'mineru', 'mineru-local']).default('builtin'),
+  documentProcessorProvider: Schema.union(['builtin', 'mineru', 'mineru-local', 'ovis-local']).default('builtin'),
   mineruApiKey: Schema.string().default(''),
   mineruApiHost: Schema.string().default(''),
   mineruLocalUrl: Schema.string().default('http://127.0.0.1:8000'),

@@ -86,6 +86,19 @@ describe('embedding output dimensions', () => {
     await service.renameBase(base.id, { config: { embeddingDimensions: 0 } }); await service.waitForIdle()
     expect(service.listChunks(doc.id).every(c => c.embedding?.length === 1024 && !c.embeddingModel?.includes(':dimensions-'))).toBe(true)
   })
+  it('uses a base’s native-width model when the global default has no embeddings', async () => {
+    const service = await mount()
+    const searchable = await service.createBase({ name: 'Local search', config: {
+      embeddingProvider: 'openai', embeddingModel: model, embeddingBaseUrl: 'https://embedding.invalid',
+    } })
+    await service.createBase({ name: 'Keyword search' })
+    await service.addTextDocument({ baseId: searchable.id, title: 'Receipt', content: 'Juniper Library paid 128.50.' })
+    await service.waitForIdle()
+    for (const baseIds of [[searchable.id], undefined]) {
+      const result = await service.search({ query: 'Juniper receipt', baseIds, mode: 'vector' })
+      expect(result.hits.find(hit => hit.baseId === searchable.id)?.vectorScore).toBeTypeOf('number')
+    }
+  })
   it('searches several bases using each base width and honors an explicit scope', async () => {
     const service = await mount()
     const bases = []

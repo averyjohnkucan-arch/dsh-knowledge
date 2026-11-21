@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "repo": "mradermacher/OvisOCR2-GGUF",
+      "revision": "99b7522fe8b60154473e5224efff5b6ccae92d1c",
+      "files": [
+        {
+          "path": "OvisOCR2.Q4_K_M.gguf",
+          "bytes": 529297696,
+          "sha256": "1df3fe5e437e17d106c0b6ca97fd94dca538b442d0df106cae800958768dce1a"
+        },
+        {
+          "path": "OvisOCR2.mmproj-Q8_0.gguf",
+          "bytes": 115923616,
+          "sha256": "82ad7df9e27f4704a768ae6ca0f5edf8c40f0928598078f932c3dbd7c89ef59c"
+        }
+      ],
+      "directory": "models/ovis-ocr2-gguf"
+    },
+    {
+      "repo": "ATH-MaaS/OvisOCR2",
+      "revision": "cbdede82e048659b83310476ff807da825f8fe78",
+      "directory": "models/ovis-ocr2-docs",
+      "files": [
+        {
+          "path": "LICENSE",
+          "bytes": 11544,
+          "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a"
+        },
+        {
+          "path": "README.md",
+          "bytes": 7945,
+          "sha256": "f2510d6d02471c01a2808102da79cb47106963f18486f2ac05dd5c0b53fc1c7a"
+        }
+      ]
+    }
+  ],
+  "server": {
+    "name": "llama.cpp",
+    "build": "b12561",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12561/llama-b12561-bin-ubuntu-vulkan-x64.tar.gz",
+    "api": "https://api.github.com/repos/ggml-org/llama.cpp/releases/assets/771458782",
+    "bytes": 36737040,
+    "sha256": "fc5a2a71b857324278811954e3a95c86de5b28bbcc36c758dcc0c568b4b56908"
+  }
+}

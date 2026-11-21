@@ -1,4 +1,4 @@
-import type { LocalSetup, SearchPreferences, VisionCatalog } from '../../shared/local-setup.js'
+import type { DocumentSetup, LocalSetup, SearchPreferences, VisionCatalog } from '../../shared/local-setup.js'
 import type { ProcessingSnapshot } from '../../knowledge/processing-meter.js'
 /**
  * Browser fetch client for the knowledge host service. Same-origin JSON calls
@@ -42,7 +42,7 @@ export interface BaseConfig {
   deferredPhotoCaptionModel?: string
   deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
-  documentProcessorProvider?: 'builtin' | 'mineru' | 'mineru-local'
+  documentProcessorProvider?: 'builtin' | 'mineru' | 'mineru-local' | 'ovis-local'
   mineruApiKey?: string
   mineruApiHost?: string
   mineruLocalUrl?: string
@@ -247,7 +247,7 @@ export interface KnowledgeConfig {
   deferredPhotoCaptionModel?: string
   deferredChartEnrichment?: boolean
   structureV3Charts?: boolean
-  documentProcessorProvider: 'builtin' | 'mineru' | 'mineru-local'
+  documentProcessorProvider: 'builtin' | 'mineru' | 'mineru-local' | 'ovis-local'
   mineruApiKey: string
   mineruApiHost: string
   mineruLocalUrl?: string
@@ -416,6 +416,8 @@ export class KnowledgeApi {
     if (!response.ok || !result.ok) throw new Error(result.error?.message || 'Could not import this base.')
     return result.value
   }
+  documentSetup(id: string): Promise<DocumentSetup> { return this.call('GET', '/local-setup/bases/' + encodeURIComponent(id)) }
+  startDocumentSetup(id: string): Promise<DocumentSetup> { return this.call('POST', '/local-setup/bases/' + encodeURIComponent(id), {}) }
   localSetup(): Promise<LocalSetup> { return this.call('GET', '/local-setup') }
   startLocalSetup(): Promise<LocalSetup> { return this.call('POST', '/local-setup', {}) }
   setupVisionModels(): Promise<VisionCatalog> { return this.call('GET', '/local-setup/vision') }

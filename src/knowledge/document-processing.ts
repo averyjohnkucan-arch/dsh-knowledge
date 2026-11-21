@@ -1,4 +1,4 @@
-import { embeddingId, markdownTitle, readVisual, visionFingerprint } from 'dsh-knowledge/local-search'
+import { embeddingId, markdownTitle, ocrIdentity, readOcr, readVisual, visionFingerprint } from 'dsh-knowledge/local-search'
 import { type StructureV3Manager } from './structure-v3.js'
 import { createHash } from 'node:crypto'
 import type { ArtifactRepository, ProcessingJobRecord } from './artifacts.js'
@@ -26,7 +26,8 @@ export function processorFingerprint(config: KnowledgeConfig): string {
   return hash(JSON.stringify({
     ocrEnabled: config.ocrEnabled !== false,
     structureV3Charts: config.structureV3Charts ?? true,
-    ...(config.embeddingModel === embeddingId ? { markdown: 1, vision: visionFingerprint() } : {}),
+    ...(config.embeddingModel === embeddingId ? { markdown: 1, ...(config.documentProcessorProvider !== 'ovis-local' ? { vision: visionFingerprint() } : {}) } : {}),
+    ...(config.documentProcessorProvider === 'ovis-local' ? { ocr: ocrIdentity() } : {}),
     version: 2, provider: config.documentProcessorProvider,
     host: config.documentProcessorProvider === 'mineru-local' ? config.mineruLocalUrl : config.mineruApiHost,
     tier: config.mineruTier ?? 'basic',
@@ -184,6 +185,28 @@ export async function extractDocumentContent(input: Pick<ProcessFileInput,
   const progress = (value: ProcessingProgress) => input.onProgress?.(value)
   let output: ProcessingOutput | undefined
   input.signal?.throwIfAborted()
+
+  if (config.documentProcessorProvider === 'ovis-local') {
+    const kind = extensionOf(input.fileName)
+    const suffix = pdf || input.mimeType?.split(';')[0]?.trim().toLowerCase() === 'application/pdf' ? 'pdf' : kind
+    if (['pdf', 'png', 'jpg', 'jpeg', 'webp', 'tif', 'tiff', 'bmp', 'gif'].includes(suffix)) {
+      progress({ stage: 'parsing' })
+      const reply = await readOcr(bytes, suffix, input.signal, config.documentProcessingTimeoutMs ?? 1_800_000)
+      input.signal?.throwIfAborted()
+      if (reply.status !== 'complete' || reply.complete_pages !== reply.pages)
+        throw Object.assign(new Error(`OCR completed ${reply.complete_pages} of ${reply.pages} pages`), { code: 'ocr_incomplete' })
+      for (const [page, reasons] of Object.entries(reply.review_pages)) {
+        warnings.push({ code: 'ocr_review', message: `Review page ${page}: ${reasons.join(', ')}` })
+      }
+      const output = parsedTextDocument(reply.markdown, bytes, 'ovis-local', fingerprint, warnings)
+      const blocks = reply.page_spans.map(({ page, start, end }, index) => ({
+        id: 'page:' + page, index, type: 'text' as const, pageIndex: page - 1,
+        textStart: start, textEnd: end, text: reply.markdown.slice(start, end),
+      }))
+      return { ...output, document: { ...output.document, blocks, completeness: 'complete', pageCount: reply.pages,
+        processedPages: Array.from({ length: reply.pages }, (_, index) => index) } }
+    }
+  }
 
       let remoteFailure: unknown
       if (pdf && config.documentProcessorProvider === 'mineru-local') {

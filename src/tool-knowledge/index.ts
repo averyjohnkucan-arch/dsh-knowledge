@@ -59,7 +59,7 @@ const processingInfoSchema = {
   type: 'object', additionalProperties: false,
   properties: {
     revision: { type: 'string', required: true }, artifactId: { type: 'string', required: true },
-    sourceHash: { type: 'string', required: true }, provider: { type: 'string', enum: ['builtin', 'paddle', 'mineru', 'mineru-local'], required: true },
+    sourceHash: { type: 'string', required: true }, provider: { type: 'string', enum: ['builtin', 'paddle', 'mineru', 'mineru-local', 'ovis-local'], required: true },
     processorVersion: { type: 'string' }, optionsFingerprint: { type: 'string', required: true },
     parsedAt: { type: 'number', required: true }, completeness: { type: 'string', enum: ['complete', 'partial', 'unknown'], required: true },
     pageCount: { type: 'number' }, processedPages: { type: 'array', items: { type: 'number' } },
@@ -1375,7 +1375,9 @@ export async function buildAutoRetrieveMessage(
     // configured reranker, preventing local model startup and remote double
     // billing on this latency-critical path.
     const config = knowledge.getConfig()
-    const localPipeline = config.embeddingProvider === 'local' || config.rerankModel?.startsWith('local:')
+    const searchConfigs = (namedBase ? [namedBase] : bases).map(base => knowledge.getConfigFor(base.id))
+    const useVectors = searchConfigs.some(item => item.embeddingProvider && item.embeddingProvider !== 'none')
+    const localPipeline = searchConfigs.some(item => item.embeddingProvider === 'local' || item.rerankModel?.startsWith('local:'))
     const retrievalBudget = localPipeline ? Math.min(30000, config.localRerankTimeoutMs ?? 30000) : AUTO_RETRIEVE_RERANK_TIMEOUT_MS
     const deadlineAt = Date.now() + retrievalBudget
     const budgetSignal = AbortSignal.timeout(retrievalBudget)
@@ -1385,14 +1387,14 @@ export async function buildAutoRetrieveMessage(
           query: currentQuery,
           ...(queryPlan.enhanced !== undefined ? { queries: [queryPlan.enhanced] } : {}),
           topK: AUTO_RETRIEVE_CANDIDATE_POOL,
-          mode: config.embeddingProvider && config.embeddingProvider !== 'none' ? 'auto' as const : 'lexical' as const,
+          mode: useVectors ? 'auto' as const : 'lexical' as const,
           baseId: namedBase.id,
         }
       : {
           query: currentQuery,
           ...(queryPlan.enhanced !== undefined ? { queries: [queryPlan.enhanced] } : {}),
           topK: AUTO_RETRIEVE_CANDIDATE_POOL,
-          mode: config.embeddingProvider && config.embeddingProvider !== 'none' ? 'auto' as const : 'lexical' as const,
+          mode: useVectors ? 'auto' as const : 'lexical' as const,
           baseIds: bases.map(base => base.id),
         }
     const searchStartedAt = Date.now()

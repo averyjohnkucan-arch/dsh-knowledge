@@ -430,6 +430,7 @@ export class KnowledgeService extends Service {
     }
     this.resolveStore()
     localSearch.resumeSetup(() => this.applyLocalSearch())
+    if (store) localSearch.resumeDocumentSetup(id => this.applyDocumentSetup(id))
     this.ctx.effect(() => () => localSearch.closeSearch(), 'knowledge: local search runtime')
     this.ctx.effect(() => () => {
       this.documentAdmission.close()
@@ -836,6 +837,20 @@ export class KnowledgeService extends Service {
     })
   }
   localSetup() { return localSearch.setupState() }
+  documentSetup(id: string, start: boolean) {
+    if (!this.requireStore().getBase(id)) throw new Error(`knowledge base not found: ${id}`)
+    const config = this.getConfigFor(id)
+    const configured = config.documentProcessorProvider === 'ovis-local' && config.embeddingProvider === 'local'
+      && config.embeddingModel === localSearch.embeddingId && config.rerankModel === 'local:' + localSearch.rerankerId
+      && config.keepInternalMarkdown === true
+    return start ? localSearch.startDocumentSetup(id, configured, key => this.applyDocumentSetup(key))
+      : localSearch.documentSetupState(id, configured)
+  }
+  private async applyDocumentSetup(id: string): Promise<void> {
+    await this.renameBase(id, { config: { documentProcessorProvider: 'ovis-local', ocrEnabled: true, keepInternalMarkdown: true,
+      embeddingProvider: 'local', embeddingModel: localSearch.embeddingId, embeddingDimensions: 0,
+      rerankModel: 'local:' + localSearch.rerankerId } })
+  }
   setupVisionModels() { return localSearch.visionCatalog(this.ctx) }
   startLocalSetup() { return localSearch.startSetup(() => this.applyLocalSearch()) }
   configureLocalSetup(prefs: Partial<SearchPreferences>) {
@@ -4271,17 +4286,29 @@ export class KnowledgeService extends Service {
     if (query.length === 0) return emptySearchResult(query, request.mode ?? 'lexical', 0)
     if (query.length > 2000) throw new Error('search query must not exceed 2000 characters')
 
-    // A search spanning bases must encode its query at each base's vector
-    // width. Never silently drop reduced-width bases using the global width.
+    // Tool callers supply baseIds, while the panel supplies baseId. A single
+    // selected base uses the same embedding, reranker and thresholds in both.
+    if (request.baseId === undefined && request.baseIds?.length === 1) {
+      request = { ...request, baseId: request.baseIds[0], baseIds: undefined }
+    }
     if (request.baseId === undefined && request.mode !== 'lexical') {
       const globalConfig = this.getConfig()
       const scope = this.requireStore().listBases().filter(base => request.baseIds === undefined || request.baseIds.includes(base.id))
-      if (scope.some(base => embeddingDimensionTag(this.getConfigFor(base.id)) !== embeddingDimensionTag(globalConfig))) {
+      const configs = scope.map(base => this.getConfigFor(base.id))
+      // Equal-width vectors from different models are still incompatible.
+      // A base with its own model also needs query embeddings when the global
+      // default uses keyword search.
+      if (scope.length === 1) {
+        request = { ...request, baseId: scope[0]!.id, baseIds: undefined }
+      } else if (configs.some(config => embeddingKey(config) !== embeddingKey(globalConfig))) {
         const topK = clampInt(request.topK ?? globalConfig.topK, 1, 50, 6)
         const results = await Promise.all(scope.map(base => this.search({ ...request, query, baseId: base.id, baseIds: undefined, topK: Math.min(50, Math.max(topK * 2, 12)) }, { ...execution, rerank: 'skip' })))
         throwIfAborted(execution.signal)
         throwIfDeadline(execution.deadlineAt)
-        return this.finishMultiQuerySearch(globalConfig, query, request.mode ?? globalConfig.searchMode, results, topK, request.threshold, startedAt, execution.rerank !== 'skip', execution.signal)
+        const localRanker = 'local:' + localSearch.rerankerId
+        const fusionConfig = configs.every(config => config.rerankModel === localRanker)
+          ? { ...globalConfig, rerankModel: localRanker } : globalConfig
+        return this.finishMultiQuerySearch(fusionConfig, query, request.mode ?? globalConfig.searchMode, results, topK, request.threshold, startedAt, execution.rerank !== 'skip', execution.signal)
       }
     }
 
@@ -5070,7 +5097,7 @@ export class KnowledgeService extends Service {
   private processingChunks(processed: ProcessedFile | undefined, config: KnowledgeConfig): readonly ChunkPiece[] | undefined {
     // Keep legacy/plain-text segmentation exactly as before. Only a structured
     // processor result introduces structural boundaries and source mapping.
-    if (processed === undefined || processed.parsed.provider !== 'mineru-local' || processed.parsed.blocks.length === 0) return undefined
+    if (processed === undefined || !['mineru-local', 'ovis-local'].includes(processed.parsed.provider) || processed.parsed.blocks.length === 0) return undefined
     return chunkParsedDocument(processed.parsed, processed.processing.revision, config.chunkSize, config.chunkOverlap, {
       structured: config.structuredChunking !== false, smartChunk: config.smartChunk,
       separator: config.chunkSeparator, tokenLimit: config.chunkTokenLimit,

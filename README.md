@@ -2,6 +2,12 @@
 
 This branch targets DeepSeek Harness `0.2.2-rc.4` and Node.js 24.9 or newer.
 
+## v1.2.0 highlights — One-click PDF OCR and local search
+
+Open **Knowledge**, create or select a base, then open its **Settings** and click **Set up PDF OCR and local search**. When the panel shows **Ready to import PDFs**, add a PDF through the usual file importer. The plugin saves its Markdown, indexes the chunks with local Qwen3 embeddings and uses the local reranker for recall. Installed models are shared across bases.
+
+The managed OvisOCR2 pipeline supports Linux x86-64. For fresh Harness installation, download sizes, hardware selection and recovery, see the [1.2.0 setup guide](docs/releases/v1.2.0.md).
+
 <div align="center">
 
 # dsh-knowledge
@@ -101,7 +107,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-dsh plugin --profile <name> add ./dsh-knowledge-0.5.26.tgz
+pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.2.0.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge

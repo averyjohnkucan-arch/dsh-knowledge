@@ -182,6 +182,8 @@ export declare class KnowledgeService extends Service {
         documents: number;
     }>;
     localSetup(): import("../shared/local-setup.js").LocalSetup;
+    documentSetup(id: string, start: boolean): import("../shared/local-setup.js").DocumentSetup;
+    private applyDocumentSetup;
     setupVisionModels(): Promise<import("../shared/local-setup.js").VisionCatalog>;
     startLocalSetup(): Promise<import("../shared/local-setup.js").LocalSetup>;
     configureLocalSetup(prefs: Partial<SearchPreferences>): Promise<import("../shared/local-setup.js").LocalSetup>;

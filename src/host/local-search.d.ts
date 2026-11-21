@@ -1,4 +1,4 @@
-import type { LocalSetup, SearchPreferences, VisionCatalog } from '../shared/local-setup.js'
+import type { DocumentSetup, LocalSetup, SearchPreferences, VisionCatalog } from '../shared/local-setup.js'
 export const embeddingId: string
 export const rerankerId: string
 export function hasSetup(): boolean
@@ -15,3 +15,10 @@ export function rankPassages(query: string, texts: readonly string[], signal: Ab
 export function markdownTitle(title: string, text: string): string
 export function visionFingerprint(): string
 export function readVisual(ctx: unknown, bytes: Uint8Array, name: string, kind: string, signal?: AbortSignal): Promise<string | undefined>
+export function documentSetupState(id: string, configured: boolean): DocumentSetup
+export function startDocumentSetup(id: string, configured: boolean, apply: (id: string) => Promise<void>): DocumentSetup
+export function resumeDocumentSetup(apply: (id: string) => Promise<void>): void
+export function ocrIdentity(): string
+export function readOcr(bytes: Uint8Array, suffix: string, signal: AbortSignal | undefined, timeout: number): Promise<{
+  page_spans: { page: number; start: number; end: number }[]; status: 'complete' | 'partial'; markdown: string; pages: number; complete_pages: number; review_pages: Record<string, string[]>
+}>

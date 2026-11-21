@@ -1,4 +1,4 @@
-import type { LocalSetup, SearchPreferences, VisionCatalog } from '../../shared/local-setup.js';
+import type { DocumentSetup, LocalSetup, SearchPreferences, VisionCatalog } from '../../shared/local-setup.js';
 import type { ProcessingSnapshot } from '../../knowledge/processing-meter.js';
 /**
  * Browser fetch client for the knowledge host service. Same-origin JSON calls
@@ -39,7 +39,7 @@ export interface BaseConfig {
     deferredPhotoCaptionModel?: string;
     deferredChartEnrichment?: boolean;
     structureV3Charts?: boolean;
-    documentProcessorProvider?: 'builtin' | 'mineru' | 'mineru-local';
+    documentProcessorProvider?: 'builtin' | 'mineru' | 'mineru-local' | 'ovis-local';
     mineruApiKey?: string;
     mineruApiHost?: string;
     mineruLocalUrl?: string;
@@ -239,7 +239,7 @@ export interface KnowledgeConfig {
     deferredPhotoCaptionModel?: string;
     deferredChartEnrichment?: boolean;
     structureV3Charts?: boolean;
-    documentProcessorProvider: 'builtin' | 'mineru' | 'mineru-local';
+    documentProcessorProvider: 'builtin' | 'mineru' | 'mineru-local' | 'ovis-local';
     mineruApiKey: string;
     mineruApiHost: string;
     mineruLocalUrl?: string;
@@ -405,6 +405,8 @@ export declare class KnowledgeApi {
     importBase(file: File): Promise<{
         id: string;
     }>;
+    documentSetup(id: string): Promise<DocumentSetup>;
+    startDocumentSetup(id: string): Promise<DocumentSetup>;
     localSetup(): Promise<LocalSetup>;
     startLocalSetup(): Promise<LocalSetup>;
     setupVisionModels(): Promise<VisionCatalog>;

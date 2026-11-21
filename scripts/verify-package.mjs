@@ -7,6 +7,13 @@ import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const REQUIRED_FILES = [
+  'src/host/ocr.js',
+  'src/runtime/ocr/document_ocr/__main__.py',
+  'src/runtime/ocr/document_ocr/install.py',
+  'src/runtime/ocr/runtime-support/models-ovis.json',
+  'src/runtime/ocr/runtime-support/models-ovis-bf16.json',
+  'src/runtime/ocr/runtime-support/probe.png',
+  'docs/releases/v1.2.0.md',
   'CHANGELOG.md',
   'LICENSE',
   'README.md',
@@ -52,7 +59,10 @@ const REQUIRED_FILES = [
 // the first is git-ignored, the second is unreferenced, and neither has any
 // reason to reach a consumer. Listing them here means a later change to the
 // `files` allowlist cannot publish them by accident.
-const FORBIDDEN_PREFIXES = ['scripts/__pycache__/','src/', 'tests/', 'node_modules/', '.git/', '.github/', 'docs/superpowers/', 'docs/issues/', 'docs/images/']
+const FORBIDDEN_PREFIXES = ['scripts/__pycache__/', 'tests/', 'node_modules/', '.git/', '.github/', 'docs/superpowers/', 'docs/issues/', 'docs/images/']
+// The local-search package export runs directly from these narrow source
+// directories. Other development source still belongs outside the artifact.
+const hostAsset = /^src\/(?:host\/[\w-]+(?:\.d\.ts|\.js)|shared\/local-setup\.ts|runtime\/(?:[\w-]+\.js|weights\.json|ocr\/(?:NOTICE\.md|document_ocr\/\w+\.py|runtime-support\/(?:[\w-]+\.(?:json|txt)|probe\.png))))$/
 const FORBIDDEN_FILES = ['lib/knowledge/ocr-final-handoff.mjs','lib/knowledge/ocr-replay-final.mjs','scripts/ocr-cuda-baseline.py','scripts/ocr-cuda-candidate.py','scripts/ocr-intel-baseline.py','scripts/ocr-intel-candidate.py','lib/knowledge/ocr-replay-baseline.mjs','lib/knowledge/ocr-replay-candidate.mjs','lib/knowledge/ocr-replay-pool.mjs','lib/knowledge/ocr-render-baseline.mjs','lib/knowledge/pdf-parse-baseline.mjs','lib/knowledge/ocr-png-bench.mjs','lib/knowledge/private-python-benchmark.mjs','lib/knowledge/embed-benchmark.mjs','lib/knowledge/embedding-benchmark.mjs','lib/knowledge/indexing-baseline.mjs','lib/knowledge/indexing-optimized.mjs','lib/knowledge/ocr-accelerated.mjs','lib/knowledge/ocr-baseline.mjs','lib/knowledge/ocr-optimized.mjs','lib/knowledge/ocr-process-baseline.mjs','lib/knowledge/release-validation.mjs','lib/knowledge/embed-worker.mjs', 'lib/knowledge/embed-worker.mjs.map', 'lib/knowledge/ocr-worker.mjs', 'lib/knowledge/ocr-worker.mjs.map']
 
 function executable(name) {
@@ -115,7 +125,7 @@ async function main() {
     const files = new Set((entry?.files ?? []).map(file => String(file.path).replaceAll('\\', '/')))
     for (const path of REQUIRED_FILES) if (!files.has(path)) errors.push(`packed artifact is missing ${path}`)
     for (const path of files) {
-      if (FORBIDDEN_PREFIXES.some(prefix => path.startsWith(prefix))) errors.push(`packed artifact exposes forbidden path ${path}`)
+      if (FORBIDDEN_PREFIXES.some(prefix => path.startsWith(prefix)) || (path.startsWith('src/') && !hostAsset.test(path))) errors.push(`packed artifact exposes forbidden path ${path}`)
       if (FORBIDDEN_FILES.includes(path)) errors.push(`packed artifact exposes obsolete runtime ${path}`)
       if (path.endsWith('.tgz')) errors.push(`packed artifact contains nested tarball ${path}`)
       // A real evaluation set is built from private study material, so only the

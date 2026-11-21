@@ -378,6 +378,8 @@ async function route(
   }
 
   if (segments[0] === 'local-setup') {
+    if (segments.length === 3 && segments[1] === 'bases' && (method === 'POST' || method === 'GET'))
+      return service.documentSetup(segments[2]!, method === 'POST')
     if (segments.length === 2 && segments[1] === 'vision' && method === 'GET') return service.setupVisionModels()
     if (segments.length === 1 && method === 'GET') return service.localSetup()
     if (segments.length === 1 && method === 'POST') return service.startLocalSetup()
