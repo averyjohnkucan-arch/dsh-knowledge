@@ -17,11 +17,12 @@ export async function visionCatalog(ctx) {
       return;
     }
     for (const model of group.value) {
-      if (model.inputModalities && !model.inputModalities.includes('image')) continue;
+      const acceptsImages = model.inputModalities?.includes('image');
       models.push({
         id: provider.id + '/' + model.id,
         name: (model.name || model.id) + ' · ' + (provider.name || provider.id),
-        verified: model.inputModalities?.includes('image') === true,
+        acceptsImages,
+        verified: acceptsImages === true,
       });
     }
   });

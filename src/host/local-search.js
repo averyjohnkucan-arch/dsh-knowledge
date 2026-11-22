@@ -182,7 +182,7 @@ export async function configure(ctx, patch, onReady) {
     const { visionCatalog } = await import('./vision.js');
     const { models } = await visionCatalog(ctx);
     for (const id of [patch.ocrModel, patch.descriptionModel].filter(Boolean)) {
-      if (!models.some(model => model.id === id)) throw new Error('Select a vision model registered in Harness.');
+      if (!models.some(model => model.id === id && model.acceptsImages !== false)) throw new Error('Select a vision model registered in Harness.');
     }
   }
   const { engine, store } = runtime();

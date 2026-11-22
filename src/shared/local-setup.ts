@@ -23,7 +23,7 @@ export interface LocalSetup {
 }
 
 export interface VisionCatalog {
-  models: Array<{ id: string; name: string; verified: boolean }>
+  models: Array<{ id: string; name: string; verified: boolean; acceptsImages?: boolean }>
   unavailable: string[]
 }
 

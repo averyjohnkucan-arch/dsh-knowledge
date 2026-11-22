@@ -88,3 +88,12 @@ it('runs photos and charts as separate passes and carries completion markers acr
   expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(false)
  }finally{caption.mockRestore()}
 })
+
+it('lets charts proceed while an enabled photo pass waits for its first model selection', async () => {
+  const { service, internal, doc, extract } = await fixture()
+  const config = { ...service.getConfigFor(doc.baseId), deferredPhotoCaptions: true, deferredPhotoCaptionModel: '' }
+  vi.spyOn(service, 'getConfigFor').mockReturnValue(config)
+  expect(await internal.enrichNextIdleChart(new AbortController().signal)).toBe(true)
+  expect(extract).toHaveBeenCalledOnce()
+  expect(internal.store.getDocument(doc.id).deferredPhotoCaptions).toBeUndefined()
+})

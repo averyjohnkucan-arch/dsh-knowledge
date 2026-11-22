@@ -28,6 +28,7 @@ export interface VisionCatalog {
         id: string;
         name: string;
         verified: boolean;
+        acceptsImages?: boolean;
     }>;
     unavailable: string[];
 }

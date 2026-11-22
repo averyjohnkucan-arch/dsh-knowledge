@@ -245,6 +245,15 @@ export type KnowledgeKey =
   | 'providerLocal'
   | 'noLocalModelsReady'
   | 'noOllamaModels'
+  | 'idlePhotoModel'
+  | 'managedCaptionModel'
+  | 'harnessModelUnlisted'
+  | 'harnessModelNoImages'
+  | 'harnessModelUnknownImages'
+  | 'harnessModelsLoading'
+  | 'harnessModelsEmpty'
+  | 'harnessModelsUnavailable'
+  | 'optionalPdfEnrichmentHint'
   | 'selectModelPlaceholder'
   | 'ollamaUnreachable'
   | 'embeddingSwitchWarning'
@@ -643,6 +652,15 @@ export const zh: Record<KnowledgeKey, string> = {
   localModelHint: '进程内推理（transformers.js），无需联网服务；首次使用需下载模型权重。模型为 Hugging Face 仓库 id，默认 onnx-community/Qwen3-Embedding-0.6B-ONNX',
   noLocalModelsReady: '暂无已下载的本地模型，请到「设置 → 本地模型」下载',
   noOllamaModels: '暂无已安装的 Ollama 模型，请在「设置 → 本地模型」拉取',
+  idlePhotoModel: "空闲时的照片描述模型",
+  managedCaptionModel: "Harness 图片描述模型",
+  harnessModelUnlisted: "已保存，当前未列出",
+  harnessModelNoImages: "不支持图片输入",
+  harnessModelUnknownImages: "图片支持情况未知",
+  harnessModelsLoading: "正在加载 Harness 模型…",
+  harnessModelsEmpty: "请先在 Harness 中注册模型。",
+  harnessModelsUnavailable: "无法从 {providers} 加载模型。请重新打开设置以重试。",
+  optionalPdfEnrichmentHint: "PDF 识别和向量检索均可独立使用。空闲 30 秒后，所选 Harness 模型可描述 PDF 内嵌照片，PP-Chart2Table 可提取图表数据。Markdown 文章会跳过这两步。",
   selectModelPlaceholder: '请选择模型',
   ollamaUnreachable: '无法连接 Ollama（检查地址或是否已启动）',
   embeddingSwitchWarning: '⚠ 切换嵌入模型会使本库已有向量全部失效，保存会被拒绝——请改用「重建知识库」以新模型重建（或先清空本库文档）',
@@ -1047,6 +1065,15 @@ export const en: Record<KnowledgeKey, string> = {
   localModelHint: 'In-process inference (transformers.js), no server needed; first use downloads the weights. Model = Hugging Face repo id, default onnx-community/Qwen3-Embedding-0.6B-ONNX',
   noLocalModelsReady: 'No downloaded local models — download one in Settings → Local Models',
   noOllamaModels: 'No installed Ollama models — pull one in Settings → Local Models',
+  idlePhotoModel: "Idle photo caption model",
+  managedCaptionModel: "Harness caption model",
+  harnessModelUnlisted: "Saved model, currently unlisted",
+  harnessModelNoImages: "No image input",
+  harnessModelUnknownImages: "Image support unreported",
+  harnessModelsLoading: "Loading Harness models…",
+  harnessModelsEmpty: "Register a model in Harness to choose it here.",
+  harnessModelsUnavailable: "Couldn’t load models from {providers}. Reopen settings to retry.",
+  optionalPdfEnrichmentHint: "Both passes are optional for PDF OCR and vector search. After 30 idle seconds, the selected Harness model describes embedded photos and PP-Chart2Table extracts chart data. Markdown articles skip both passes.",
   selectModelPlaceholder: 'Select a model',
   ollamaUnreachable: 'Cannot reach Ollama (check the address or whether it is running)',
   embeddingSwitchWarning: '⚠ Switching the embedding model invalidates this base\'s stored vectors, so the save will be refused — rebuild via \u201cRebuild base\u201d with the new model instead (or empty the base first)',

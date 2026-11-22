@@ -1,3 +1,8 @@
+## 1.3.2 — Harness model selection
+
+- Choose registered Harness models for idle PDF photo captions and for captions during import. The picker shows input support, reports unavailable providers and preserves saved selections.
+- Let chart extraction proceed when idle photo captioning is enabled and a model has yet to be selected.
+
 ## 1.3.1 — Clean uninstall
 
 - Add an authenticated action in Knowledge settings that removes the profile package and erases its local library, uploaded copies, generated Markdown, search index, setup preferences and managed downloads.

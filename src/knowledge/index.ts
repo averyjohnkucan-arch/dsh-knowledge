@@ -566,7 +566,9 @@ export class KnowledgeService extends Service {
       kind = phase
       marker = phase === 'photo' ? 'deferredPhotoCaptions' : 'deferredChartEnrichment'
       for (const base of store.listBases()) {
-        if (!this.getConfigFor(base.id)[marker] || base.embeddingBackfillPending) continue
+        const config = this.getConfigFor(base.id)
+        if (!config[marker] || base.embeddingBackfillPending) continue
+        if (phase === 'photo' && !config.deferredPhotoCaptionModel?.trim()) continue
         document = store.listDocuments(base.id, {includeRawText: false}).find(doc =>
           doc.sourceType === 'file' && /\.pdf$/i.test(doc.fileName ?? doc.title)
           && doc.processing && !doc.incomplete && !doc.embeddingError

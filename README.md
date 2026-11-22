@@ -2,6 +2,10 @@
 
 This branch targets DeepSeek Harness `0.2.2-rc.4` and Node.js 24.9 or newer.
 
+## v1.3.2 highlights — Harness model selection
+
+In **Base settings**, choose a registered Harness model from the dropdown for idle photo captions or for captioning during PDF import. Models that declare text-only input appear disabled. Both idle passes are optional for OvisOCR2, Markdown and vector search.
+
 ## v1.3.1 highlights — Clean uninstall
 
 In Harness **Settings → Local Models**, choose **Uninstall and delete all KBs** to permanently remove the plugin, local KBs, uploaded copies, search indexes, settings and managed downloads. Linked source folders and separately configured model caches stay on disk. [Removal and fresh install](docs/releases/v1.3.1.md)
@@ -115,7 +119,7 @@ Lexical retrieval works without downloading a model. Scanned-document OCR, local
 
 ```bash
 # Tarball from GitHub Releases or npm pack
-pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.3.1.tgz
+pnpm_config_ignore_scripts=true dsh plugin --profile <name> add ./dsh-knowledge-1.3.2.tgz
 
 # Local source directory; build it first
 dsh plugin --profile <name> add file:/path/to/dsh-knowledge

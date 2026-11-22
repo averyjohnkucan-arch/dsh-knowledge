@@ -70,8 +70,33 @@ describe('embedding settings controls', () => {
     tree.props.onMouseEnter(); tree = h.render('SettingHelp', props)
     expect(children(tree).some(n => n.props?.role === 'tooltip')).toBe(true)
   })
+  it('lists registered models, disables text-only choices and preserves an unlisted saved model', async () => {
+    const h = await harness('HarnessModelSelect.tsx')
+    const onChange = vi.fn()
+    const { visionCatalog } = await import('../src/host/local-search.js')
+    const catalog = await visionCatalog({ get: () => ({
+      listProviders: () => [{ id: 'local' }, { id: 'offline' }],
+      listModels: async (id: string) => {
+        if (id === 'offline') throw new Error('offline')
+        return [{ id: 'org/vision', inputModalities: ['text', 'image'] }, { id: 'text', inputModalities: ['text'] }, { id: 'unknown' }]
+      },
+    }) })
+    expect(catalog.unavailable).toEqual(['offline'])
+    const tree = h.render('HarnessModelSelect', { catalog, value: 'offline/saved', label: 'Caption model', empty: 'Choose',
+      onChange, t: (key: string) => key })
+    const select = children(tree).find(n => n.type === 'select')!
+    expect(select.props.value).toBe('offline/saved')
+    const options = new Map(children(select).filter(n => n.type === 'option').map(n => [n.props.value, n.props]))
+    expect([...options.keys()].sort()).toEqual(['', 'local/org/vision', 'local/text', 'local/unknown', 'offline/saved'])
+    expect(options.get('local/text').disabled).toBe(true)
+    expect(options.get('local/unknown').disabled).toBe(false)
+    expect(options.get('local/org/vision').disabled).toBe(false)
+    select.props.onChange({ target: { value: 'local/org/vision' } })
+    expect(onChange).toHaveBeenCalledWith('local/org/vision')
+  })
   it('saves dimensions, batch size and result count, and resets width on a model switch', async () => {
     const h = await harness('rag-config.tsx', {
+      './HarnessModelSelect.js': { useHarnessModels: () => undefined },
       '../../knowledge/embedding-dimensions.js': dimensions,
       '../../knowledge/qwen-embedding-variants.js': variants,
       './settings-help.js': { SETTINGS_HELP }, './NumberSlider.js': { NumberSlider: 'NumberSlider' },

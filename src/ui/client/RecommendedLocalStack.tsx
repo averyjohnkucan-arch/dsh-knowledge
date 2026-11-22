@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { LocalSetup, SearchPreferences, VisionCatalog } from '../../shared/local-setup.js'
+import type { LocalSetup, SearchPreferences } from '../../shared/local-setup.js'
 import type { KnowledgeApi } from './api.js'
+import { HarnessModelSelect, useHarnessModels } from './HarnessModelSelect.js'
 import { C, style } from './theme.js'
 
 export const RECOMMENDED_LOCAL = {
@@ -10,7 +11,7 @@ export const RECOMMENDED_LOCAL = {
 
 export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
   const [state, setState] = useState<LocalSetup>()
-  const [catalog, setCatalog] = useState<VisionCatalog>({ models: [], unavailable: [] })
+  const catalog = useHarnessModels(api)
   const [active, setActive] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -19,7 +20,6 @@ export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
     const fail = (e: Error) => { if (live) setError(e.message) }
     void api.localSetup().then(value => { if (live) setState(value) }).catch(fail)
     void api.getConfig().then(config => { if (live) setActive(config.embeddingModel === RECOMMENDED_LOCAL.embeddingModel) }).catch(fail)
-    void api.setupVisionModels().then(value => { if (live) setCatalog(value) }).catch(fail)
     return () => { live = false }
   }, [api])
   useEffect(() => {
@@ -64,14 +64,10 @@ export function RecommendedLocalStack({ api }: { api: KnowledgeApi }) {
     {settings && <>
       {(['ocrModel', 'descriptionModel'] as const).map(key => <label key={key} style={style.field}>
         <span style={style.label}>{key === 'ocrModel' ? 'OCR model' : 'Image and chart descriptions'}</span>
-        <select style={style.input} disabled={busy} value={settings[key]} onChange={e => void update({ [key]: e.target.value })}>
-          <option value="">{key === 'ocrModel' ? 'Built-in text extraction' : 'Off'}</option>
-          {settings[key] && !catalog.models.some(m => m.id === settings[key]) && <option value={settings[key]}>{settings[key]} (unavailable)</option>}
-          {catalog.models.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-        </select>
+        <HarnessModelSelect catalog={catalog} label={key === 'ocrModel' ? 'OCR model' : 'Image and chart descriptions'}
+          empty={key === 'ocrModel' ? 'Built-in text extraction' : 'Off'} value={settings[key]} disabled={busy}
+          onChange={id => void update({ [key]: id })} />
       </label>)}
-      {catalog.models.length === 0 && <p style={style.hint}>Register a vision model in Harness to use it here.</p>}
-      {catalog.unavailable.length > 0 && <p style={style.hint}>Couldn’t load models from {catalog.unavailable.join(', ')}.</p>}
       <details><summary style={{cursor:'pointer'}}>Hardware and scheduling</summary>
         <fieldset disabled={busy} style={{border:0, padding:'10px 0'}}>
           <label style={style.field}><span style={style.label}>Embedding device</span>

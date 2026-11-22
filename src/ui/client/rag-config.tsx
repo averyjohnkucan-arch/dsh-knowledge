@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { KnowledgeApi } from './api.js'
 import type { BaseConfig, BaseSummary, EmbeddingProvider, KnowledgeConfig, LocalModelStatus, ModelSuggestions } from './api.js'
 import { C, style } from './theme.js'
+import { HarnessModelSelect, useHarnessModels } from './HarnessModelSelect.js'
 import { DocumentSetupSection } from './DocumentSetupSection.js'
 import { RECOMMENDED_LOCAL } from './RecommendedLocalStack.js'
 import { IconRefresh } from './icons.js'
@@ -35,6 +36,7 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
     ...globalConfig,
     ...(base.config ?? {}),
   }))
+  const harnessModels = useHarnessModels(api, !!values.deferredPhotoCaptions || values.imageCaptionProvider === 'dsh')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [modelListRevision, setModelListRevision] = useState(0)
   const [localStatus, setLocalStatus] = useState<LocalModelStatus | null>(null)
@@ -120,14 +122,14 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
       const names = models.map(m => m.name)
       setOllamaCaptionModels(names)
       setOllamaCaptionUnreachable(false)
-      autoFixOllamaTag('caption', values.imageCaptionModel, names)
+      if (values.imageCaptionProvider === 'ollama') autoFixOllamaTag('caption', values.imageCaptionModel, names)
     }).catch(() => {
       if (cancelled) return
       setOllamaCaptionModels([])
       setOllamaCaptionUnreachable(true)
     })
     return () => { cancelled = true }
-  }, [api, values.imageCaptionBaseUrl])
+  }, [api, values.imageCaptionBaseUrl, values.imageCaptionProvider])
 
   const listId = (kind: 'embedding' | 'local' | 'rerank'): string => `kb-${kind}-models-${base.id}`
 
@@ -362,9 +364,11 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
           {/* Optional chart and image processing */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 16 }}>
             <FieldRow label="Caption photos later, only when idle"><Switch checked={values.deferredPhotoCaptions === true} onChange={v => patch({deferredPhotoCaptions: v})} /></FieldRow>
-            {values.deferredPhotoCaptions && <input style={style.input} aria-label="Idle photo caption model" placeholder="provider/model (managed vision)" value={values.deferredPhotoCaptionModel ?? ''} onChange={e => patch({deferredPhotoCaptionModel: e.target.value})} />}
+            {values.deferredPhotoCaptions && <HarnessModelSelect catalog={harnessModels} t={t} label={t('idlePhotoModel')}
+              empty={t('selectModelPlaceholder')} value={values.deferredPhotoCaptionModel ?? ''}
+              onChange={id => patch({ deferredPhotoCaptionModel: id })} />}
             <FieldRow label="Parse charts later, only when idle"><Switch checked={values.deferredChartEnrichment === true} onChange={v => patch({deferredChartEnrichment: v})} /></FieldRow>
-            <p style={style.hint}>Text and embeddings finish first. After 30 seconds without foreground inference or indexing work, photo descriptions run first, then chart/table data. Each pass merges separately into saved documents. Chat activity pauses this pass; existing search results remain available.</p>
+            <p style={style.hint}>{t('optionalPdfEnrichmentHint')}</p>
             <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>{t('imageCaptionHint')}<SettingHelp label="Image and table captioning" text={SETTINGS_HELP.imageCaption} /></div>
             <select
               style={style.input}
@@ -413,10 +417,14 @@ export function RagConfigPanel(props: PanelProps): JSX.Element {
                     )}
                     {ollamaCaptionModels.map(name => <option key={name} value={name}>{name}</option>)}
                   </select>
+                ) : values.imageCaptionProvider === 'dsh' ? (
+                  <HarnessModelSelect catalog={harnessModels} t={t} label={t('managedCaptionModel')}
+                    empty={t('selectModelPlaceholder')} value={values.imageCaptionModel}
+                    onChange={id => patch({ imageCaptionModel: id })} />
                 ) : (
                   <input
                     style={style.input}
-                    placeholder={values.imageCaptionProvider === 'dsh' ? 'provider/model (vision with reasoning off)' : t('visionModelPlaceholder')}
+                    placeholder={t('visionModelPlaceholder')}
                     value={values.imageCaptionModel}
                     onChange={(e) => patch({ imageCaptionModel: e.target.value })}
                   />
